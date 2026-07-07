@@ -65,6 +65,7 @@ export function PullRequestItem({ pullRequest, onUpdatePullRequest }) {
           </a>
           <p className="mt-1 truncate text-xs text-muted-foreground">
             {providerLabels[pullRequest.provider] || pullRequest.provider} · {pullRequest.repoUrl}
+            {pullRequest.externalState ? ` · ${pullRequest.externalState}` : ""}
           </p>
         </div>
         <SelectControl

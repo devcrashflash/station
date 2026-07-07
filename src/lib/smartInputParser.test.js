@@ -39,6 +39,15 @@ test("parses GitHub pull request links", () => {
   assert.equal(parsed.repoUrl, "https://github.com/acme/app");
 });
 
+test("parses GitHub issue links", () => {
+  const parsed = parseSmartInput("https://github.com/acme/app/issues/43");
+
+  assert.equal(parsed.kind, "github_issue");
+  assert.equal(parsed.provider, "github");
+  assert.equal(parsed.externalId, "acme/app#43");
+  assert.equal(parsed.repoUrl, "https://github.com/acme/app");
+});
+
 test("parses GitLab merge request links", () => {
   const parsed = parseSmartInput("https://gitlab.example.com/group/app/-/merge_requests/17");
 
@@ -46,4 +55,31 @@ test("parses GitLab merge request links", () => {
   assert.equal(parsed.provider, "gitlab");
   assert.equal(parsed.externalId, "group/app!17");
   assert.equal(parsed.repoUrl, "https://gitlab.example.com/group/app");
+});
+
+test("parses GitLab issue links", () => {
+  const parsed = parseSmartInput("https://gitlab.example.com/group/app/-/issues/18");
+
+  assert.equal(parsed.kind, "gitlab_issue");
+  assert.equal(parsed.provider, "gitlab");
+  assert.equal(parsed.externalId, "group/app!18");
+  assert.equal(parsed.repoUrl, "https://gitlab.example.com/group/app");
+});
+
+test("parses GitLab.com merge request links", () => {
+  const parsed = parseSmartInput("https://gitlab.com/group/subgroup/app/-/merge_requests/19");
+
+  assert.equal(parsed.kind, "merge_request");
+  assert.equal(parsed.provider, "gitlab");
+  assert.equal(parsed.externalId, "group/subgroup/app!19");
+  assert.equal(parsed.repoUrl, "https://gitlab.com/group/subgroup/app");
+});
+
+test("parses generic urls as external task links", () => {
+  const parsed = parseSmartInput("https://example.com/docs/auth-flow");
+
+  assert.equal(parsed.kind, "url");
+  assert.equal(parsed.provider, null);
+  assert.equal(parsed.externalId, "https://example.com/docs/auth-flow");
+  assert.equal(parsed.title, "auth flow");
 });

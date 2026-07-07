@@ -1,7 +1,7 @@
 import { Plus, Settings, Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { iconMap, FolderKanban } from "@/features/projects/projectIcons";
+import { getProjectInitial, normalizeProjectColor } from "@/lib/projectAvatar";
 import { cn } from "@/lib/utils";
 
 export function ProjectRail({
@@ -27,21 +27,21 @@ export function ProjectRail({
 
       <div className="flex flex-1 flex-col items-center gap-3 overflow-y-auto px-2">
         {projects.map((project) => {
-          const Icon = iconMap[project.icon] || FolderKanban;
           return (
             <Button
               key={project.id}
               className={cn(
-                "size-12 rounded-lg border bg-background text-sidebar-foreground shadow-sm",
-                selectedProjectId === project.id && "border-primary bg-primary text-primary-foreground",
+                "size-12 rounded-lg border text-sm font-semibold text-white shadow-sm",
+                selectedProjectId === project.id && "border-primary ring-2 ring-ring ring-offset-2",
               )}
+              style={{ backgroundColor: normalizeProjectColor(project.color) }}
               size="icon"
               variant="ghost"
               type="button"
               title={project.name}
               onClick={() => onSelectProject(project.id)}
             >
-              <Icon />
+              {getProjectInitial(project.name)}
             </Button>
           );
         })}

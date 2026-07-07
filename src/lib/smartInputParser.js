@@ -58,6 +58,19 @@ export function parseSmartInput(value) {
     };
   }
 
+  const githubIssue = parsedUrl.pathname.match(/^\/([^/]+)\/([^/]+)\/issues\/(\d+)/);
+  if (parsedUrl.hostname.endsWith("github.com") && githubIssue) {
+    const [, owner, repo, number] = githubIssue;
+    return {
+      kind: "github_issue",
+      provider: "github",
+      externalId: `${owner}/${repo}#${number}`,
+      url,
+      repoUrl: `${parsedUrl.origin}/${owner}/${repo}`,
+      title: `${owner}/${repo} issue #${number}`,
+    };
+  }
+
   const gitlabMergeRequest = parsedUrl.pathname.match(/^\/(.+)\/-\/merge_requests\/(\d+)/);
   if (gitlabMergeRequest) {
     const [, repoPath, number] = gitlabMergeRequest;
@@ -68,6 +81,19 @@ export function parseSmartInput(value) {
       url,
       repoUrl: `${parsedUrl.origin}/${repoPath}`,
       title: `${repoPath} MR !${number}`,
+    };
+  }
+
+  const gitlabIssue = parsedUrl.pathname.match(/^\/(.+)\/-\/issues\/(\d+)/);
+  if (gitlabIssue) {
+    const [, repoPath, number] = gitlabIssue;
+    return {
+      kind: "gitlab_issue",
+      provider: "gitlab",
+      externalId: `${repoPath}!${number}`,
+      url,
+      repoUrl: `${parsedUrl.origin}/${repoPath}`,
+      title: `${repoPath} issue #${number}`,
     };
   }
 

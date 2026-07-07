@@ -1,20 +1,15 @@
 import { useState } from "react";
 
 import { Modal } from "@/components/common/Modal";
-import { SelectControl } from "@/components/common/SelectControl";
 import { Button } from "@/components/ui/button";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { iconMap } from "@/features/projects/projectIcons";
-
-const iconOptions = Object.keys(iconMap).map((iconName) => ({
-  value: iconName,
-  label: iconName,
-}));
+import { ProjectColorPicker } from "@/features/projects/ProjectColorPicker";
+import { DEFAULT_PROJECT_COLOR } from "@/lib/projectAvatar";
 
 export function ProjectDialog({ onClose, onCreate }) {
   const [name, setName] = useState("");
-  const [icon, setIcon] = useState("FolderKanban");
+  const [color, setColor] = useState(DEFAULT_PROJECT_COLOR);
 
   return (
     <Modal title="Add project" onClose={onClose}>
@@ -22,7 +17,7 @@ export function ProjectDialog({ onClose, onCreate }) {
         className="grid gap-3"
         onSubmit={(event) => {
           event.preventDefault();
-          onCreate(name, icon);
+          onCreate(name, color);
         }}
       >
         <Field>
@@ -30,8 +25,8 @@ export function ProjectDialog({ onClose, onCreate }) {
           <Input value={name} onChange={(event) => setName(event.target.value)} required />
         </Field>
         <Field>
-          <FieldLabel>Icon</FieldLabel>
-          <SelectControl value={icon} onValueChange={setIcon} options={iconOptions} />
+          <FieldLabel>Color</FieldLabel>
+          <ProjectColorPicker value={color} onChange={setColor} />
         </Field>
         <Button type="submit">Create project</Button>
       </form>

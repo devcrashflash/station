@@ -13,7 +13,7 @@ export function TaskList({ tasks, onOpenTask, onUpdateTask, readonly = false }) 
   return (
     <div className="flex flex-col gap-2">
       {tasks.map((task) => (
-        <div key={task.id} className="flex items-start gap-3 rounded-md border bg-card p-3">
+        <div key={task.id} className="flex min-w-0 items-start gap-3 rounded-md border bg-card p-3">
           <Button
             className={cn(
               "mt-0.5 size-auto rounded-full p-0 text-muted-foreground hover:bg-transparent",
@@ -39,16 +39,16 @@ export function TaskList({ tasks, onOpenTask, onUpdateTask, readonly = false }) 
             onClick={() => onOpenTask?.(task)}
             title="Open task detail"
           >
-            <p className={cn("font-medium", task.status === "done" && "text-muted-foreground line-through")}>
+            <p className={cn("truncate font-medium", task.status === "done" && "text-muted-foreground line-through")}>
               {task.title}
             </p>
             {task.sourceUrl && (
-              <span className="mt-1 block truncate text-xs text-blue-700">
+              <span className="mt-1 block min-w-0 max-w-full truncate text-xs text-blue-700">
                 {task.sourceUrl}
               </span>
             )}
           </button>
-          <Badge variant="secondary">{task.status}</Badge>
+          <Badge className="shrink-0" variant="secondary">{task.status}</Badge>
         </div>
       ))}
     </div>

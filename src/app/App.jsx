@@ -2,13 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 
 import "@/App.css";
 import { Modal } from "@/components/common/Modal";
-import { PullRequestRoutingDialog } from "@/features/pull-requests/PullRequestRoutingDialog";
 import { ProjectDialog } from "@/features/projects/ProjectDialog";
 import { ProjectPickerDialog } from "@/features/projects/ProjectPickerDialog";
 import { SettingsDialog } from "@/features/settings/SettingsDialog";
 import { SmartInput } from "@/features/smart-input/SmartInput";
-import { api } from "@/lib/api";
-import { isPullRequestInput, parseSmartInput } from "@/lib/smartInputParser";
+import { api, toParsedPayload } from "@/lib/api";
+import { DEFAULT_PROJECT_COLOR } from "@/lib/projectAvatar";
+import { parseSmartInput } from "@/lib/smartInputParser";
 import { InboxView } from "@/views/inbox/InboxView";
 import { ProjectWorkspaceView } from "@/views/projects/ProjectWorkspaceView";
 import { TaskDetailView } from "@/views/tasks/TaskDetailView";
@@ -31,10 +31,9 @@ function App() {
   const [tasks, setTasks] = useState([]);
   const [resources, setResources] = useState([]);
   const [connections, setConnections] = useState([]);
-  const [pullRequests, setPullRequests] = useState([]);
+  const [projectConnectionIds, setProjectConnectionIds] = useState([]);
   const [selectedTask, setSelectedTask] = useState(null);
   const [pendingInput, setPendingInput] = useState(null);
-  const [pendingPullRequest, setPendingPullRequest] = useState(null);
   const [showProjectForm, setShowProjectForm] = useState(false);
   const [showSmartInboxOverlay, setShowSmartInboxOverlay] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -70,7 +69,7 @@ function App() {
       refreshProject(selectedProjectId).catch(reportError);
     } else {
       setResources([]);
-      setPullRequests([]);
+      setProjectConnectionIds([]);
       api.listTasks({ projectId: null }).then(setTasks).catch(reportError);
     }
   }, [selectedProjectId]);
@@ -87,18 +86,18 @@ function App() {
 
   async function refreshProject(projectId = selectedProjectId) {
     if (!projectId) return;
-    const [taskList, resourceList, pullRequestList] = await Promise.all([
+    const [taskList, resourceList, connectionIds] = await Promise.all([
       api.listTasks({ projectId }),
       api.listProjectResources({ projectId }),
-      api.listPullRequests({ projectId }),
+      api.listProjectConnections({ projectId }),
     ]);
     setTasks(taskList);
     setResources(resourceList);
-    setPullRequests(pullRequestList);
+    setProjectConnectionIds(connectionIds);
   }
 
-  async function createProject(name, icon = "FolderKanban") {
-    const project = await api.createProject({ name, icon });
+  async function createProject(name, color = DEFAULT_PROJECT_COLOR) {
+    const project = await api.createProject({ name, color });
     setProjects((current) => upsertProject(current, project));
     setSelectedProjectId(project.id);
     setShowProjectForm(false);
@@ -107,70 +106,27 @@ function App() {
 
   async function submitSmartInput(input, projectId = null) {
     const parsed = parseSmartInput(input);
-    if (isPullRequestInput(parsed)) {
-      setPendingPullRequest({
-        input,
-        parsed,
-        projectId: projectId || selectedProjectId || null,
-      });
-      return;
-    }
+    const targetProjectId = projectId || selectedProjectId || null;
 
-    const result = await api.createTaskFromInput({ input, projectId });
+    const result = await api.createTaskFromInput({
+      input,
+      parsed: toParsedPayload(parsed),
+      projectId: targetProjectId,
+    });
 
     if (result.projectRequired) {
       setPendingInput(input);
       return;
     }
 
-    setNotice(result.created ? "Task created." : "Existing task opened.");
-    if (projectId || result.task?.projectId) {
-      setSelectedProjectId(result.task.projectId);
-      await refreshProject(result.task.projectId);
+    const resultProjectId = result.task?.projectId || result.resource?.projectId || targetProjectId;
+    setNotice(result.notice || (result.created ? "Task created." : "Existing task opened."));
+    if (resultProjectId) {
+      setSelectedProjectId(resultProjectId);
+      await refreshProject(resultProjectId);
     } else {
       setTasks(await api.listTasks({ projectId: null }));
     }
-  }
-
-  async function routePullRequest({ projectId, taskMode, taskId, taskTitle, linkTask }) {
-    if (!pendingPullRequest) return;
-    const { parsed } = pendingPullRequest;
-    let linkedTaskId = taskId;
-
-    if (taskMode === "new") {
-      const taskResult = await api.createTaskFromInput({
-        input: taskTitle?.trim() || parsed.title,
-        projectId,
-      });
-      linkedTaskId = taskResult.task?.id || null;
-    }
-
-    await api.savePullRequest({
-      id: null,
-      projectId,
-      provider: parsed.provider,
-      repoUrl: parsed.repoUrl,
-      prUrl: parsed.url,
-      title: parsed.title,
-      status: "reviewing",
-      reviewNotes: "",
-      testState: JSON.stringify({ checkout: false, review: false, tests: false }),
-    });
-
-    if (linkTask && linkedTaskId) {
-      await api.linkTaskResource({
-        taskId: linkedTaskId,
-        provider: parsed.provider,
-        kind: parsed.kind,
-        externalId: parsed.externalId,
-        url: parsed.url,
-      });
-    }
-
-    setPendingPullRequest(null);
-    setSelectedProjectId(projectId);
-    setNotice(linkedTaskId ? "Pull request tracked and linked." : "Pull request tracked.");
-    await refreshProject(projectId);
   }
 
   async function routePendingInput(projectId) {
@@ -228,7 +184,21 @@ function App() {
         <TaskDetailView
           task={selectedTask}
           project={selectedTaskProject}
+          onRefreshExternalDetails={async (taskId) => {
+            const result = await api.refreshTaskExternalDetails({ taskId });
+            setSelectedTask((current) => (current?.id === result.task.id ? result.task : current));
+            setTasks((current) => current.map((task) => (task.id === result.task.id ? result.task : task)));
+            if (result.notice && !result.connectionRequired) {
+              setNotice(result.notice);
+            }
+            return result;
+          }}
           onLoadLinks={(taskId) => api.listTaskLinks({ taskId })}
+          onLoadRelations={(taskId) => api.listTaskRelations({ taskId })}
+          onSaveRelation={async (payload) => api.saveTaskRelation(payload)}
+          onDeleteRelation={async (id) => api.deleteTaskRelation({ id })}
+          onLoadProjectTasks={(projectId) => api.listTasks({ projectId })}
+          onOpenTask={openTask}
           onSave={async (payload) => {
             const task = await api.updateTask(payload);
             setSelectedTask(task);
@@ -244,12 +214,20 @@ function App() {
           project={selectedProject}
           tasks={tasks}
           resources={resources}
-          pullRequests={pullRequests}
           connections={connections}
+          projectConnectionIds={projectConnectionIds}
           onRefresh={() => refreshProject(selectedProject.id).catch(reportError)}
           onUpdateProject={async (payload) => {
             const project = await api.updateProject(payload);
             setProjects((current) => upsertProject(current, project));
+          }}
+          onUpdateProjectConnections={async (connectionIds) => {
+            const updated = await api.setProjectConnections({
+              projectId: selectedProject.id,
+              connectionIds,
+            });
+            setProjectConnectionIds(updated);
+            await refreshProject(selectedProject.id);
           }}
           onConnectResource={async (payload) => {
             await api.connectResource(payload);
@@ -265,10 +243,6 @@ function App() {
             await refreshProject(selectedProject.id);
           }}
           onOpenTask={openTask}
-          onUpdatePullRequest={async (payload) => {
-            await api.updatePullRequestReviewState(payload);
-            await refreshProject(selectedProject.id);
-          }}
         />
       ) : (
         <InboxView
@@ -281,7 +255,7 @@ function App() {
       {showProjectForm && (
         <ProjectDialog
           onClose={() => setShowProjectForm(false)}
-          onCreate={(name, icon) => createProject(name, icon).catch(reportError)}
+          onCreate={(name, color) => createProject(name, color).catch(reportError)}
         />
       )}
 
@@ -295,17 +269,6 @@ function App() {
             const project = await createProject(name);
             await routePendingInput(project.id);
           }}
-        />
-      )}
-
-      {pendingPullRequest && (
-        <PullRequestRoutingDialog
-          pending={pendingPullRequest}
-          projects={projects}
-          onClose={() => setPendingPullRequest(null)}
-          onCreateProject={createProject}
-          onLoadTasks={(projectId) => api.listTasks({ projectId })}
-          onRoute={(payload) => routePullRequest(payload).catch(reportError)}
         />
       )}
 
@@ -328,10 +291,31 @@ function App() {
           onSave={async (payload) => {
             await api.saveConnection(payload);
             setConnections(await api.listConnections());
+            setNotice(payload.id ? "Connection updated." : "Connection saved.");
+            if (selectedProjectId) {
+              setProjectConnectionIds(await api.listProjectConnections({ projectId: selectedProjectId }));
+            }
           }}
           onDelete={async (id) => {
             await api.deleteConnection({ id });
             setConnections(await api.listConnections());
+            if (selectedProjectId) {
+              setProjectConnectionIds(await api.listProjectConnections({ projectId: selectedProjectId }));
+            }
+          }}
+          onTest={async (id) => {
+            try {
+              const result = await api.testConnection({ id });
+              setNotice(result.message);
+              return result;
+            } catch (error) {
+              reportError(error);
+              return {
+                ok: false,
+                message: error?.message || String(error),
+                accountName: null,
+              };
+            }
           }}
         />
       )}
