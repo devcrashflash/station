@@ -4,6 +4,10 @@ import { ClipboardList } from "lucide-react";
 import { Panel } from "@/components/common/Panel";
 import { Button } from "@/components/ui/button";
 import {
+  LocalResourcesPanel,
+  ProjectLocalResourcesDialog,
+} from "@/features/resources/LocalResourcesPanel";
+import {
   ProjectConnectionsDialog,
   ProjectEditDialog,
   ProjectSettingsPanel,
@@ -15,6 +19,7 @@ export function ProjectWorkspaceView({
   project,
   tasks,
   resources,
+  localResources,
   connections,
   projectConnectionIds,
   onRefresh,
@@ -22,6 +27,9 @@ export function ProjectWorkspaceView({
   onUpdateProjectConnections,
   onConnectResource,
   onDisconnectResource,
+  onChooseLocalResourceDirectory,
+  onSaveLocalResource,
+  onDeleteLocalResource,
   onUpdateTask,
   onOpenTask,
 }) {
@@ -48,6 +56,10 @@ export function ProjectWorkspaceView({
             resources={resources}
             connections={connections}
             onManageResources={() => setActiveOverlay("resources")}
+          />
+          <LocalResourcesPanel
+            localResources={localResources}
+            onManageLocalResources={() => setActiveOverlay("local-resources")}
           />
           <Button type="button" variant="outline" onClick={onRefresh}>
             Refresh project
@@ -87,6 +99,17 @@ export function ProjectWorkspaceView({
           onClose={() => setActiveOverlay(null)}
           onConnectResource={onConnectResource}
           onDisconnectResource={onDisconnectResource}
+        />
+      )}
+
+      {activeOverlay === "local-resources" && (
+        <ProjectLocalResourcesDialog
+          project={project}
+          localResources={localResources}
+          onClose={() => setActiveOverlay(null)}
+          onChooseDirectory={onChooseLocalResourceDirectory}
+          onSaveLocalResource={onSaveLocalResource}
+          onDeleteLocalResource={onDeleteLocalResource}
         />
       )}
     </>

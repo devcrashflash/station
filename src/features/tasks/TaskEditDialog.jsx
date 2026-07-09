@@ -2,10 +2,12 @@ import { useEffect, useState } from "react";
 
 import { Modal } from "@/components/common/Modal";
 import { SelectControl } from "@/components/common/SelectControl";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { isProviderBackedTask } from "@/lib/taskStatus";
 
 const statusOptions = [
   { value: "open", label: "Open" },
@@ -16,6 +18,7 @@ export function TaskEditDialog({ task, onClose, onSave }) {
   const [title, setTitle] = useState(task.title);
   const [body, setBody] = useState(task.body);
   const [status, setStatus] = useState(task.status);
+  const isProviderBacked = isProviderBackedTask(task);
 
   useEffect(() => {
     setTitle(task.title);
@@ -25,12 +28,17 @@ export function TaskEditDialog({ task, onClose, onSave }) {
 
   async function submit(event) {
     event.preventDefault();
-    await onSave({
+    const payload = {
       id: task.id,
       title,
       body,
-      status,
-    });
+    };
+
+    if (!isProviderBacked) {
+      payload.status = status;
+    }
+
+    await onSave(payload);
   }
 
   return (
@@ -41,13 +49,20 @@ export function TaskEditDialog({ task, onClose, onSave }) {
           <Input value={title} onChange={(event) => setTitle(event.target.value)} />
         </Field>
 
-        <Field>
-          <FieldLabel>Status</FieldLabel>
-          <SelectControl value={status} onValueChange={setStatus} options={statusOptions} />
-        </Field>
+        {isProviderBacked ? (
+          <Field>
+            <FieldLabel>Status</FieldLabel>
+            <Badge className="w-fit" variant="secondary">{task.status}</Badge>
+          </Field>
+        ) : (
+          <Field>
+            <FieldLabel>Status</FieldLabel>
+            <SelectControl value={status} onValueChange={setStatus} options={statusOptions} />
+          </Field>
+        )}
 
         <Field>
-          <FieldLabel>Notes</FieldLabel>
+          <FieldLabel>Description</FieldLabel>
           <Textarea
             className="min-h-32 resize-y"
             value={body}

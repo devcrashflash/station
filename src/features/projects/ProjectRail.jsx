@@ -13,9 +13,9 @@ export function ProjectRail({
   onShowSettings,
 }) {
   return (
-    <aside className="flex w-20 shrink-0 flex-col items-center border-r bg-sidebar py-4">
+    <aside className="flex h-full w-20 shrink-0 flex-col items-center overflow-hidden border-r bg-sidebar py-4">
       <Button
-        className={cn("mb-4", !selectedProjectId && "bg-sidebar-accent")}
+        className={cn("mb-4 shrink-0", !selectedProjectId && "bg-sidebar-accent")}
         size="icon"
         variant="ghost"
         type="button"
@@ -25,14 +25,18 @@ export function ProjectRail({
         <Sparkles />
       </Button>
 
-      <div className="flex flex-1 flex-col items-center gap-3 overflow-y-auto px-2">
+      <div className="flex min-h-0 flex-1 flex-col items-center gap-3 overflow-y-auto px-3 py-1">
         {projects.map((project) => {
+          const isSelected = selectedProjectId === project.id;
+
           return (
             <Button
               key={project.id}
               className={cn(
-                "size-12 rounded-lg border text-sm font-semibold text-white shadow-sm",
-                selectedProjectId === project.id && "border-primary ring-2 ring-ring ring-offset-2",
+                "size-12 rounded-lg border-2 border-transparent p-0 text-sm font-semibold text-white shadow-sm transition-[border-color,opacity] focus-visible:ring-0 focus-visible:ring-offset-0",
+                isSelected
+                  ? "border-white/80 opacity-100 outline outline-2 outline-offset-2 outline-ring"
+                  : "opacity-55 hover:opacity-90 focus-visible:opacity-100",
               )}
               style={{ backgroundColor: normalizeProjectColor(project.color) }}
               size="icon"
@@ -59,7 +63,7 @@ export function ProjectRail({
       </div>
 
       <Button
-        className="mt-4"
+        className="mt-4 shrink-0"
         size="icon"
         variant="ghost"
         type="button"

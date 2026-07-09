@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { normalizeProjectColor } from "./projectAvatar.js";
 import { parseSmartInput } from "./smartInputParser.js";
 
@@ -9,6 +10,7 @@ const defaultState = {
   connections: [],
   projectConnections: {},
   resources: [],
+  localResources: [],
   tasks: [],
   taskLinks: [],
   taskRelations: [],
@@ -24,10 +26,27 @@ export const api = {
     call("list_project_resources", payload, () => local.listProjectResources(payload)),
   connectResource: (payload) => call("connect_resource", { input: payload }, () => local.connectResource(payload)),
   disconnectResource: (payload) => call("disconnect_resource", payload, () => local.disconnectResource(payload)),
+  listLocalResources: (payload) => call("list_local_resources", payload, () => local.listLocalResources(payload)),
+  saveLocalResource: (payload) =>
+    call("save_local_resource", { input: payload }, () => local.saveLocalResource(payload)),
+  deleteLocalResource: (payload) => call("delete_local_resource", payload, () => local.deleteLocalResource(payload)),
+  checkoutPullRequestForReview: (payload) =>
+    call("checkout_pull_request_for_review", payload, () => local.checkoutPullRequestForReview(payload)),
+  loadReviewDiff: (payload) => call("load_review_diff", payload, () => local.loadReviewDiff(payload)),
+  loadReviewDiffFile: (payload) =>
+    call("load_review_diff_file", payload, () => local.loadReviewDiffFile(payload)),
+  chooseLocalResourceDirectory: async () => {
+    if (typeof window === "undefined" || !window.__TAURI_INTERNALS__) {
+      throw new Error("Choosing local resource directories requires the desktop app.");
+    }
+    const selected = await open({ directory: true, multiple: false });
+    return typeof selected === "string" ? selected : null;
+  },
   createTaskFromInput: (payload) =>
     call("create_task_from_input", payload, () => local.createTaskFromInput(payload)),
   listTasks: (payload) => call("list_tasks", payload, () => local.listTasks(payload)),
   updateTask: (payload) => call("update_task", payload, () => local.updateTask(payload)),
+  deleteTask: (payload) => call("delete_task", payload, () => local.deleteTask(payload)),
   linkTaskResource: (payload) => call("link_task_resource", payload, () => local.linkTaskResource(payload)),
   listTaskLinks: (payload) => call("list_task_links", payload, () => local.listTaskLinks(payload)),
   refreshTaskExternalDetails: (payload) =>
@@ -118,7 +137,7 @@ export function selectBestConnection(connections, enabledConnectionIds, parsed) 
 }
 
 export function validateConnectionForTest(connection) {
-  if (!connection?.baseUrl?.trim()) return "Base URL is required.";
+  if (connection?.provider !== "trello" && !connection?.baseUrl?.trim()) return "Base URL is required.";
   if (!connection?.token?.trim()) return "Token is required.";
   if (connection.provider === "trello" && !connection.apiKey?.trim()) {
     return "Trello API key is required.";
@@ -129,7 +148,8 @@ export function validateConnectionForTest(connection) {
 function normalizeConnectionInput(input) {
   return {
     ...input,
-    baseUrl: normalizeBaseUrl(input.baseUrl),
+    apiKey: input.provider === "trello" ? input.apiKey : null,
+    baseUrl: input.provider === "trello" ? "https://api.trello.com" : normalizeBaseUrl(input.baseUrl),
   };
 }
 
@@ -156,6 +176,84 @@ function hostFromUrl(value) {
   } catch {
     return value.replace(/^https?:\/\//, "").split(/[/:?#]/)[0]?.toLowerCase() || "";
   }
+}
+
+export function normalizeRepoUrl(value) {
+  let input = value?.trim().replace(/\/+$/, "") || "";
+  if (!input) return "";
+
+  if (input.startsWith("git@") || (input.includes("@") && input.includes(":") && !input.includes("://"))) {
+    const [, rest = ""] = input.split("@");
+    const [host = "", path = ""] = rest.split(":");
+    input = `${host}/${path}`;
+  } else if (input.startsWith("ssh://")) {
+    const rest = input.slice("ssh://".length);
+    input = rest.includes("@") ? rest.split("@").slice(1).join("@") : rest;
+  } else {
+    input = input.replace(/^https?:\/\//, "");
+  }
+
+  input = input.split(/[?#]/)[0].replace(/\/+$/, "");
+  if (input.endsWith(".git")) {
+    input = input.slice(0, -4);
+  }
+
+  const normalized = input
+    .split("/")
+    .filter(Boolean)
+    .join("/")
+    .toLowerCase();
+  return normalized.split("/").length >= 3 ? normalized : "";
+}
+
+export function repoUrlFromPullRequestUrl(value) {
+  const parsed = parseSmartInput(value || "");
+  return parsed.repoUrl || "";
+}
+
+export function isPullRequestResource(resource) {
+  return resource?.kind === "pull_request" || resource?.kind === "merge_request";
+}
+
+function providerFromRepoUrl(repoUrl) {
+  const host = normalizeRepoUrl(repoUrl).split("/")[0] || "";
+  return host === "github.com" || host.endsWith(".github.com") ? "github" : "gitlab";
+}
+
+function displayRepoUrl(repoUrl) {
+  const normalized = normalizeRepoUrl(repoUrl);
+  return normalized ? `https://${normalized}` : repoUrl;
+}
+
+function enrichTask(state, task) {
+  const link = (state.taskLinks || []).find((item) => item.taskId === task.id);
+  return {
+    ...task,
+    sourceProvider: link?.provider ?? null,
+    sourceKind: link?.kind ?? null,
+  };
+}
+
+function enrichTasks(state, tasks) {
+  return tasks.map((task) => enrichTask(state, task));
+}
+
+function supportsExternalRefresh(link) {
+  return (
+    (link?.provider === "trello" && link?.kind === "trello_card") ||
+    (link?.provider === "github" && ["github_issue", "pull_request"].includes(link?.kind)) ||
+    (link?.provider === "gitlab" && ["gitlab_issue", "merge_request"].includes(link?.kind))
+  );
+}
+
+function providerConnectionRequiredNotice(provider) {
+  const labels = {
+    github: "GitHub",
+    gitlab: "GitLab",
+    trello: "Trello",
+  };
+
+  return `Please add a ${labels[provider] || provider} connection to this project.`;
 }
 
 const local = {
@@ -201,6 +299,7 @@ const local = {
     const state = readState();
     state.projects = state.projects.filter((item) => item.id !== projectId);
     state.resources = state.resources.filter((item) => item.projectId !== projectId);
+    state.localResources = (state.localResources || []).filter((item) => item.projectId !== projectId);
     state.tasks = state.tasks.filter((item) => item.projectId !== projectId);
     state.taskRelations = (state.taskRelations || []).filter((relation) => {
       const source = state.tasks.find((task) => task.id === relation.sourceTaskId);
@@ -246,6 +345,68 @@ const local = {
     writeState(state);
   },
 
+  listLocalResources({ projectId, repoUrl }) {
+    const normalizedRepoUrl = normalizeRepoUrl(repoUrl || "");
+    return (readState().localResources || []).filter((item) => {
+      if (item.projectId !== projectId) return false;
+      return !normalizedRepoUrl || normalizeRepoUrl(item.repoUrl) === normalizedRepoUrl;
+    });
+  },
+
+  saveLocalResource(input) {
+    const expectedRepoUrl = input.expectedRepoUrl || input.repoUrl;
+    const normalizedRepoUrl = normalizeRepoUrl(expectedRepoUrl || "");
+    if (!normalizedRepoUrl) {
+      throw new Error("Saving local resource directories requires the desktop app.");
+    }
+    if (!input.path?.trim()) {
+      throw new Error("Local resource path is required.");
+    }
+
+    const state = readState();
+    state.localResources = state.localResources || [];
+    const timestamp = now();
+    const path = input.path.trim();
+    const existing = state.localResources.find(
+      (item) => item.projectId === input.projectId && item.path === path,
+    );
+    const resource = existing || {
+      id: id("local_resource"),
+      projectId: input.projectId,
+      createdAt: timestamp,
+    };
+    Object.assign(resource, {
+      provider: input.expectedProvider || providerFromRepoUrl(expectedRepoUrl),
+      repoUrl: displayRepoUrl(expectedRepoUrl),
+      path,
+      name: input.name?.trim() || path.split(/[\\/]/).filter(Boolean).at(-1) || displayRepoUrl(expectedRepoUrl),
+      updatedAt: timestamp,
+    });
+    if (!existing) {
+      state.localResources.push(resource);
+    }
+    writeState(state);
+    return resource;
+  },
+
+  deleteLocalResource({ id: resourceId }) {
+    const state = readState();
+    state.localResources = (state.localResources || []).filter((item) => item.id !== resourceId);
+    writeState(state);
+  },
+
+  checkoutPullRequestForReview() {
+    throw new Error("Review checkout requires the desktop app.");
+  },
+
+  loadReviewDiff() {
+    throw new Error("Loading review diffs requires the desktop app.");
+  },
+
+  loadReviewDiffFile() {
+    throw new Error("Loading review diffs requires the desktop app.");
+  },
+
   createTaskFromInput({ input, parsed: providedParsed, projectId }) {
     const state = readState();
     const parsed = providedParsed || toParsedPayload(parseSmartInput(input));
@@ -261,7 +422,7 @@ const local = {
       const existingTask = existingLink && state.tasks.find((task) => task.id === existingLink.taskId);
       if (existingTask) {
         return {
-          task: existingTask,
+          task: enrichTask(state, existingTask),
           resource: null,
           parsed: parsedPayload,
           projectRequired: false,
@@ -353,7 +514,7 @@ const local = {
 
     writeState(state);
     return {
-      task,
+      task: enrichTask(state, task),
       resource,
       parsed: parsedPayload,
       projectRequired: false,
@@ -363,7 +524,8 @@ const local = {
   },
 
   listTasks({ projectId }) {
-    return readState().tasks.filter((task) => !projectId || task.projectId === projectId);
+    const state = readState();
+    return enrichTasks(state, state.tasks.filter((task) => !projectId || task.projectId === projectId));
   },
 
   updateTask({ id: taskId, title, body, status, projectId }) {
@@ -376,7 +538,20 @@ const local = {
     task.projectId = projectId ?? task.projectId;
     task.updatedAt = now();
     writeState(state);
-    return task;
+    return enrichTask(state, task);
+  },
+
+  deleteTask({ id: taskId }) {
+    const state = readState();
+    if (!state.tasks.some((task) => task.id === taskId)) {
+      throw new Error("Task not found");
+    }
+    state.tasks = state.tasks.filter((task) => task.id !== taskId);
+    state.taskLinks = (state.taskLinks || []).filter((link) => link.taskId !== taskId);
+    state.taskRelations = (state.taskRelations || []).filter(
+      (relation) => relation.sourceTaskId !== taskId && relation.targetTaskId !== taskId,
+    );
+    writeState(state);
   },
 
   linkTaskResource(payload) {
@@ -410,9 +585,9 @@ const local = {
     const links = (state.taskLinks || []).filter((item) => item.taskId === taskId).slice(0, 1);
     const link = links[0];
 
-    if (!link || link.provider !== "trello" || link.kind !== "trello_card") {
+    if (!supportsExternalRefresh(link)) {
       return {
-        task,
+        task: enrichTask(state, task),
         links,
         notice: null,
         connectionRequired: false,
@@ -420,23 +595,23 @@ const local = {
     }
 
     const enabledConnectionIds = new Set(state.projectConnections?.[task.projectId] || []);
-    const hasProjectTrelloConnection = state.connections.some(
-      (connection) => enabledConnectionIds.has(connection.id) && connection.provider === "trello",
+    const hasProjectConnection = state.connections.some(
+      (connection) => enabledConnectionIds.has(connection.id) && connection.provider === link.provider,
     );
 
-    if (!hasProjectTrelloConnection) {
+    if (!hasProjectConnection) {
       return {
-        task,
+        task: enrichTask(state, task),
         links,
-        notice: "Please add a Trello connection to this project.",
+        notice: providerConnectionRequiredNotice(link.provider),
         connectionRequired: true,
       };
     }
 
     return {
-      task,
+      task: enrichTask(state, task),
       links,
-      notice: "Live Trello refresh requires the desktop app.",
+      notice: "Live external refresh requires the desktop app.",
       connectionRequired: false,
     };
   },
@@ -447,9 +622,10 @@ const local = {
       .filter((relation) => relation.sourceTaskId === taskId || relation.targetTaskId === taskId)
       .map((relation) => {
         const relatedTaskId = relation.sourceTaskId === taskId ? relation.targetTaskId : relation.sourceTaskId;
+        const relatedTask = state.tasks.find((task) => task.id === relatedTaskId);
         return {
           ...relation,
-          relatedTask: state.tasks.find((task) => task.id === relatedTaskId),
+          relatedTask: relatedTask ? enrichTask(state, relatedTask) : null,
         };
       })
       .filter((relation) => relation.relatedTask);

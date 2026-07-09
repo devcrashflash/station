@@ -8,6 +8,18 @@ Minimal Tauri v2 starter using React, JavaScript, Vite, Tailwind CSS, and shadcn
 - Start the frontend with `pnpm dev`.
 - Start the desktop app with `pnpm tauri dev`.
 
+## Local-First Behavior
+
+The app should always prefer local data first. Opening projects, tasks, and
+resources must render from the local database without waiting for GitHub,
+GitLab, Trello, or any other external network request.
+
+Offline use should work for most read and organization workflows. Network
+access is only required for actions that explicitly sync external metadata or
+edit/modify external systems. Provider sync should be started from foreground
+UI, show sync status while it runs, and never block local navigation or local
+editing.
+
 ## Frontend Structure
 
 The frontend is organized by component responsibility:

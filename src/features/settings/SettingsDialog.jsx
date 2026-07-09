@@ -18,8 +18,32 @@ const providerOptions = [
 const permissionHints = {
   gitlab: "Use read_api or api. read_repository is not enough for issues and merge requests.",
   github: "Use Metadata read, Pull requests read, and Issues read for fine-grained tokens.",
-  trello: "Authorize the token with read access.",
+  trello: "Enter your Trello API key, then generate an API token for your account.",
 };
+
+const TRELLO_BASE_URL = "https://api.trello.com";
+
+function normalizeCredentialBaseUrl(value, fallback) {
+  const trimmed = value?.trim().replace(/\/+$/, "") || "";
+  if (!trimmed) return fallback;
+  if (trimmed.startsWith("https://") || trimmed.startsWith("http://")) return trimmed;
+  return `https://${trimmed}`;
+}
+
+function credentialUrl(provider, baseUrl, apiKey) {
+  if (provider === "github") {
+    return "https://github.com/settings/personal-access-tokens/new";
+  }
+  if (provider === "gitlab") {
+    return `${normalizeCredentialBaseUrl(baseUrl, "https://gitlab.com")}/-/user_settings/personal_access_tokens`;
+  }
+  if (provider === "trello") {
+    const trimmedApiKey = apiKey.trim();
+    if (!trimmedApiKey) return "";
+    return `https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&name=Server%20Token&key=${encodeURIComponent(trimmedApiKey)}`;
+  }
+  return "";
+}
 
 export function SettingsDialog({ connections, onClose, onSave, onDelete, onTest }) {
   const [provider, setProvider] = useState("gitlab");
@@ -44,7 +68,7 @@ export function SettingsDialog({ connections, onClose, onSave, onDelete, onTest 
     setEditingConnectionId(connection.id);
     setProvider(connection.provider);
     setName(connection.name);
-    setBaseUrl(connection.baseUrl);
+    setBaseUrl(connection.provider === "trello" ? "" : connection.baseUrl);
     setApiKey(connection.apiKey || "");
     setToken(connection.token || "");
   }
@@ -56,7 +80,7 @@ export function SettingsDialog({ connections, onClose, onSave, onDelete, onTest 
       id: editingConnectionId,
       provider,
       name,
-      baseUrl,
+      baseUrl: provider === "trello" ? TRELLO_BASE_URL : baseUrl,
       apiKey: provider === "trello" ? apiKey : null,
       token,
     });
@@ -87,6 +111,8 @@ export function SettingsDialog({ connections, onClose, onSave, onDelete, onTest 
     }
   }
 
+  const tokenUrl = credentialUrl(provider, baseUrl, apiKey);
+
   return (
     <Modal title="Global endpoint settings" onClose={onClose}>
       <form className="grid gap-3" onSubmit={submit}>
@@ -98,20 +124,41 @@ export function SettingsDialog({ connections, onClose, onSave, onDelete, onTest 
           <FieldLabel>Connection name</FieldLabel>
           <Input value={name} onChange={(event) => setName(event.target.value)} required />
         </Field>
-        <Field>
-          <FieldLabel>Base URL</FieldLabel>
-          <Input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} required />
-        </Field>
+        {provider === "trello" ? (
+          <p className="rounded-md border bg-muted p-3 text-sm text-muted-foreground">
+            Trello uses the fixed cloud API. Enter the API key and token from your Trello developer app.
+          </p>
+        ) : (
+          <Field>
+            <FieldLabel>Base URL</FieldLabel>
+            <Input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} required />
+          </Field>
+        )}
         {provider === "trello" && (
           <Field>
             <FieldLabel>API key</FieldLabel>
-            <Input value={apiKey} type="password" onChange={(event) => setApiKey(event.target.value)} />
+            <Input value={apiKey} type="password" onChange={(event) => setApiKey(event.target.value)} required />
           </Field>
         )}
         <Field>
-          <FieldLabel>Token</FieldLabel>
-          <Input value={token} type="password" onChange={(event) => setToken(event.target.value)} />
-          <p className="text-xs text-muted-foreground">{permissionHints[provider]}</p>
+          <FieldLabel>{provider === "trello" ? "API token" : "Token"}</FieldLabel>
+          <Input value={token} type="password" onChange={(event) => setToken(event.target.value)} required />
+          <div className="grid gap-1 text-xs text-muted-foreground">
+            <p>{permissionHints[provider]}</p>
+            {tokenUrl && (
+              <a
+                className="font-medium text-blue-700 underline-offset-2 hover:underline"
+                href={tokenUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Generate token
+              </a>
+            )}
+            {provider === "trello" && !tokenUrl && (
+              <span className="font-medium text-muted-foreground">Enter an API key to generate a token.</span>
+            )}
+          </div>
         </Field>
         <div className="flex flex-wrap gap-2">
           <Button type="submit">{editingConnectionId ? "Update connection" : "Save connection"}</Button>
@@ -131,7 +178,7 @@ export function SettingsDialog({ connections, onClose, onSave, onDelete, onTest 
               <div className="min-w-0 flex-1">
                 <p className="font-medium">{connection.name}</p>
                 <p className="truncate text-xs text-muted-foreground">
-                  {connection.provider} · {connection.baseUrl}
+                  {connection.provider} · {connection.provider === "trello" ? "Cloud API" : connection.baseUrl}
                 </p>
                 {testResult && (
                   <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2">

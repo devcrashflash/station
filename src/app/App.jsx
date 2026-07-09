@@ -30,6 +30,7 @@ function App() {
   const [selectedProjectId, setSelectedProjectId] = useState(null);
   const [tasks, setTasks] = useState([]);
   const [resources, setResources] = useState([]);
+  const [localResources, setLocalResources] = useState([]);
   const [connections, setConnections] = useState([]);
   const [projectConnectionIds, setProjectConnectionIds] = useState([]);
   const [selectedTask, setSelectedTask] = useState(null);
@@ -69,6 +70,7 @@ function App() {
       refreshProject(selectedProjectId).catch(reportError);
     } else {
       setResources([]);
+      setLocalResources([]);
       setProjectConnectionIds([]);
       api.listTasks({ projectId: null }).then(setTasks).catch(reportError);
     }
@@ -86,13 +88,15 @@ function App() {
 
   async function refreshProject(projectId = selectedProjectId) {
     if (!projectId) return;
-    const [taskList, resourceList, connectionIds] = await Promise.all([
+    const [taskList, resourceList, localResourceList, connectionIds] = await Promise.all([
       api.listTasks({ projectId }),
       api.listProjectResources({ projectId }),
+      api.listLocalResources({ projectId }),
       api.listProjectConnections({ projectId }),
     ]);
     setTasks(taskList);
     setResources(resourceList);
+    setLocalResources(localResourceList);
     setProjectConnectionIds(connectionIds);
   }
 
@@ -195,6 +199,22 @@ function App() {
           }}
           onLoadLinks={(taskId) => api.listTaskLinks({ taskId })}
           onLoadRelations={(taskId) => api.listTaskRelations({ taskId })}
+          onLoadLocalResources={(payload) => api.listLocalResources(payload)}
+          onChooseLocalResourceDirectory={() => api.chooseLocalResourceDirectory()}
+          onSaveLocalResource={async (payload) => {
+            const resource = await api.saveLocalResource(payload);
+            if (payload.projectId) {
+              setLocalResources(await api.listLocalResources({ projectId: payload.projectId }));
+            }
+            return resource;
+          }}
+          onCheckoutPullRequestForReview={async (payload) => {
+            const result = await api.checkoutPullRequestForReview(payload);
+            setNotice(result.message);
+            return result;
+          }}
+          onLoadReviewDiff={(payload) => api.loadReviewDiff(payload)}
+          onLoadReviewDiffFile={(payload) => api.loadReviewDiffFile(payload)}
           onSaveRelation={async (payload) => api.saveTaskRelation(payload)}
           onDeleteRelation={async (id) => api.deleteTaskRelation({ id })}
           onLoadProjectTasks={(projectId) => api.listTasks({ projectId })}
@@ -208,12 +228,28 @@ function App() {
               setTasks(await api.listTasks({ projectId: null }));
             }
           }}
+          onDeleteTask={async (task) => {
+            try {
+              await api.deleteTask({ id: task.id });
+              setSelectedTask(null);
+              if (task.projectId) {
+                await refreshProject(task.projectId);
+              } else {
+                setTasks(await api.listTasks({ projectId: null }));
+              }
+              setNotice("Task deleted.");
+            } catch (error) {
+              reportError(error);
+              throw error;
+            }
+          }}
         />
       ) : selectedProject ? (
         <ProjectWorkspaceView
           project={selectedProject}
           tasks={tasks}
           resources={resources}
+          localResources={localResources}
           connections={connections}
           projectConnectionIds={projectConnectionIds}
           onRefresh={() => refreshProject(selectedProject.id).catch(reportError)}
@@ -235,6 +271,15 @@ function App() {
           }}
           onDisconnectResource={async (id) => {
             await api.disconnectResource({ id });
+            await refreshProject(selectedProject.id);
+          }}
+          onChooseLocalResourceDirectory={() => api.chooseLocalResourceDirectory()}
+          onSaveLocalResource={async (payload) => {
+            await api.saveLocalResource(payload);
+            await refreshProject(selectedProject.id);
+          }}
+          onDeleteLocalResource={async (id) => {
+            await api.deleteLocalResource({ id });
             await refreshProject(selectedProject.id);
           }}
           onUpdateTask={async (payload) => {

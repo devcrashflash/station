@@ -24,7 +24,7 @@ export function AppShell({
 }) {
   return (
     <TooltipProvider>
-      <main className="flex min-h-screen bg-background text-foreground">
+      <main className="flex h-screen overflow-hidden bg-background text-foreground">
         <ProjectRail
           projects={projects}
           selectedProjectId={selectedProjectId}
@@ -34,8 +34,8 @@ export function AppShell({
           onShowSettings={onShowSettings}
         />
 
-        <section className="flex min-w-0 flex-1 flex-col">
-          <header className="flex h-16 items-center justify-between border-b bg-background/95 px-6">
+        <section className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <header className="flex h-16 shrink-0 items-center justify-between border-b bg-background/95 px-6">
             <div className="min-w-0">
               <AppBreadcrumb
                 project={selectedProject}

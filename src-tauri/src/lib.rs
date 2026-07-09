@@ -4,6 +4,8 @@ use serde_json::Value;
 use std::{
     collections::HashSet,
     fs,
+    path::{Path, PathBuf},
+    process::Command,
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex,
@@ -17,6 +19,12 @@ const DEFAULT_PROJECT_COLOR: &str = "#2563eb";
 
 struct AppState {
     db: Mutex<SqliteConnection>,
+}
+
+#[derive(Debug, Clone)]
+struct GitRemote {
+    name: String,
+    normalized_url: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -59,6 +67,19 @@ struct Resource {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct LocalResource {
+    id: String,
+    project_id: String,
+    provider: String,
+    repo_url: String,
+    path: String,
+    name: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct Task {
     id: String,
     project_id: Option<String>,
@@ -66,6 +87,8 @@ struct Task {
     body: String,
     status: String,
     source_url: Option<String>,
+    source_provider: Option<String>,
+    source_kind: Option<String>,
     created_at: i64,
     updated_at: i64,
 }
@@ -82,6 +105,7 @@ struct TaskLink {
     external_title: Option<String>,
     external_body: Option<String>,
     external_state: Option<String>,
+    target_branch: Option<String>,
     fetched_at: Option<i64>,
 }
 
@@ -112,6 +136,7 @@ struct PullRequestRecord {
     external_title: Option<String>,
     external_body: Option<String>,
     external_state: Option<String>,
+    target_branch: Option<String>,
     fetched_at: Option<i64>,
     created_at: i64,
     updated_at: i64,
@@ -148,11 +173,49 @@ struct PullRequestSaveResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct PullRequestCheckoutResult {
+    path: String,
+    branch: String,
+    remote_ref: String,
+    base_ref: Option<String>,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewDiffFile {
+    path: String,
+    diff: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewDiffResult {
+    path: String,
+    branch: String,
+    base_ref: String,
+    files: Vec<String>,
+    current_file: Option<ReviewDiffFile>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RefreshTaskExternalDetailsResult {
     task: Task,
     links: Vec<TaskLink>,
     notice: Option<String>,
     connection_required: bool,
+}
+
+enum TaskExternalRefreshPreparation {
+    Ready(RefreshTaskExternalDetailsResult),
+    Fetch {
+        task: Task,
+        links: Vec<TaskLink>,
+        link: TaskLink,
+        connection: ConnectionRecord,
+        parsed: ParsedInputPayload,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -174,6 +237,16 @@ struct ResourceInput {
     name: String,
     icon_url: Option<String>,
     connection_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalResourceInput {
+    project_id: String,
+    path: String,
+    expected_provider: Option<String>,
+    expected_repo_url: Option<String>,
+    name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -212,6 +285,7 @@ struct PullRequestInput {
     external_title: Option<String>,
     external_body: Option<String>,
     external_state: Option<String>,
+    target_branch: Option<String>,
     fetched_at: Option<i64>,
     parsed: Option<ParsedInputPayload>,
 }
@@ -233,6 +307,7 @@ struct ProviderMetadata {
     title: Option<String>,
     body: Option<String>,
     state: Option<String>,
+    target_branch: Option<String>,
     url: Option<String>,
     fetched_at: Option<i64>,
     notice: Option<String>,
@@ -242,6 +317,7 @@ struct ProviderMetadata {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_dir = app.path().app_data_dir()?;
             fs::create_dir_all(&app_dir)?;
@@ -258,9 +334,16 @@ pub fn run() {
             list_project_resources,
             connect_resource,
             disconnect_resource,
+            list_local_resources,
+            save_local_resource,
+            delete_local_resource,
+            checkout_pull_request_for_review,
+            load_review_diff,
+            load_review_diff_file,
             create_task_from_input,
             list_tasks,
             update_task,
+            delete_task,
             link_task_resource,
             list_task_links,
             refresh_task_external_details,
@@ -302,7 +385,10 @@ fn normalize_project_color(color: Option<String>) -> String {
     let trimmed = color.as_deref().unwrap_or("").trim();
     let is_hex_color = trimmed.len() == 7
         && trimmed.starts_with('#')
-        && trimmed.chars().skip(1).all(|character| character.is_ascii_hexdigit());
+        && trimmed
+            .chars()
+            .skip(1)
+            .all(|character| character.is_ascii_hexdigit());
 
     if is_hex_color {
         trimmed.to_ascii_lowercase()
@@ -356,6 +442,19 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
             UNIQUE(provider, kind, external_id)
         );
 
+        CREATE TABLE IF NOT EXISTS local_resources (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            provider TEXT NOT NULL,
+            repo_url TEXT NOT NULL,
+            normalized_repo_url TEXT NOT NULL,
+            path TEXT NOT NULL,
+            name TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE(project_id, path)
+        );
+
         CREATE TABLE IF NOT EXISTS tasks (
             id TEXT PRIMARY KEY,
             project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
@@ -377,6 +476,7 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
             external_title TEXT,
             external_body TEXT,
             external_state TEXT,
+            target_branch TEXT,
             fetched_at INTEGER,
             PRIMARY KEY(task_id, provider, kind, external_id)
         );
@@ -404,6 +504,7 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
             external_title TEXT,
             external_body TEXT,
             external_state TEXT,
+            target_branch TEXT,
             fetched_at INTEGER,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
@@ -421,6 +522,7 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
     add_column_if_missing(db, "task_links", "external_title", "TEXT")?;
     add_column_if_missing(db, "task_links", "external_body", "TEXT")?;
     add_column_if_missing(db, "task_links", "external_state", "TEXT")?;
+    add_column_if_missing(db, "task_links", "target_branch", "TEXT")?;
     add_column_if_missing(db, "task_links", "fetched_at", "INTEGER")?;
     keep_one_task_link_per_task(db)?;
     db.execute(
@@ -436,6 +538,7 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
     add_column_if_missing(db, "pull_requests", "external_title", "TEXT")?;
     add_column_if_missing(db, "pull_requests", "external_body", "TEXT")?;
     add_column_if_missing(db, "pull_requests", "external_state", "TEXT")?;
+    add_column_if_missing(db, "pull_requests", "target_branch", "TEXT")?;
     add_column_if_missing(db, "pull_requests", "fetched_at", "INTEGER")?;
     migrate_pull_requests_into_tasks(db)?;
     Ok(())
@@ -521,7 +624,20 @@ fn row_to_resource(row: &rusqlite::Row<'_>) -> rusqlite::Result<Resource> {
     })
 }
 
-fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
+fn row_to_local_resource(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocalResource> {
+    Ok(LocalResource {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        provider: row.get(2)?,
+        repo_url: row.get(3)?,
+        path: row.get(4)?,
+        name: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
+fn row_to_task_with_source(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
     Ok(Task {
         id: row.get(0)?,
         project_id: row.get(1)?,
@@ -531,6 +647,8 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         source_url: row.get(5)?,
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
+        source_provider: row.get(8)?,
+        source_kind: row.get(9)?,
     })
 }
 
@@ -545,7 +663,8 @@ fn row_to_task_link(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskLink> {
         external_title: row.get(6)?,
         external_body: row.get(7)?,
         external_state: row.get(8)?,
-        fetched_at: row.get(9)?,
+        target_branch: row.get(9)?,
+        fetched_at: row.get(10)?,
     })
 }
 
@@ -564,9 +683,10 @@ fn row_to_pull_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<PullRequestR
         external_title: row.get(10)?,
         external_body: row.get(11)?,
         external_state: row.get(12)?,
-        fetched_at: row.get(13)?,
-        created_at: row.get(14)?,
-        updated_at: row.get(15)?,
+        target_branch: row.get(13)?,
+        fetched_at: row.get(14)?,
+        created_at: row.get(15)?,
+        updated_at: row.get(16)?,
     })
 }
 
@@ -678,13 +798,596 @@ fn connect_resource_in_db(
     get_resource_by_id(db, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
 }
 
+fn normalize_repository_url(value: &str) -> Option<String> {
+    let mut input = value.trim().trim_end_matches('/').to_string();
+    if input.is_empty() {
+        return None;
+    }
+
+    if input.starts_with("git@")
+        || (input.contains('@') && input.contains(':') && !input.contains("://"))
+    {
+        let (_, rest) = input.split_once('@')?;
+        let (host, path) = rest.split_once(':')?;
+        input = format!("{host}/{path}");
+    } else if let Some(rest) = input.strip_prefix("ssh://") {
+        let rest = rest.split_once('@').map(|(_, value)| value).unwrap_or(rest);
+        input = rest.to_string();
+    } else if let Some(rest) = input
+        .strip_prefix("https://")
+        .or_else(|| input.strip_prefix("http://"))
+    {
+        input = rest.to_string();
+    }
+
+    input = input
+        .split(['?', '#'])
+        .next()?
+        .trim_end_matches('/')
+        .to_string();
+    if let Some(without_git) = input.strip_suffix(".git") {
+        input = without_git.to_string();
+    }
+
+    let normalized = input
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+        .to_lowercase();
+    if normalized.split('/').count() < 3 {
+        return None;
+    }
+
+    Some(normalized)
+}
+
+fn provider_from_normalized_repo(normalized_repo_url: &str) -> String {
+    let host = normalized_repo_url.split('/').next().unwrap_or_default();
+    if host == "github.com" || host.ends_with(".github.com") {
+        "github".to_string()
+    } else {
+        "gitlab".to_string()
+    }
+}
+
+fn display_repo_url(normalized_repo_url: &str) -> String {
+    format!("https://{normalized_repo_url}")
+}
+
+fn default_local_resource_name(path: &str, normalized_repo_url: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            normalized_repo_url
+                .split('/')
+                .last()
+                .filter(|value| !value.trim().is_empty())
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| path.to_string())
+}
+
+fn git_output_error(args: &[&str], output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if stderr.is_empty() { stdout } else { stderr };
+    if detail.is_empty() {
+        format!("git {} failed", args.join(" "))
+    } else {
+        detail
+    }
+}
+
+fn run_git(path: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .output()
+        .map_err(|error| format!("Could not run git: {error}"))?;
+
+    if !output.status.success() {
+        return Err(git_output_error(args, &output));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn verify_ref(path: &Path, ref_name: &str) -> bool {
+    run_git(path, &["rev-parse", "--verify", "--quiet", ref_name]).is_ok()
+}
+
+fn list_git_remotes(path: &Path) -> Result<Vec<GitRemote>, String> {
+    let remote_names = run_git(path, &["remote"])?;
+    let mut remotes = Vec::new();
+    for name in remote_names
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let url = run_git(path, &["remote", "get-url", name])?;
+        if let Some(normalized_url) = normalize_repository_url(&url) {
+            remotes.push(GitRemote {
+                name: name.to_string(),
+                normalized_url,
+            });
+        }
+    }
+    Ok(remotes)
+}
+
+fn select_git_remote(
+    path: &Path,
+    expected_normalized_repo_url: Option<&str>,
+) -> Result<GitRemote, String> {
+    let remotes = list_git_remotes(path)?;
+    if remotes.is_empty() {
+        return Err("Local resource repository must have at least one Git remote.".to_string());
+    }
+
+    if let Some(expected_normalized_repo_url) = expected_normalized_repo_url {
+        return remotes
+            .iter()
+            .find(|remote| {
+                remote.name == "origin" && remote.normalized_url == expected_normalized_repo_url
+            })
+            .or_else(|| {
+                remotes
+                    .iter()
+                    .find(|remote| remote.normalized_url == expected_normalized_repo_url)
+            })
+            .cloned()
+            .ok_or_else(|| {
+                "No Git remote in this directory matches the PR/MR repository.".to_string()
+            });
+    }
+
+    remotes
+        .iter()
+        .find(|remote| remote.name == "origin")
+        .or_else(|| remotes.first())
+        .cloned()
+        .ok_or_else(|| "Local resource repository must have at least one Git remote.".to_string())
+}
+
+fn local_resource_from_directory(
+    input_path: &str,
+    expected_provider: Option<&str>,
+    expected_repo_url: Option<&str>,
+) -> Result<(String, String, String), String> {
+    let path = PathBuf::from(input_path);
+    if !path.exists() {
+        return Err("Local resource directory does not exist.".to_string());
+    }
+    if !path.is_dir() {
+        return Err("Local resource path must be a directory.".to_string());
+    }
+
+    let top_level = run_git(&path, &["rev-parse", "--show-toplevel"])
+        .map_err(|_| "Local resource directory must be inside a Git worktree.".to_string())?;
+    let top_level_path = PathBuf::from(top_level);
+    let expected_normalized_repo_url = expected_repo_url
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| {
+            normalize_repository_url(value)
+                .ok_or_else(|| "Could not normalize the expected repository URL.".to_string())
+        })
+        .transpose()?;
+    let remote = select_git_remote(&top_level_path, expected_normalized_repo_url.as_deref())?;
+    let normalized_repo_url = remote.normalized_url;
+    let provider = provider_from_normalized_repo(&normalized_repo_url);
+
+    if let Some(expected_provider) = expected_provider.filter(|value| !value.trim().is_empty()) {
+        if provider != expected_provider {
+            return Err(format!(
+                "Selected repository is a {provider} repository, but this review expects {expected_provider}."
+            ));
+        }
+    }
+
+    Ok((
+        top_level_path.to_string_lossy().to_string(),
+        provider,
+        normalized_repo_url,
+    ))
+}
+
+fn save_local_resource_in_db(
+    db: &SqliteConnection,
+    input: LocalResourceInput,
+) -> Result<LocalResource, String> {
+    get_project(db, &input.project_id)
+        .map_err(db_error)?
+        .ok_or_else(|| "Project not found".to_string())?;
+    let (path, provider, normalized_repo_url) = local_resource_from_directory(
+        &input.path,
+        input.expected_provider.as_deref(),
+        input.expected_repo_url.as_deref(),
+    )?;
+    let timestamp = now_millis();
+    let name = input
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| default_local_resource_name(&path, &normalized_repo_url));
+    let repo_url = display_repo_url(&normalized_repo_url);
+    let existing_id = db
+        .query_row(
+            "SELECT id FROM local_resources WHERE project_id = ?1 AND path = ?2",
+            params![&input.project_id, &path],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(db_error)?;
+    let id = existing_id.unwrap_or_else(|| new_id("local_resource"));
+
+    let row_exists: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_resources WHERE id = ?1)",
+            params![&id],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+
+    if row_exists {
+        db.execute(
+            "UPDATE local_resources
+             SET provider = ?1, repo_url = ?2, normalized_repo_url = ?3, name = ?4, updated_at = ?5
+             WHERE id = ?6",
+            params![provider, repo_url, normalized_repo_url, name, timestamp, id],
+        )
+        .map_err(db_error)?;
+    } else {
+        db.execute(
+            "INSERT INTO local_resources
+             (id, project_id, provider, repo_url, normalized_repo_url, path, name, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                id,
+                input.project_id,
+                provider,
+                repo_url,
+                normalized_repo_url,
+                path,
+                name,
+                timestamp,
+                timestamp
+            ],
+        )
+        .map_err(db_error)?;
+    }
+
+    get_local_resource(db, &id)?.ok_or_else(|| "Local resource not found after save.".to_string())
+}
+
+fn get_local_resource(db: &SqliteConnection, id: &str) -> Result<Option<LocalResource>, String> {
+    db.query_row(
+        "SELECT id, project_id, provider, repo_url, path, name, created_at, updated_at
+         FROM local_resources WHERE id = ?1",
+        params![id],
+        row_to_local_resource,
+    )
+    .optional()
+    .map_err(db_error)
+}
+
+fn checkout_target(provider: &str, pr_url: &str) -> Result<(String, String, String), String> {
+    let without_query = pr_url.split(['?', '#']).next().unwrap_or(pr_url);
+    let parts = without_query.split('/').collect::<Vec<_>>();
+    let number = if provider == "github" {
+        parts
+            .windows(2)
+            .find_map(|window| (window[0] == "pull").then_some(window[1]))
+            .filter(|value| value.chars().all(|character| character.is_ascii_digit()))
+            .ok_or_else(|| "Could not parse the GitHub pull request number.".to_string())?
+    } else if provider == "gitlab" {
+        parts
+            .windows(2)
+            .find_map(|window| (window[0] == "merge_requests").then_some(window[1]))
+            .filter(|value| value.chars().all(|character| character.is_ascii_digit()))
+            .ok_or_else(|| "Could not parse the GitLab merge request number.".to_string())?
+    } else {
+        return Err(
+            "Only GitHub pull requests and GitLab merge requests can be reviewed.".to_string(),
+        );
+    };
+
+    if provider == "github" {
+        Ok((
+            format!("pull/{number}/head"),
+            format!("review/github-pr-{number}"),
+            format!("review/github-pr-{number}"),
+        ))
+    } else {
+        Ok((
+            format!("merge-requests/{number}/head"),
+            format!("review/gitlab-mr-{number}"),
+            format!("review/gitlab-mr-{number}"),
+        ))
+    }
+}
+
+fn set_checkout_test_state_if_present(db: &SqliteConnection, pr_url: &str) -> Result<(), String> {
+    let Some((id, test_state)) = db
+        .query_row(
+            "SELECT id, test_state FROM pull_requests WHERE pr_url = ?1",
+            params![pr_url],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(db_error)?
+    else {
+        return Ok(());
+    };
+
+    let mut value = serde_json::from_str::<Value>(&test_state)
+        .unwrap_or_else(|_| Value::Object(Default::default()));
+    if !value.is_object() {
+        value = Value::Object(Default::default());
+    }
+    if let Some(object) = value.as_object_mut() {
+        object.insert("checkout".to_string(), Value::Bool(true));
+    }
+    db.execute(
+        "UPDATE pull_requests SET test_state = ?1, updated_at = ?2 WHERE id = ?3",
+        params![value.to_string(), now_millis(), id],
+    )
+    .map_err(db_error)?;
+    Ok(())
+}
+
+fn review_target_branch_for_url(
+    db: &SqliteConnection,
+    pr_url: &str,
+) -> Result<Option<String>, String> {
+    let task_link_branch = db
+        .query_row(
+            "SELECT target_branch FROM task_links
+             WHERE url = ?1 AND target_branch IS NOT NULL AND TRIM(target_branch) != ''
+             LIMIT 1",
+            params![pr_url],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(db_error)?;
+    if task_link_branch.is_some() {
+        return Ok(task_link_branch);
+    }
+
+    db.query_row(
+        "SELECT target_branch FROM pull_requests
+         WHERE pr_url = ?1 AND target_branch IS NOT NULL AND TRIM(target_branch) != ''
+         LIMIT 1",
+        params![pr_url],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(db_error)
+}
+
+fn fetch_review_base_ref(
+    path: &Path,
+    remote: &str,
+    target_branch: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(target_branch) = target_branch
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let target_ref = format!("refs/heads/{target_branch}:refs/remotes/{remote}/{target_branch}");
+    run_git(path, &["fetch", remote, &target_ref])
+        .map_err(|error| format!("Could not fetch target branch from {remote}: {error}"))?;
+    Ok(Some(format!("{remote}/{target_branch}")))
+}
+
+fn checkout_pull_request_for_review_in_db(
+    db: &SqliteConnection,
+    local_resource_id: String,
+    provider: String,
+    pr_url: String,
+) -> Result<PullRequestCheckoutResult, String> {
+    let resource = get_local_resource(db, &local_resource_id)?
+        .ok_or_else(|| "Local resource not found".to_string())?;
+    if resource.provider != provider {
+        return Err("Selected local resource does not match this PR/MR provider.".to_string());
+    }
+
+    let path = PathBuf::from(&resource.path);
+    let normalized_resource = normalize_repository_url(&resource.repo_url)
+        .ok_or_else(|| "Could not normalize the saved local resource URL.".to_string())?;
+    let remote = select_git_remote(&path, Some(&normalized_resource))?;
+
+    let status = run_git(
+        &path,
+        &["status", "--porcelain=v1", "--untracked-files=normal"],
+    )?;
+    if !status.trim().is_empty() {
+        return Err("Local resource has uncommitted or untracked changes. Commit, stash, or clean it before reviewing.".to_string());
+    }
+
+    let (remote_head, branch, remote_review_branch) = checkout_target(&provider, &pr_url)?;
+    let remote_ref = format!("refs/remotes/{}/{}", remote.name, remote_review_branch);
+    let target_branch = review_target_branch_for_url(db, &pr_url)?;
+    let base_ref = fetch_review_base_ref(&path, &remote.name, target_branch.as_deref())?;
+    let fetch_refspec = format!("{remote_head}:{remote_ref}");
+    run_git(&path, &["fetch", &remote.name, &fetch_refspec]).map_err(|error| {
+        format!(
+            "Could not fetch review branch from {}: {error}",
+            remote.name
+        )
+    })?;
+
+    let local_ref = format!("refs/heads/{branch}");
+    if verify_ref(&path, &local_ref) {
+        run_git(&path, &["switch", &branch])
+            .map_err(|error| format!("Could not switch to existing review branch: {error}"))?;
+        run_git(&path, &["merge", "--ff-only", &remote_ref])
+            .map_err(|error| format!("Existing review branch cannot be fast-forwarded: {error}"))?;
+    } else {
+        run_git(&path, &["switch", "-c", &branch, &remote_ref])
+            .map_err(|error| format!("Could not create review branch: {error}"))?;
+    }
+
+    set_checkout_test_state_if_present(db, &pr_url)?;
+
+    Ok(PullRequestCheckoutResult {
+        path: resource.path,
+        branch: branch.clone(),
+        remote_ref,
+        base_ref,
+        message: format!("Checked out {branch}."),
+    })
+}
+
+fn local_resource_for_review(
+    db: &SqliteConnection,
+    local_resource_id: &str,
+) -> Result<LocalResource, String> {
+    get_local_resource(db, local_resource_id)?.ok_or_else(|| "Local resource not found".to_string())
+}
+
+fn current_git_branch(path: &Path) -> Result<String, String> {
+    let branch = run_git(path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    if branch == "HEAD" || branch.trim().is_empty() {
+        return Err("Local resource is not on a branch.".to_string());
+    }
+    Ok(branch)
+}
+
+fn review_diff_base_ref(
+    path: &Path,
+    remote: &str,
+    preferred_base_ref: Option<&str>,
+) -> Result<String, String> {
+    if let Some(preferred_base_ref) = preferred_base_ref
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if verify_ref(path, preferred_base_ref) {
+            return Ok(preferred_base_ref.to_string());
+        }
+        return Err(format!(
+            "Review target branch ref {preferred_base_ref} was not found in the local resource."
+        ));
+    }
+
+    [
+        format!("{remote}/HEAD"),
+        format!("{remote}/main"),
+        format!("{remote}/master"),
+    ]
+    .into_iter()
+        .find(|candidate| verify_ref(path, candidate))
+        .ok_or_else(|| {
+            format!(
+                "Could not find a base ref. Fetch {remote}/HEAD, {remote}/main, or {remote}/master first."
+            )
+        })
+}
+
+fn review_diff_files(path: &Path, base_ref: &str, branch: &str) -> Result<Vec<String>, String> {
+    let output = run_git(path, &["diff", "--name-only", base_ref, branch])?;
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect())
+}
+
+fn review_diff_file(
+    path: &Path,
+    base_ref: &str,
+    branch: &str,
+    file_path: &str,
+) -> Result<ReviewDiffFile, String> {
+    let diff = run_git(path, &["diff", base_ref, branch, "--", file_path])?;
+    Ok(ReviewDiffFile {
+        path: file_path.to_string(),
+        diff,
+    })
+}
+
+fn load_review_diff_in_db(
+    db: &SqliteConnection,
+    local_resource_id: String,
+    branch: Option<String>,
+    base_ref: Option<String>,
+) -> Result<ReviewDiffResult, String> {
+    let resource = local_resource_for_review(db, &local_resource_id)?;
+    let path = PathBuf::from(&resource.path);
+    let normalized_resource = normalize_repository_url(&resource.repo_url)
+        .ok_or_else(|| "Could not normalize the saved local resource URL.".to_string())?;
+    let remote = select_git_remote(&path, Some(&normalized_resource))?;
+    let branch = branch
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(Ok)
+        .unwrap_or_else(|| current_git_branch(&path))?;
+    if !verify_ref(&path, &branch) {
+        return Err("Review branch was not found in the local resource.".to_string());
+    }
+
+    let base_ref = review_diff_base_ref(&path, &remote.name, base_ref.as_deref())?;
+    let files = review_diff_files(&path, &base_ref, &branch)?;
+    let current_file = files
+        .first()
+        .map(|file_path| review_diff_file(&path, &base_ref, &branch, file_path))
+        .transpose()?;
+
+    Ok(ReviewDiffResult {
+        path: resource.path,
+        branch,
+        base_ref,
+        files,
+        current_file,
+    })
+}
+
+fn load_review_diff_file_in_db(
+    db: &SqliteConnection,
+    local_resource_id: String,
+    base_ref: String,
+    branch: String,
+    path: String,
+) -> Result<ReviewDiffFile, String> {
+    let resource = local_resource_for_review(db, &local_resource_id)?;
+    let resource_path = PathBuf::from(resource.path);
+    if !verify_ref(&resource_path, &base_ref) {
+        return Err("Review base ref was not found in the local resource.".to_string());
+    }
+    if !verify_ref(&resource_path, &branch) {
+        return Err("Review branch was not found in the local resource.".to_string());
+    }
+    if path.trim().is_empty() {
+        return Err("Review file path is required.".to_string());
+    }
+
+    review_diff_file(&resource_path, &base_ref, &branch, &path)
+}
+
 fn save_connection_in_db(
     db: &SqliteConnection,
     input: ConnectionInput,
 ) -> rusqlite::Result<ConnectionRecord> {
     let timestamp = now_millis();
     let id = input.id.unwrap_or_else(|| new_id("connection"));
-    let base_url = normalize_base_url(&input.base_url);
+    let provider = input.provider.trim().to_string();
+    let name = input.name.trim().to_string();
+    let token = input.token.trim().to_string();
+    let api_key = input.api_key.map(|value| value.trim().to_string());
+    let base_url = if provider == "trello" {
+        "https://api.trello.com".to_string()
+    } else {
+        normalize_base_url(&input.base_url)
+    };
     let exists: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM connections WHERE id = ?1)",
         params![id],
@@ -695,11 +1398,11 @@ fn save_connection_in_db(
         db.execute(
             "UPDATE connections SET provider = ?1, name = ?2, base_url = ?3, api_key = ?4, token = ?5, updated_at = ?6 WHERE id = ?7",
             params![
-                input.provider,
-                input.name,
+                provider,
+                name,
                 base_url,
-                input.api_key,
-                input.token,
+                api_key,
+                token,
                 timestamp,
                 id
             ],
@@ -710,11 +1413,11 @@ fn save_connection_in_db(
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 id,
-                input.provider,
-                input.name,
+                provider,
+                name,
                 base_url,
-                input.api_key,
-                input.token,
+                api_key,
+                token,
                 timestamp,
                 timestamp
             ],
@@ -757,9 +1460,13 @@ fn create_task_in_db(
 
 fn get_task(db: &SqliteConnection, id: &str) -> rusqlite::Result<Option<Task>> {
     db.query_row(
-        "SELECT id, project_id, title, body, status, source_url, created_at, updated_at FROM tasks WHERE id = ?1",
+        "SELECT t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
+                l.provider, l.kind
+         FROM tasks t
+         LEFT JOIN task_links l ON l.task_id = t.id
+         WHERE t.id = ?1",
         params![id],
-        row_to_task,
+        row_to_task_with_source,
     )
     .optional()
 }
@@ -769,9 +1476,13 @@ fn get_task_by_source_url(
     source_url: &str,
 ) -> rusqlite::Result<Option<Task>> {
     db.query_row(
-        "SELECT id, project_id, title, body, status, source_url, created_at, updated_at FROM tasks WHERE source_url = ?1 LIMIT 1",
+        "SELECT t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
+                l.provider, l.kind
+         FROM tasks t
+         LEFT JOIN task_links l ON l.task_id = t.id
+         WHERE t.source_url = ?1 LIMIT 1",
         params![source_url],
-        row_to_task,
+        row_to_task_with_source,
     )
     .optional()
 }
@@ -783,15 +1494,27 @@ fn get_task_by_link(
     external_id: &str,
 ) -> rusqlite::Result<Option<Task>> {
     db.query_row(
-        "SELECT t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at
+        "SELECT t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
+                l.provider, l.kind
          FROM tasks t
          INNER JOIN task_links l ON l.task_id = t.id
          WHERE l.provider = ?1 AND l.kind = ?2 AND l.external_id = ?3
          LIMIT 1",
         params![provider, kind, external_id],
-        row_to_task,
+        row_to_task_with_source,
     )
     .optional()
+}
+
+fn delete_task_in_db(db: &SqliteConnection, id: &str) -> Result<(), String> {
+    let deleted = db
+        .execute("DELETE FROM tasks WHERE id = ?1", params![id])
+        .map_err(db_error)?;
+    if deleted == 0 {
+        return Err("Task not found".to_string());
+    }
+
+    Ok(())
 }
 
 fn validate_relation_type(relation_type: &str) -> Result<(), String> {
@@ -808,9 +1531,11 @@ fn get_task_relation_view(
 ) -> rusqlite::Result<Option<TaskRelationView>> {
     db.query_row(
         "SELECT r.id, r.source_task_id, r.target_task_id, r.relation_type, r.created_at,
-                t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at
+                t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
+                l.provider, l.kind
          FROM task_relations r
          INNER JOIN tasks t ON t.id = CASE WHEN r.source_task_id = ?2 THEN r.target_task_id ELSE r.source_task_id END
+         LEFT JOIN task_links l ON l.task_id = t.id
          WHERE r.id = ?1",
         params![relation_id, current_task_id],
         row_to_task_relation_view,
@@ -832,6 +1557,8 @@ fn row_to_task_relation_view(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRe
             body: row.get(8)?,
             status: row.get(9)?,
             source_url: row.get(10)?,
+            source_provider: row.get(13)?,
+            source_kind: row.get(14)?,
             created_at: row.get(11)?,
             updated_at: row.get(12)?,
         },
@@ -944,8 +1671,8 @@ fn link_task_resource_in_db(
 ) -> rusqlite::Result<()> {
     db.execute(
         "INSERT INTO task_links
-            (task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, fetched_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            (task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, target_branch, fetched_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(task_id) DO UPDATE SET
             provider = excluded.provider,
             kind = excluded.kind,
@@ -955,6 +1682,7 @@ fn link_task_resource_in_db(
             external_title = excluded.external_title,
             external_body = excluded.external_body,
             external_state = excluded.external_state,
+            target_branch = excluded.target_branch,
             fetched_at = excluded.fetched_at",
         params![
             &task_id,
@@ -966,6 +1694,7 @@ fn link_task_resource_in_db(
             &metadata.title,
             &metadata.body,
             &metadata.state,
+            &metadata.target_branch,
             &metadata.fetched_at
         ],
     )?;
@@ -978,7 +1707,7 @@ fn link_task_resource_in_db(
 
 fn list_task_links_in_db(db: &SqliteConnection, task_id: &str) -> rusqlite::Result<Vec<TaskLink>> {
     let mut statement = db.prepare(
-        "SELECT task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, fetched_at
+        "SELECT task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, target_branch, fetched_at
          FROM task_links WHERE task_id = ?1 ORDER BY provider ASC, kind ASC",
     )?;
     let links = statement
@@ -998,7 +1727,7 @@ fn parsed_payload_from_task_link(task: &Task, link: &TaskLink) -> ParsedInputPay
     }
 }
 
-fn apply_trello_metadata_to_task(
+fn apply_provider_metadata_to_task(
     db: &SqliteConnection,
     task: &Task,
     link: &TaskLink,
@@ -1021,85 +1750,203 @@ fn apply_trello_metadata_to_task(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| task.title.clone());
     let refreshed_body = metadata.body.clone().unwrap_or_default();
+    let refreshed_status = metadata
+        .state
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| task.status.clone());
     db.execute(
-        "UPDATE tasks SET title = ?1, body = ?2, updated_at = ?3 WHERE id = ?4",
-        params![refreshed_title, refreshed_body, now_millis(), &task.id],
+        "UPDATE tasks SET title = ?1, body = ?2, status = ?3, updated_at = ?4 WHERE id = ?5",
+        params![
+            refreshed_title,
+            refreshed_body,
+            refreshed_status,
+            now_millis(),
+            &task.id
+        ],
     )?;
 
     get_task(db, &task.id)?.ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
 }
 
-fn refresh_task_external_details_in_db(
+fn task_link_supports_external_refresh(link: &TaskLink) -> bool {
+    matches!(
+        (link.provider.as_str(), link.kind.as_str()),
+        ("trello", "trello_card")
+            | ("github", "github_issue")
+            | ("github", "pull_request")
+            | ("gitlab", "gitlab_issue")
+            | ("gitlab", "merge_request")
+    )
+}
+
+fn provider_connection_required_notice(provider: &str) -> String {
+    let label = match provider {
+        "github" => "GitHub",
+        "gitlab" => "GitLab",
+        "trello" => "Trello",
+        _ => provider,
+    };
+    format!("Please add a {label} connection to this project.")
+}
+
+fn provider_external_sync_failed_notice(provider: &str) -> String {
+    let label = match provider {
+        "github" => "GitHub",
+        "gitlab" => "GitLab",
+        "trello" => "Trello",
+        _ => provider,
+    };
+    format!("Could not sync external details from {label}. Check the connection and try again.")
+}
+
+fn prepare_task_external_refresh(
     db: &SqliteConnection,
-    task_id: String,
-) -> Result<RefreshTaskExternalDetailsResult, String> {
-    let task = get_task(db, &task_id)
+    task_id: &str,
+) -> Result<TaskExternalRefreshPreparation, String> {
+    let task = get_task(db, task_id)
         .map_err(db_error)?
         .ok_or_else(|| "Task not found".to_string())?;
     let links = list_task_links_in_db(db, &task.id).map_err(db_error)?;
-    let Some(link) = links.first() else {
-        return Ok(RefreshTaskExternalDetailsResult {
-            task,
-            links,
-            notice: None,
-            connection_required: false,
-        });
+    let Some(link) = links.first().cloned() else {
+        return Ok(TaskExternalRefreshPreparation::Ready(
+            RefreshTaskExternalDetailsResult {
+                task,
+                links,
+                notice: None,
+                connection_required: false,
+            },
+        ));
     };
 
-    if link.provider != "trello" || link.kind != "trello_card" {
-        return Ok(RefreshTaskExternalDetailsResult {
-            task,
-            links,
-            notice: None,
-            connection_required: false,
-        });
+    if !task_link_supports_external_refresh(&link) {
+        return Ok(TaskExternalRefreshPreparation::Ready(
+            RefreshTaskExternalDetailsResult {
+                task,
+                links,
+                notice: None,
+                connection_required: false,
+            },
+        ));
     }
 
     let Some(project_id) = task.project_id.as_deref() else {
-        return Ok(RefreshTaskExternalDetailsResult {
-            task,
-            links,
-            notice: Some("Please add a Trello connection to this project.".to_string()),
-            connection_required: true,
-        });
+        let notice = provider_connection_required_notice(&link.provider);
+        return Ok(TaskExternalRefreshPreparation::Ready(
+            RefreshTaskExternalDetailsResult {
+                task,
+                links,
+                notice: Some(notice),
+                connection_required: true,
+            },
+        ));
     };
 
-    let parsed = parsed_payload_from_task_link(&task, link);
+    let parsed = parsed_payload_from_task_link(&task, &link);
     let connection = select_best_connection(db, project_id, &parsed).map_err(db_error)?;
     let Some(connection) = connection else {
+        let notice = provider_connection_required_notice(&link.provider);
+        return Ok(TaskExternalRefreshPreparation::Ready(
+            RefreshTaskExternalDetailsResult {
+                task,
+                links,
+                notice: Some(notice),
+                connection_required: true,
+            },
+        ));
+    };
+
+    Ok(TaskExternalRefreshPreparation::Fetch {
+        task,
+        links,
+        link,
+        connection,
+        parsed,
+    })
+}
+
+fn apply_refreshed_task_external_metadata(
+    db: &SqliteConnection,
+    original_task: &Task,
+    original_link: &TaskLink,
+    metadata: &ProviderMetadata,
+) -> Result<RefreshTaskExternalDetailsResult, String> {
+    let Some(current_task) = get_task(db, &original_task.id).map_err(db_error)? else {
         return Ok(RefreshTaskExternalDetailsResult {
-            task,
-            links,
-            notice: Some("Please add a Trello connection to this project.".to_string()),
-            connection_required: true,
+            task: original_task.clone(),
+            links: Vec::new(),
+            notice: Some("Task was removed before external refresh finished.".to_string()),
+            connection_required: false,
+        });
+    };
+    let current_links = list_task_links_in_db(db, &current_task.id).map_err(db_error)?;
+    let Some(current_link) = current_links.iter().find(|link| {
+        link.provider == original_link.provider
+            && link.kind == original_link.kind
+            && link.external_id == original_link.external_id
+    }) else {
+        return Ok(RefreshTaskExternalDetailsResult {
+            task: current_task,
+            links: current_links,
+            notice: Some("External link changed before refresh finished.".to_string()),
+            connection_required: false,
         });
     };
 
-    match fetch_provider_metadata_with_connection(&connection, &parsed) {
+    let refreshed_task = apply_provider_metadata_to_task(db, &current_task, current_link, metadata)
+        .map_err(db_error)?;
+    Ok(RefreshTaskExternalDetailsResult {
+        links: list_task_links_in_db(db, &refreshed_task.id).map_err(db_error)?,
+        task: refreshed_task,
+        notice: metadata.notice.clone(),
+        connection_required: false,
+    })
+}
+
+#[cfg(test)]
+fn complete_task_external_refresh(
+    db: &SqliteConnection,
+    task: &Task,
+    link: &TaskLink,
+    links: Vec<TaskLink>,
+    connection: ConnectionRecord,
+    parsed: &ParsedInputPayload,
+) -> Result<RefreshTaskExternalDetailsResult, String> {
+    match fetch_provider_metadata_with_connection(&connection, parsed) {
         Ok(mut metadata) => {
             metadata.connection_id = Some(connection.id);
             metadata.fetched_at = Some(now_millis());
-            let refreshed_task =
-                apply_trello_metadata_to_task(db, &task, link, &metadata).map_err(db_error)?;
-            Ok(RefreshTaskExternalDetailsResult {
-                links: list_task_links_in_db(db, &refreshed_task.id).map_err(db_error)?,
-                task: refreshed_task,
-                notice: metadata.notice,
-                connection_required: false,
-            })
+            apply_refreshed_task_external_metadata(db, task, link, &metadata)
         }
-        Err(error) => Ok(RefreshTaskExternalDetailsResult {
-            task,
+        Err(_) => Ok(RefreshTaskExternalDetailsResult {
+            task: task.clone(),
             links,
-            notice: Some(format!("Could not fetch external details: {error}")),
+            notice: Some(provider_external_sync_failed_notice(&connection.provider)),
             connection_required: false,
         }),
     }
 }
 
+#[cfg(test)]
+fn refresh_task_external_details_in_db(
+    db: &SqliteConnection,
+    task_id: String,
+) -> Result<RefreshTaskExternalDetailsResult, String> {
+    match prepare_task_external_refresh(db, &task_id)? {
+        TaskExternalRefreshPreparation::Ready(result) => Ok(result),
+        TaskExternalRefreshPreparation::Fetch {
+            task,
+            links,
+            link,
+            connection,
+            parsed,
+        } => complete_task_external_refresh(db, &task, &link, links, connection, &parsed),
+    }
+}
+
 fn migrate_pull_requests_into_tasks(db: &SqliteConnection) -> rusqlite::Result<()> {
     let mut statement = db.prepare(
-        "SELECT id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, fetched_at, created_at, updated_at
+        "SELECT id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, target_branch, fetched_at, created_at, updated_at
          FROM pull_requests ORDER BY created_at ASC",
     )?;
     let pull_requests = statement
@@ -1138,6 +1985,7 @@ fn migrate_pull_requests_into_tasks(db: &SqliteConnection) -> rusqlite::Result<(
                 .or_else(|| Some(pull_request.title.clone())),
             body: pull_request.external_body.clone(),
             state: pull_request.external_state.clone(),
+            target_branch: pull_request.target_branch.clone(),
             url: Some(pull_request.pr_url.clone()),
             fetched_at: pull_request.fetched_at,
             notice: None,
@@ -1364,6 +2212,20 @@ fn create_smart_task_in_db(
         &metadata,
     )
     .map_err(db_error)?;
+    if let Some(status) = metadata
+        .state
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+    {
+        db.execute(
+            "UPDATE tasks SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![status, now_millis(), &task.id],
+        )
+        .map_err(db_error)?;
+    }
+    let task = get_task(db, &task.id)
+        .map_err(db_error)?
+        .ok_or_else(|| "Task not found".to_string())?;
 
     Ok(SmartTaskResult {
         task: Some(task),
@@ -1521,6 +2383,7 @@ impl ProviderMetadata {
             title: None,
             body: None,
             state: None,
+            target_branch: None,
             url: None,
             fetched_at: None,
             notice: None,
@@ -1562,7 +2425,12 @@ fn fetch_json(url: &str, headers: Vec<(&str, String)>) -> Result<Value, String> 
     let response = request.send().map_err(db_error)?;
     let status = response.status();
     if !status.is_success() {
-        return Err(format!("provider returned {status}"));
+        let body = response.text().unwrap_or_default();
+        let detail = body.trim();
+        if detail.is_empty() {
+            return Err(format!("provider returned {status}"));
+        }
+        return Err(format!("provider returned {status}: {detail}"));
     }
     response.json::<Value>().map_err(db_error)
 }
@@ -1663,12 +2531,13 @@ fn test_gitlab_connection(connection: &ConnectionRecord) -> Result<Option<String
 }
 
 fn test_trello_connection(connection: &ConnectionRecord) -> Result<Option<String>, String> {
-    let api_key = connection.api_key.as_deref().unwrap_or_default();
+    let api_key = connection.api_key.as_deref().unwrap_or_default().trim();
+    let token = connection.token.trim();
     let json = fetch_json(
         &format!(
             "https://api.trello.com/1/members/me?key={}&token={}",
             percent_encode(api_key),
-            percent_encode(&connection.token)
+            percent_encode(token)
         ),
         vec![],
     )?;
@@ -1686,8 +2555,9 @@ fn fetch_trello_card(
     connection: &ConnectionRecord,
     parsed: &ParsedInputPayload,
 ) -> Result<ProviderMetadata, String> {
-    let api_key = connection.api_key.as_deref().unwrap_or_default();
-    if api_key.trim().is_empty() || connection.token.trim().is_empty() {
+    let api_key = connection.api_key.as_deref().unwrap_or_default().trim();
+    let token = connection.token.trim();
+    if api_key.is_empty() || token.is_empty() {
         return Err("Trello API key and token are required".to_string());
     }
     let id = parsed
@@ -1698,22 +2568,35 @@ fn fetch_trello_card(
         "https://api.trello.com/1/cards/{}?key={}&token={}",
         percent_encode(id),
         percent_encode(api_key),
-        percent_encode(&connection.token)
+        percent_encode(token)
     );
     let json = fetch_json(&url, vec![])?;
+    let list_url = format!(
+        "https://api.trello.com/1/cards/{}/list?key={}&token={}",
+        percent_encode(id),
+        percent_encode(api_key),
+        percent_encode(token)
+    );
+    let list_json = fetch_json(&list_url, vec![])?;
     Ok(ProviderMetadata {
         title: json_string(&json, "name"),
         body: json_string(&json, "desc"),
-        state: json_bool(&json, "closed").map(|closed| {
-            if closed {
-                "closed".to_string()
-            } else {
-                "open".to_string()
-            }
-        }),
+        state: trello_list_state(&list_json),
         url: json_string(&json, "url").or_else(|| parsed.url.clone()),
         ..ProviderMetadata::empty()
     })
+}
+
+fn github_pull_request_state(json: &Value) -> Option<String> {
+    if json_bool(json, "merged") == Some(true) {
+        return Some("merged".to_string());
+    }
+
+    json_string(json, "state")
+}
+
+fn github_pull_request_target_branch(json: &Value) -> Option<String> {
+    json.get("base").and_then(|base| json_string(base, "ref"))
 }
 
 fn fetch_github_pull_request(
@@ -1733,7 +2616,8 @@ fn fetch_github_pull_request(
     Ok(ProviderMetadata {
         title: json_string(&json, "title"),
         body: json_string(&json, "body"),
-        state: json_string(&json, "state"),
+        state: github_pull_request_state(&json),
+        target_branch: github_pull_request_target_branch(&json),
         url: json_string(&json, "html_url").or_else(|| parsed.url.clone()),
         ..ProviderMetadata::empty()
     })
@@ -1756,7 +2640,7 @@ fn fetch_github_issue(
     Ok(ProviderMetadata {
         title: json_string(&json, "title"),
         body: json_string(&json, "body"),
-        state: json_string(&json, "state"),
+        state: github_issue_state(&json),
         url: json_string(&json, "html_url").or_else(|| parsed.url.clone()),
         ..ProviderMetadata::empty()
     })
@@ -1778,6 +2662,7 @@ fn fetch_gitlab_merge_request(
         title: json_string(&json, "title"),
         body: json_string(&json, "description"),
         state: json_string(&json, "state"),
+        target_branch: json_string(&json, "target_branch"),
         url: json_string(&json, "web_url").or_else(|| parsed.url.clone()),
         ..ProviderMetadata::empty()
     })
@@ -1848,6 +2733,14 @@ fn json_string(json: &Value, key: &str) -> Option<String> {
 
 fn json_bool(json: &Value, key: &str) -> Option<bool> {
     json.get(key).and_then(Value::as_bool)
+}
+
+fn trello_list_state(json: &Value) -> Option<String> {
+    json_string(json, "name")
+}
+
+fn github_issue_state(json: &Value) -> Option<String> {
+    json_string(json, "state")
 }
 
 #[tauri::command]
@@ -1951,6 +2844,105 @@ fn disconnect_resource(state: tauri::State<'_, AppState>, id: String) -> Result<
 }
 
 #[tauri::command]
+fn list_local_resources(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+    repo_url: Option<String>,
+) -> Result<Vec<LocalResource>, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    let normalized_repo_url = repo_url
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .and_then(normalize_repository_url);
+
+    if let Some(normalized_repo_url) = normalized_repo_url {
+        let mut statement = db
+            .prepare(
+                "SELECT id, project_id, provider, repo_url, path, name, created_at, updated_at
+                 FROM local_resources
+                 WHERE project_id = ?1 AND normalized_repo_url = ?2
+                 ORDER BY updated_at DESC",
+            )
+            .map_err(db_error)?;
+        let resources = statement
+            .query_map(
+                params![project_id, normalized_repo_url],
+                row_to_local_resource,
+            )
+            .map_err(db_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_error)?;
+        return Ok(resources);
+    }
+
+    let mut statement = db
+        .prepare(
+            "SELECT id, project_id, provider, repo_url, path, name, created_at, updated_at
+             FROM local_resources
+             WHERE project_id = ?1
+             ORDER BY updated_at DESC",
+        )
+        .map_err(db_error)?;
+    let resources = statement
+        .query_map(params![project_id], row_to_local_resource)
+        .map_err(db_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_error)?;
+    Ok(resources)
+}
+
+#[tauri::command]
+fn save_local_resource(
+    state: tauri::State<'_, AppState>,
+    input: LocalResourceInput,
+) -> Result<LocalResource, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    save_local_resource_in_db(&db, input)
+}
+
+#[tauri::command]
+fn delete_local_resource(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
+    let db = state.db.lock().map_err(db_error)?;
+    db.execute("DELETE FROM local_resources WHERE id = ?1", params![id])
+        .map_err(db_error)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn checkout_pull_request_for_review(
+    state: tauri::State<'_, AppState>,
+    local_resource_id: String,
+    provider: String,
+    pr_url: String,
+) -> Result<PullRequestCheckoutResult, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    checkout_pull_request_for_review_in_db(&db, local_resource_id, provider, pr_url)
+}
+
+#[tauri::command]
+fn load_review_diff(
+    state: tauri::State<'_, AppState>,
+    local_resource_id: String,
+    branch: Option<String>,
+    base_ref: Option<String>,
+) -> Result<ReviewDiffResult, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    load_review_diff_in_db(&db, local_resource_id, branch, base_ref)
+}
+
+#[tauri::command]
+fn load_review_diff_file(
+    state: tauri::State<'_, AppState>,
+    local_resource_id: String,
+    base_ref: String,
+    branch: String,
+    path: String,
+) -> Result<ReviewDiffFile, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    load_review_diff_file_in_db(&db, local_resource_id, base_ref, branch, path)
+}
+
+#[tauri::command]
 fn create_task_from_input(
     state: tauri::State<'_, AppState>,
     input: String,
@@ -1968,20 +2960,28 @@ fn list_tasks(
 ) -> Result<Vec<Task>, String> {
     let db = state.db.lock().map_err(db_error)?;
     let sql = if project_id.is_some() {
-        "SELECT id, project_id, title, body, status, source_url, created_at, updated_at FROM tasks WHERE project_id = ?1 ORDER BY created_at DESC"
+        "SELECT t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
+                l.provider, l.kind
+         FROM tasks t
+         LEFT JOIN task_links l ON l.task_id = t.id
+         WHERE t.project_id = ?1 ORDER BY t.created_at DESC"
     } else {
-        "SELECT id, project_id, title, body, status, source_url, created_at, updated_at FROM tasks ORDER BY created_at DESC"
+        "SELECT t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
+                l.provider, l.kind
+         FROM tasks t
+         LEFT JOIN task_links l ON l.task_id = t.id
+         ORDER BY t.created_at DESC"
     };
     let mut statement = db.prepare(sql).map_err(db_error)?;
     let tasks = if let Some(project_id) = project_id {
         statement
-            .query_map(params![project_id], row_to_task)
+            .query_map(params![project_id], row_to_task_with_source)
             .map_err(db_error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(db_error)?
     } else {
         statement
-            .query_map([], row_to_task)
+            .query_map([], row_to_task_with_source)
             .map_err(db_error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(db_error)?
@@ -2021,6 +3021,12 @@ fn update_task(
 }
 
 #[tauri::command]
+fn delete_task(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
+    let db = state.db.lock().map_err(db_error)?;
+    delete_task_in_db(&db, &id)
+}
+
+#[tauri::command]
 fn link_task_resource(
     state: tauri::State<'_, AppState>,
     task_id: String,
@@ -2056,8 +3062,34 @@ fn refresh_task_external_details(
     state: tauri::State<'_, AppState>,
     task_id: String,
 ) -> Result<RefreshTaskExternalDetailsResult, String> {
-    let db = state.db.lock().map_err(db_error)?;
-    refresh_task_external_details_in_db(&db, task_id)
+    let preparation = {
+        let db = state.db.lock().map_err(db_error)?;
+        prepare_task_external_refresh(&db, &task_id)?
+    };
+
+    match preparation {
+        TaskExternalRefreshPreparation::Ready(result) => Ok(result),
+        TaskExternalRefreshPreparation::Fetch {
+            task,
+            links,
+            link,
+            connection,
+            parsed,
+        } => match fetch_provider_metadata_with_connection(&connection, &parsed) {
+            Ok(mut metadata) => {
+                metadata.connection_id = Some(connection.id);
+                metadata.fetched_at = Some(now_millis());
+                let db = state.db.lock().map_err(db_error)?;
+                apply_refreshed_task_external_metadata(&db, &task, &link, &metadata)
+            }
+            Err(_) => Ok(RefreshTaskExternalDetailsResult {
+                task,
+                links,
+                notice: Some(provider_external_sync_failed_notice(&connection.provider)),
+                connection_required: false,
+            }),
+        },
+    }
 }
 
 #[tauri::command]
@@ -2069,9 +3101,11 @@ fn list_task_relations(
     let mut statement = db
         .prepare(
             "SELECT r.id, r.source_task_id, r.target_task_id, r.relation_type, r.created_at,
-                    t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at
+                    t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
+                    l.provider, l.kind
              FROM task_relations r
              INNER JOIN tasks t ON t.id = CASE WHEN r.source_task_id = ?1 THEN r.target_task_id ELSE r.source_task_id END
+             LEFT JOIN task_links l ON l.task_id = t.id
              WHERE r.source_task_id = ?1 OR r.target_task_id = ?1
              ORDER BY r.created_at DESC",
         )
@@ -2208,7 +3242,7 @@ fn list_pull_requests(
     let db = state.db.lock().map_err(db_error)?;
     let mut statement = db
         .prepare(
-            "SELECT id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, fetched_at, created_at, updated_at
+            "SELECT id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, target_branch, fetched_at, created_at, updated_at
              FROM pull_requests WHERE project_id = ?1 ORDER BY updated_at DESC",
         )
         .map_err(db_error)?;
@@ -2262,9 +3296,9 @@ fn save_pull_request(
             "UPDATE pull_requests
              SET project_id = ?1, provider = ?2, repo_url = ?3, pr_url = ?4, title = ?5,
                  status = ?6, review_notes = ?7, test_state = ?8, connection_id = ?9,
-                 external_title = ?10, external_body = ?11, external_state = ?12, fetched_at = ?13,
-                 updated_at = ?14
-             WHERE id = ?15",
+                 external_title = ?10, external_body = ?11, external_state = ?12, target_branch = ?13, fetched_at = ?14,
+                 updated_at = ?15
+             WHERE id = ?16",
             params![
                 input.project_id,
                 input.provider,
@@ -2281,6 +3315,10 @@ fn save_pull_request(
                 metadata.title.clone().or(input.external_title.clone()),
                 metadata.body.clone().or(input.external_body.clone()),
                 metadata.state.clone().or(input.external_state.clone()),
+                metadata
+                    .target_branch
+                    .clone()
+                    .or(input.target_branch.clone()),
                 metadata.fetched_at.or(input.fetched_at),
                 timestamp,
                 target_id
@@ -2290,8 +3328,8 @@ fn save_pull_request(
     } else {
         db.execute(
             "INSERT INTO pull_requests
-             (id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, fetched_at, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+             (id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, target_branch, fetched_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 target_id,
                 input.project_id,
@@ -2306,6 +3344,10 @@ fn save_pull_request(
                 metadata.title.clone().or(input.external_title.clone()),
                 metadata.body.clone().or(input.external_body.clone()),
                 metadata.state.clone().or(input.external_state.clone()),
+                metadata
+                    .target_branch
+                    .clone()
+                    .or(input.target_branch.clone()),
                 metadata.fetched_at.or(input.fetched_at),
                 timestamp,
                 timestamp
@@ -2315,7 +3357,7 @@ fn save_pull_request(
     }
 
     let pull_request = db.query_row(
-        "SELECT id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, fetched_at, created_at, updated_at
+        "SELECT id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, target_branch, fetched_at, created_at, updated_at
          FROM pull_requests WHERE id = ?1",
         params![target_id],
         row_to_pull_request,
@@ -2338,7 +3380,7 @@ fn update_pull_request_review_state(
     let db = state.db.lock().map_err(db_error)?;
     let existing = db
         .query_row(
-            "SELECT id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, fetched_at, created_at, updated_at
+            "SELECT id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, target_branch, fetched_at, created_at, updated_at
              FROM pull_requests WHERE id = ?1",
             params![id],
             row_to_pull_request,
@@ -2359,7 +3401,7 @@ fn update_pull_request_review_state(
     )
     .map_err(db_error)?;
     db.query_row(
-        "SELECT id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, fetched_at, created_at, updated_at
+        "SELECT id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, target_branch, fetched_at, created_at, updated_at
          FROM pull_requests WHERE id = ?1",
         params![id],
         row_to_pull_request,
@@ -2430,7 +3472,7 @@ mod tests {
             base_url: match provider {
                 "gitlab" => "https://gitlab.example.org".to_string(),
                 "github" => "https://github.com".to_string(),
-                "trello" => "https://trello.com".to_string(),
+                "trello" => "https://api.trello.com".to_string(),
                 _ => "https://example.org".to_string(),
             },
             api_key: api_key.map(ToString::to_string),
@@ -2440,17 +3482,329 @@ mod tests {
         }
     }
 
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "dev-crash-flash-ai-studio-{name}-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn run_git_test(path: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_repo_with_remote(remote_name: &str, remote_url: &str) -> PathBuf {
+        let path = unique_temp_dir("repo");
+        fs::create_dir_all(&path).expect("create temp git repo");
+        run_git_test(&path, &["init"]);
+        run_git_test(&path, &["remote", "add", remote_name, remote_url]);
+        path
+    }
+
+    fn git_repo_with_origin(origin: &str) -> PathBuf {
+        git_repo_with_remote("origin", origin)
+    }
+
+    fn review_diff_repo_with_origin(origin: &str) -> PathBuf {
+        let path = git_repo_with_origin(origin);
+        run_git_test(&path, &["config", "user.email", "test@example.org"]);
+        run_git_test(&path, &["config", "user.name", "Test User"]);
+        run_git_test(&path, &["checkout", "-b", "main"]);
+        fs::write(path.join("a.txt"), "base a\n").expect("write a base");
+        fs::write(path.join("b.txt"), "base b\n").expect("write b base");
+        run_git_test(&path, &["add", "a.txt", "b.txt"]);
+        run_git_test(&path, &["commit", "-m", "base"]);
+        run_git_test(&path, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        run_git_test(
+            &path,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
+        run_git_test(&path, &["checkout", "-b", "review/test"]);
+        fs::write(path.join("a.txt"), "base a\nreview a\n").expect("write a review");
+        fs::write(path.join("b.txt"), "base b\nreview b\n").expect("write b review");
+        fs::write(path.join("--flag.txt"), "path-safe\n").expect("write path-safe file");
+        run_git_test(&path, &["add", "--", "a.txt", "b.txt", "--flag.txt"]);
+        run_git_test(&path, &["commit", "-m", "review"]);
+        path
+    }
+
+    fn save_test_local_resource(
+        db: &SqliteConnection,
+        project_id: &str,
+        path: &Path,
+    ) -> LocalResource {
+        save_local_resource_in_db(
+            db,
+            LocalResourceInput {
+                project_id: project_id.to_string(),
+                path: path.to_string_lossy().to_string(),
+                expected_provider: Some("github".to_string()),
+                expected_repo_url: Some("https://github.com/owner/repo".to_string()),
+                name: None,
+            },
+        )
+        .expect("save local resource")
+    }
+
+    #[test]
+    fn normalizes_repository_urls_for_matching() {
+        assert_eq!(
+            normalize_repository_url("https://github.com/Owner/Repo.git/").as_deref(),
+            Some("github.com/owner/repo")
+        );
+        assert_eq!(
+            normalize_repository_url("git@github.com:Owner/Repo.git").as_deref(),
+            Some("github.com/owner/repo")
+        );
+        assert_eq!(
+            normalize_repository_url("ssh://git@gitlab.example.org/group/app.git").as_deref(),
+            Some("gitlab.example.org/group/app")
+        );
+    }
+
+    #[test]
+    fn derives_checkout_targets_for_github_and_gitlab() {
+        assert_eq!(
+            checkout_target("github", "https://github.com/owner/repo/pull/42")
+                .expect("github target"),
+            (
+                "pull/42/head".to_string(),
+                "review/github-pr-42".to_string(),
+                "review/github-pr-42".to_string()
+            )
+        );
+        assert_eq!(
+            checkout_target(
+                "gitlab",
+                "https://gitlab.example.org/group/app/-/merge_requests/7"
+            )
+            .expect("gitlab target"),
+            (
+                "merge-requests/7/head".to_string(),
+                "review/gitlab-mr-7".to_string(),
+                "review/gitlab-mr-7".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn saves_multiple_local_resources_for_same_repo_and_rejects_mismatches() {
+        let db = memory_db();
+        let project = create_project_in_db(&db, "Access".to_string(), None, None).expect("project");
+        let first_path = git_repo_with_origin("git@github.com:owner/repo.git");
+        let second_path = git_repo_with_origin("https://github.com/owner/repo.git");
+
+        let first = save_local_resource_in_db(
+            &db,
+            LocalResourceInput {
+                project_id: project.id.clone(),
+                path: first_path.to_string_lossy().to_string(),
+                expected_provider: Some("github".to_string()),
+                expected_repo_url: Some("https://github.com/owner/repo".to_string()),
+                name: None,
+            },
+        )
+        .expect("save first local resource");
+        let duplicate = save_local_resource_in_db(
+            &db,
+            LocalResourceInput {
+                project_id: project.id.clone(),
+                path: first_path.to_string_lossy().to_string(),
+                expected_provider: Some("github".to_string()),
+                expected_repo_url: Some("https://github.com/owner/repo".to_string()),
+                name: Some("Renamed".to_string()),
+            },
+        )
+        .expect("save duplicate local resource");
+        let second = save_local_resource_in_db(
+            &db,
+            LocalResourceInput {
+                project_id: project.id,
+                path: second_path.to_string_lossy().to_string(),
+                expected_provider: Some("github".to_string()),
+                expected_repo_url: Some("https://github.com/owner/repo".to_string()),
+                name: None,
+            },
+        )
+        .expect("save second local resource");
+
+        assert_eq!(first.id, duplicate.id);
+        assert_ne!(first.id, second.id);
+
+        let mismatch = local_resource_from_directory(
+            &second_path.to_string_lossy(),
+            Some("gitlab"),
+            Some("https://gitlab.example.org/group/app"),
+        )
+        .unwrap_err();
+        assert!(mismatch.contains("repository"));
+    }
+
+    #[test]
+    fn local_resources_can_match_non_origin_remotes() {
+        let repo_path = git_repo_with_remote("upstream", "git@gitlab.example.org:group/app.git");
+
+        let (path, provider, normalized_repo_url) = local_resource_from_directory(
+            &repo_path.to_string_lossy(),
+            Some("gitlab"),
+            Some("https://gitlab.example.org/group/app"),
+        )
+        .expect("match upstream remote");
+
+        assert!(Path::new(&path).ends_with(repo_path.file_name().unwrap()));
+        assert_eq!(provider, "gitlab");
+        assert_eq!(normalized_repo_url, "gitlab.example.org/group/app");
+    }
+
+    #[test]
+    fn checkout_rejects_dirty_local_resources_before_fetch() {
+        let db = memory_db();
+        let project = create_project_in_db(&db, "Access".to_string(), None, None).expect("project");
+        let repo_path = git_repo_with_origin("git@github.com:owner/repo.git");
+        let resource = save_local_resource_in_db(
+            &db,
+            LocalResourceInput {
+                project_id: project.id,
+                path: repo_path.to_string_lossy().to_string(),
+                expected_provider: Some("github".to_string()),
+                expected_repo_url: Some("https://github.com/owner/repo".to_string()),
+                name: None,
+            },
+        )
+        .expect("save local resource");
+        fs::write(repo_path.join("untracked.txt"), "dirty").expect("write untracked file");
+
+        let error = checkout_pull_request_for_review_in_db(
+            &db,
+            resource.id,
+            "github".to_string(),
+            "https://github.com/owner/repo/pull/42".to_string(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("uncommitted or untracked changes"));
+    }
+
+    #[test]
+    fn loads_review_diff_first_file_and_specific_file() {
+        let db = memory_db();
+        let project = create_project_in_db(&db, "Access".to_string(), None, None).expect("project");
+        let repo_path = review_diff_repo_with_origin("git@github.com:owner/repo.git");
+        let resource = save_test_local_resource(&db, &project.id, &repo_path);
+
+        let diff = load_review_diff_in_db(
+            &db,
+            resource.id.clone(),
+            Some("review/test".to_string()),
+            None,
+        )
+        .expect("load review diff");
+
+        assert_eq!(diff.branch, "review/test");
+        assert_eq!(diff.base_ref, "origin/HEAD");
+        assert!(diff.files.contains(&"a.txt".to_string()));
+        assert!(diff.files.contains(&"b.txt".to_string()));
+        assert_eq!(
+            diff.current_file.as_ref().map(|file| file.path.as_str()),
+            diff.files.first().map(|value| value.as_str())
+        );
+        let current_file = diff.current_file.expect("first file");
+        assert!(current_file.diff.contains(&current_file.path));
+
+        let file = load_review_diff_file_in_db(
+            &db,
+            resource.id,
+            diff.base_ref,
+            diff.branch,
+            "b.txt".to_string(),
+        )
+        .expect("load b diff");
+        assert_eq!(file.path, "b.txt");
+        assert!(file.diff.contains("review b"));
+    }
+
+    #[test]
+    fn loads_path_safe_review_diff_file() {
+        let db = memory_db();
+        let project = create_project_in_db(&db, "Access".to_string(), None, None).expect("project");
+        let repo_path = review_diff_repo_with_origin("git@github.com:owner/repo.git");
+        let resource = save_test_local_resource(&db, &project.id, &repo_path);
+
+        let file = load_review_diff_file_in_db(
+            &db,
+            resource.id,
+            "origin/HEAD".to_string(),
+            "review/test".to_string(),
+            "--flag.txt".to_string(),
+        )
+        .expect("load path-safe diff");
+
+        assert_eq!(file.path, "--flag.txt");
+        assert!(file.diff.contains("path-safe"));
+    }
+
+    #[test]
+    fn loads_empty_review_diff() {
+        let db = memory_db();
+        let project = create_project_in_db(&db, "Access".to_string(), None, None).expect("project");
+        let repo_path = review_diff_repo_with_origin("git@github.com:owner/repo.git");
+        let resource = save_test_local_resource(&db, &project.id, &repo_path);
+
+        let diff = load_review_diff_in_db(&db, resource.id, Some("main".to_string()), None)
+            .expect("load empty diff");
+
+        assert!(diff.files.is_empty());
+        assert!(diff.current_file.is_none());
+    }
+
+    #[test]
+    fn loads_review_diff_with_preferred_target_base_ref() {
+        let db = memory_db();
+        let project = create_project_in_db(&db, "Access".to_string(), None, None).expect("project");
+        let repo_path = review_diff_repo_with_origin("git@github.com:owner/repo.git");
+        run_git_test(
+            &repo_path,
+            &["update-ref", "refs/remotes/origin/develop", "origin/HEAD"],
+        );
+        let resource = save_test_local_resource(&db, &project.id, &repo_path);
+
+        let diff = load_review_diff_in_db(
+            &db,
+            resource.id,
+            Some("review/test".to_string()),
+            Some("origin/develop".to_string()),
+        )
+        .expect("load diff against target");
+
+        assert_eq!(diff.base_ref, "origin/develop");
+        assert!(!diff.files.is_empty());
+    }
+
     #[test]
     fn creates_and_updates_project() {
         let db = memory_db();
-        let project =
-            create_project_in_db(
-                &db,
-                "Access".to_string(),
-                Some("GitBranch".to_string()),
-                None,
-            )
-                .expect("create project");
+        let project = create_project_in_db(
+            &db,
+            "Access".to_string(),
+            Some("GitBranch".to_string()),
+            None,
+        )
+        .expect("create project");
 
         assert_eq!(project.name, "Access");
         assert_eq!(project.icon, "GitBranch");
@@ -2510,7 +3864,9 @@ mod tests {
 
         assert!(column_exists(&db, "connections", "api_key"));
         assert!(column_exists(&db, "task_links", "connection_id"));
+        assert!(column_exists(&db, "task_links", "target_branch"));
         assert!(column_exists(&db, "pull_requests", "external_state"));
+        assert!(column_exists(&db, "pull_requests", "target_branch"));
     }
 
     #[test]
@@ -2574,10 +3930,12 @@ mod tests {
             .expect("query linked")
             .expect("linked task");
         assert_eq!(linked.id, task.id);
+        assert_eq!(linked.source_provider.as_deref(), Some("trello"));
+        assert_eq!(linked.source_kind.as_deref(), Some("trello_card"));
 
         let mut statement = db
             .prepare(
-                "SELECT task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, fetched_at
+                "SELECT task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, target_branch, fetched_at
                  FROM task_links WHERE task_id = ?1",
             )
             .expect("prepare task links query");
@@ -2608,6 +3966,65 @@ mod tests {
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].provider, "github");
         assert_eq!(links[0].kind, "github_issue");
+    }
+
+    #[test]
+    fn deletes_task_with_links_and_relations() {
+        let db = memory_db();
+        let project = create_project_in_db(&db, "Access".to_string(), None, None).expect("project");
+        let parent = create_task_in_db(
+            &db,
+            Some(project.id.clone()),
+            "Parent".to_string(),
+            "".to_string(),
+            None,
+        )
+        .expect("parent task");
+        let child = create_task_in_db(
+            &db,
+            Some(project.id),
+            "Child".to_string(),
+            "".to_string(),
+            None,
+        )
+        .expect("child task");
+
+        link_task_resource_in_db(
+            &db,
+            parent.id.clone(),
+            "trello".to_string(),
+            "trello_card".to_string(),
+            "card123".to_string(),
+            "https://trello.com/c/card123/review".to_string(),
+            &ProviderMetadata::empty(),
+        )
+        .expect("link task resource");
+        save_task_relation_in_db(
+            &db,
+            TaskRelationInput {
+                id: None,
+                source_task_id: parent.id.clone(),
+                target_task_id: child.id.clone(),
+                relation_type: "related".to_string(),
+            },
+        )
+        .expect("save relation");
+
+        delete_task_in_db(&db, &parent.id).expect("delete task");
+
+        assert!(get_task(&db, &parent.id)
+            .expect("load deleted task")
+            .is_none());
+        assert_eq!(
+            list_task_links_in_db(&db, &parent.id)
+                .expect("load deleted task links")
+                .len(),
+            0
+        );
+        let relation_count: i64 = db
+            .query_row("SELECT COUNT(*) FROM task_relations", [], |row| row.get(0))
+            .expect("count task relations");
+        assert_eq!(relation_count, 0);
     }
 
     #[test]
@@ -2644,7 +4061,7 @@ mod tests {
     }
 
     #[test]
-    fn trello_metadata_replaces_task_notes_and_link_metadata() {
+    fn provider_metadata_replaces_task_notes_status_and_link_metadata() {
         let db = memory_db();
         let project = create_project_in_db(&db, "Access".to_string(), None, None).expect("project");
         let connection = save_connection_in_db(
@@ -2684,29 +4101,122 @@ mod tests {
             connection_id: Some(connection.id),
             title: Some("Fetched Trello title".to_string()),
             body: Some("Fetched Trello description".to_string()),
-            state: Some("open".to_string()),
+            state: Some("Doing".to_string()),
+            target_branch: None,
             url: Some("https://trello.com/c/card123/fetched".to_string()),
             fetched_at: Some(123),
             notice: None,
         };
 
-        let refreshed = apply_trello_metadata_to_task(&db, &task, &link, &metadata)
-            .expect("apply metadata");
+        let refreshed =
+            apply_provider_metadata_to_task(&db, &task, &link, &metadata).expect("apply metadata");
         let links = list_task_links_in_db(&db, &refreshed.id).expect("load updated links");
 
         assert_eq!(refreshed.title, "Fetched Trello title");
         assert_eq!(refreshed.body, "Fetched Trello description");
-        assert_eq!(links[0].external_title.as_deref(), Some("Fetched Trello title"));
+        assert_eq!(refreshed.status, "Doing");
+        assert_eq!(refreshed.source_provider.as_deref(), Some("trello"));
+        assert_eq!(refreshed.source_kind.as_deref(), Some("trello_card"));
+        assert_eq!(
+            links[0].external_title.as_deref(),
+            Some("Fetched Trello title")
+        );
         assert_eq!(
             links[0].external_body.as_deref(),
             Some("Fetched Trello description")
         );
-        assert_eq!(links[0].external_state.as_deref(), Some("open"));
+        assert_eq!(links[0].external_state.as_deref(), Some("Doing"));
         assert_eq!(links[0].fetched_at, Some(123));
     }
 
     #[test]
-    fn refresh_ignores_non_trello_links() {
+    fn provider_metadata_apply_returns_current_task_when_link_disappears() {
+        let db = memory_db();
+        let project = create_project_in_db(&db, "Access".to_string(), None, None).expect("project");
+        let task = create_task_in_db(
+            &db,
+            Some(project.id),
+            "Review auth".to_string(),
+            "Local notes".to_string(),
+            Some("https://trello.com/c/card123/review-auth".to_string()),
+        )
+        .expect("task");
+        link_task_resource_in_db(
+            &db,
+            task.id.clone(),
+            "trello".to_string(),
+            "trello_card".to_string(),
+            "card123".to_string(),
+            "https://trello.com/c/card123/review-auth".to_string(),
+            &ProviderMetadata::empty(),
+        )
+        .expect("link trello card");
+        let link = list_task_links_in_db(&db, &task.id)
+            .expect("load links")
+            .remove(0);
+        db.execute(
+            "DELETE FROM task_links WHERE task_id = ?1",
+            params![&task.id],
+        )
+        .expect("delete link");
+
+        let result = apply_refreshed_task_external_metadata(
+            &db,
+            &task,
+            &link,
+            &ProviderMetadata {
+                connection_id: Some("connection_1".to_string()),
+                title: Some("Fetched title".to_string()),
+                body: Some("Fetched body".to_string()),
+                state: Some("Done".to_string()),
+                target_branch: None,
+                url: None,
+                fetched_at: Some(123),
+                notice: None,
+            },
+        )
+        .expect("apply stale metadata");
+
+        assert_eq!(result.task.body, "Local notes");
+        assert!(result.links.is_empty());
+        assert_eq!(
+            result.notice.as_deref(),
+            Some("External link changed before refresh finished.")
+        );
+    }
+
+    #[test]
+    fn refresh_ignores_unsupported_links() {
+        let db = memory_db();
+        let project = create_project_in_db(&db, "Access".to_string(), None, None).expect("project");
+        let task = create_task_in_db(
+            &db,
+            Some(project.id),
+            "External doc".to_string(),
+            "Local notes".to_string(),
+            Some("https://example.com/docs/12".to_string()),
+        )
+        .expect("task");
+        link_task_resource_in_db(
+            &db,
+            task.id.clone(),
+            "external".to_string(),
+            "external_url".to_string(),
+            "https://example.com/docs/12".to_string(),
+            "https://example.com/docs/12".to_string(),
+            &ProviderMetadata::empty(),
+        )
+        .expect("link external doc");
+
+        let result = refresh_task_external_details_in_db(&db, task.id).expect("refresh");
+
+        assert!(!result.connection_required);
+        assert_eq!(result.task.body, "Local notes");
+        assert_eq!(result.links[0].kind, "external_url");
+    }
+
+    #[test]
+    fn github_refresh_requires_enabled_project_connection() {
         let db = memory_db();
         let project = create_project_in_db(&db, "Access".to_string(), None, None).expect("project");
         let task = create_task_in_db(
@@ -2730,9 +4240,45 @@ mod tests {
 
         let result = refresh_task_external_details_in_db(&db, task.id).expect("refresh");
 
-        assert!(!result.connection_required);
+        assert!(result.connection_required);
         assert_eq!(result.task.body, "Local notes");
-        assert_eq!(result.links[0].kind, "github_issue");
+        assert_eq!(
+            result.notice.as_deref(),
+            Some("Please add a GitHub connection to this project.")
+        );
+    }
+
+    #[test]
+    fn gitlab_refresh_requires_enabled_project_connection() {
+        let db = memory_db();
+        let project = create_project_in_db(&db, "Access".to_string(), None, None).expect("project");
+        let task = create_task_in_db(
+            &db,
+            Some(project.id),
+            "GitLab merge request".to_string(),
+            "Local notes".to_string(),
+            Some("https://gitlab.com/owner/repo/-/merge_requests/12".to_string()),
+        )
+        .expect("task");
+        link_task_resource_in_db(
+            &db,
+            task.id.clone(),
+            "gitlab".to_string(),
+            "merge_request".to_string(),
+            "owner/repo!12".to_string(),
+            "https://gitlab.com/owner/repo/-/merge_requests/12".to_string(),
+            &ProviderMetadata::empty(),
+        )
+        .expect("link gitlab merge request");
+
+        let result = refresh_task_external_details_in_db(&db, task.id).expect("refresh");
+
+        assert!(result.connection_required);
+        assert_eq!(result.task.body, "Local notes");
+        assert_eq!(
+            result.notice.as_deref(),
+            Some("Please add a GitLab connection to this project.")
+        );
     }
 
     #[test]
@@ -2893,18 +4439,18 @@ mod tests {
         let pr_url = "https://github.com/owner/repo/pull/42";
         db.execute(
             "INSERT INTO task_links
-                (task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, fetched_at)
+                (task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, target_branch, fetched_at)
              VALUES
-                (?1, 'github', 'pull_request', 'owner/repo#42', ?2, NULL, NULL, NULL, NULL, NULL)",
+                (?1, 'github', 'pull_request', 'owner/repo#42', ?2, NULL, NULL, NULL, NULL, 'main', NULL)",
             params![existing_task.id, pr_url],
         )
         .expect("insert old task link");
 
         db.execute(
             "INSERT INTO pull_requests
-                (id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, fetched_at, created_at, updated_at)
+                (id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, target_branch, fetched_at, created_at, updated_at)
              VALUES
-                ('pr_1', ?1, 'github', 'https://github.com/owner/repo', ?2, 'Fallback title', 'reviewing', 'Review note', '{}', NULL, 'Fetched title', 'Fetched body', 'open', 10, 1, 2)",
+                ('pr_1', ?1, 'github', 'https://github.com/owner/repo', ?2, 'Fallback title', 'reviewing', 'Review note', '{}', NULL, 'Fetched title', 'Fetched body', 'open', 'main', 10, 1, 2)",
             params![project.id, pr_url],
         )
         .expect("insert pull request");
@@ -2984,21 +4530,23 @@ mod tests {
     }
 
     #[test]
-    fn stores_trello_key_and_token() {
+    fn stores_trello_key_and_token_with_fixed_cloud_endpoint() {
         let db = memory_db();
         let connection = save_connection_in_db(
             &db,
             ConnectionInput {
                 id: None,
                 provider: "trello".to_string(),
-                name: "Trello".to_string(),
+                name: " Trello ".to_string(),
                 base_url: "https://trello.com".to_string(),
-                api_key: Some("key".to_string()),
-                token: "token".to_string(),
+                api_key: Some(" key ".to_string()),
+                token: " token ".to_string(),
             },
         )
         .expect("save connection");
 
+        assert_eq!(connection.name, "Trello");
+        assert_eq!(connection.base_url, "https://api.trello.com");
         assert_eq!(connection.api_key.as_deref(), Some("key"));
         assert_eq!(connection.token, "token");
     }
@@ -3022,6 +4570,9 @@ mod tests {
             validate_connection_credentials(&trello).unwrap_err(),
             "Trello API key is required."
         );
+
+        let trello = connection_record("trello", Some("key"), "token");
+        assert!(validate_connection_credentials(&trello).is_ok());
     }
 
     #[test]
@@ -3046,6 +4597,39 @@ mod tests {
     }
 
     #[test]
+    fn maps_provider_metadata_status_values() {
+        let trello_list = serde_json::json!({ "name": "In Progress" });
+        assert_eq!(
+            trello_list_state(&trello_list).as_deref(),
+            Some("In Progress")
+        );
+
+        let github_issue = serde_json::json!({ "state": "closed" });
+        assert_eq!(github_issue_state(&github_issue).as_deref(), Some("closed"));
+
+        let open_pr = serde_json::json!({ "state": "open", "merged": false });
+        assert_eq!(github_pull_request_state(&open_pr).as_deref(), Some("open"));
+
+        let merged_pr = serde_json::json!({ "state": "closed", "merged": true });
+        assert_eq!(
+            github_pull_request_state(&merged_pr).as_deref(),
+            Some("merged")
+        );
+
+        let github_pr = serde_json::json!({ "base": { "ref": "2.x" } });
+        assert_eq!(
+            github_pull_request_target_branch(&github_pr).as_deref(),
+            Some("2.x")
+        );
+
+        let gitlab_mr = serde_json::json!({ "target_branch": "2.6" });
+        assert_eq!(
+            json_string(&gitlab_mr, "target_branch").as_deref(),
+            Some("2.6")
+        );
+    }
+
+    #[test]
     fn connection_test_auth_errors_include_permission_hints() {
         let message = connection_test_error_message("gitlab", "provider returned 403 Forbidden");
         assert!(message.contains("read_api or api"));
@@ -3056,6 +4640,17 @@ mod tests {
 
         let unchanged = connection_test_error_message("gitlab", "dns error");
         assert_eq!(unchanged, "dns error");
+    }
+
+    #[test]
+    fn connection_test_preserves_provider_error_details() {
+        let message = connection_test_error_message(
+            "trello",
+            "provider returned 401 Unauthorized: invalid token",
+        );
+
+        assert!(message.contains("invalid token"));
+        assert!(message.contains("Trello tokens must be authorized with read access."));
     }
 
     #[test]
