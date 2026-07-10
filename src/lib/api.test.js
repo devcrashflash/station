@@ -184,6 +184,305 @@ test("local fallback stores multiple local resources for the same repo and filte
   assert.deepEqual(new Set(matches.map((item) => item.path)), new Set(["/work/access", "/tmp/access"]));
 });
 
+test("local fallback stores directories with derived names", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => {
+      stored = value;
+    },
+  };
+
+  const directory = await api.saveDirectory({ path: "/work/customer-portal" });
+
+  assert.match(directory.id, /^directory_/);
+  assert.equal(directory.path, "/work/customer-portal");
+  assert.equal(directory.name, "customer-portal");
+  assert.equal(typeof directory.createdAt, "number");
+  assert.equal(typeof directory.updatedAt, "number");
+});
+
+test("local fallback updates duplicate directories instead of duplicating them", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => {
+      stored = value;
+    },
+  };
+
+  const first = await api.saveDirectory({ path: "/work/customer-portal" });
+  const second = await api.saveDirectory({ path: "/work/customer-portal" });
+  const directories = await api.listDirectories();
+
+  assert.equal(first.id, second.id);
+  assert.equal(directories.length, 1);
+  assert.equal(directories[0].path, "/work/customer-portal");
+});
+
+test("local fallback deletes selected directories", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => {
+      stored = value;
+    },
+  };
+
+  const first = await api.saveDirectory({ path: "/work/customer-portal" });
+  const second = await api.saveDirectory({ path: "/work/design-system" });
+
+  await api.deleteDirectory({ id: first.id });
+
+  const directories = await api.listDirectories();
+  assert.deepEqual(directories.map((directory) => directory.id), [second.id]);
+});
+
+test("local fallback cannot inspect recent configured directory files", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => {
+      stored = value;
+    },
+  };
+
+  await api.saveDirectory({ path: "/work/customer-portal" });
+
+  assert.deepEqual(await api.listRecentDirectoryFiles(), []);
+});
+
+test("local fallback stores text smart inbox todos without creating tasks", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => {
+      stored = value;
+    },
+  };
+
+  const todo = await api.createSmartInboxTodo({
+    kind: "text",
+    rawText: "Review onboarding",
+  });
+
+  assert.match(todo.id, /^smart_inbox_todo_/);
+  assert.equal(todo.title, "Review onboarding");
+  assert.equal(todo.rawText, "Review onboarding");
+  assert.deepEqual(await api.listTasks({ projectId: null }), []);
+});
+
+test("local fallback stores link smart inbox todos without creating resources", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => {
+      stored = value;
+    },
+  };
+
+  await api.createSmartInboxTodo({
+    kind: "text",
+    title: "Trello card",
+    rawText: "https://trello.com/c/card123/review-auth",
+  });
+
+  const state = JSON.parse(stored);
+  assert.equal(state.smartInboxTodos.length, 1);
+  assert.deepEqual(state.tasks || [], []);
+  assert.deepEqual(state.resources || [], []);
+});
+
+test("local fallback stores file smart inbox todos without reading file content", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => {
+      stored = value;
+    },
+  };
+
+  const todo = await api.createSmartInboxTodo({
+    kind: "file",
+    filePath: "/tmp/archive.zip",
+    fileName: "archive.zip",
+    mimeType: "application/zip",
+  });
+
+  assert.equal(todo.kind, "file");
+  assert.equal(todo.title, "archive.zip");
+  assert.equal(todo.filePath, "/tmp/archive.zip");
+  assert.equal(todo.mimeType, "application/zip");
+  assert.equal(todo.fileMissing, false);
+  assert.deepEqual(await api.listTasks({ projectId: null }), []);
+});
+
+test("local fallback reuses duplicate file smart inbox todos by path", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => {
+      stored = value;
+    },
+  };
+  const originalNow = Date.now;
+  let timestamp = 1000;
+  Date.now = () => timestamp++;
+  try {
+    const first = await api.createSmartInboxTodo({
+      kind: "file",
+      filePath: "/tmp/archive.zip",
+      fileName: "archive.zip",
+      mimeType: "application/zip",
+    });
+    const duplicate = await api.createSmartInboxTodo({
+      kind: "file",
+      filePath: "  /tmp/archive.zip  ",
+      fileName: "archive-latest.zip",
+      mimeType: "application/octet-stream",
+    });
+
+    const todos = await api.listSmartInboxTodos();
+    assert.equal(duplicate.id, first.id);
+    assert.equal(todos.length, 1);
+    assert.equal(todos[0].fileName, "archive-latest.zip");
+    assert.equal(todos[0].filePath, "/tmp/archive.zip");
+    assert.ok(todos[0].updatedAt > first.updatedAt);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("local fallback duplicate file todo moves to top", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => {
+      stored = value;
+    },
+  };
+  const originalNow = Date.now;
+  let timestamp = 2000;
+  Date.now = () => timestamp++;
+  try {
+    const first = await api.createSmartInboxTodo({
+      kind: "file",
+      filePath: "/tmp/first.txt",
+      fileName: "first.txt",
+      mimeType: "text/plain",
+    });
+    const second = await api.createSmartInboxTodo({
+      kind: "file",
+      filePath: "/tmp/second.txt",
+      fileName: "second.txt",
+      mimeType: "text/plain",
+    });
+
+    await api.createSmartInboxTodo({
+      kind: "file",
+      filePath: "/tmp/first.txt",
+      fileName: "first.txt",
+      mimeType: "text/plain",
+    });
+
+    const todos = await api.listSmartInboxTodos();
+    assert.equal(todos.length, 2);
+    assert.equal(todos[0].id, first.id);
+    assert.equal(todos[1].id, second.id);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("local fallback allows repeated text smart inbox todos", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => {
+      stored = value;
+    },
+  };
+
+  const first = await api.createSmartInboxTodo({
+    kind: "text",
+    rawText: "Review onboarding",
+  });
+  const second = await api.createSmartInboxTodo({
+    kind: "text",
+    rawText: "Review onboarding",
+  });
+
+  const todos = await api.listSmartInboxTodos();
+  assert.equal(todos.length, 2);
+  assert.notEqual(first.id, second.id);
+});
+
+test("local fallback deletes smart inbox todos without touching tasks", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => {
+      stored = value;
+    },
+  };
+
+  const project = await api.createProject({ name: "Access" });
+  await api.createTaskFromInput({
+    input: "Existing task",
+    parsed: {
+      kind: "text",
+      provider: null,
+      externalId: null,
+      url: null,
+      title: "Existing task",
+      repoUrl: null,
+    },
+    projectId: project.id,
+  });
+  const todo = await api.createSmartInboxTodo({
+    kind: "text",
+    rawText: "Later",
+  });
+
+  await api.deleteSmartInboxTodo({ id: todo.id });
+
+  assert.deepEqual(await api.listSmartInboxTodos(), []);
+  assert.equal((await api.listTasks({ projectId: project.id })).length, 1);
+});
+
+test("local fallback promotion sequence can create a task then remove the todo", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => {
+      stored = value;
+    },
+  };
+
+  const project = await api.createProject({ name: "Access" });
+  const todo = await api.createSmartInboxTodo({
+    kind: "text",
+    rawText: "Review onboarding",
+  });
+  const result = await api.createTaskFromInput({
+    input: todo.rawText,
+    parsed: {
+      kind: "text",
+      provider: null,
+      externalId: null,
+      url: null,
+      title: todo.title,
+      repoUrl: null,
+    },
+    projectId: project.id,
+  });
+  await api.deleteSmartInboxTodo({ id: todo.id });
+
+  assert.equal(result.created, true);
+  assert.deepEqual(await api.listSmartInboxTodos(), []);
+  assert.equal((await api.listTasks({ projectId: project.id })).length, 1);
+});
+
 test("normalizes project avatar display values", () => {
   assert.equal(normalizeProjectColor("#7C3AED"), "#7c3aed");
   assert.equal(normalizeProjectColor("invalid"), DEFAULT_PROJECT_COLOR);
@@ -470,7 +769,23 @@ test("local fallback creates task relations and rejects duplicates/self-relation
     kind: "trello_card",
     externalId: "card123",
     url: "https://trello.com/c/card123/review",
+    files: [
+      {
+        id: "attachment_1",
+        name: "Design spec.pdf",
+        url: "https://trello.com/1/cards/card123/attachments/attachment_1/download/spec.pdf",
+        source: "trello",
+        contentType: "application/pdf",
+        bytes: 2048,
+        createdAt: "2026-07-09T10:00:00.000Z",
+      },
+    ],
   });
+  const trelloLinks = await api.listTaskLinks({ taskId: parent.task.id });
+  assert.equal(trelloLinks[0].files.length, 1);
+  assert.equal(trelloLinks[0].files[0].name, "Design spec.pdf");
+  assert.equal(trelloLinks[0].files[0].source, "trello");
+
   await api.linkTaskResource({
     taskId: parent.task.id,
     provider: "github",
@@ -481,6 +796,7 @@ test("local fallback creates task relations and rejects duplicates/self-relation
   const links = await api.listTaskLinks({ taskId: parent.task.id });
   assert.equal(links.length, 1);
   assert.equal(links[0].kind, "github_issue");
+  assert.deepEqual(links[0].files, []);
 
   const relation = await api.saveTaskRelation({
     sourceTaskId: parent.task.id,

@@ -1,4 +1,4 @@
-import { Plus, Settings, Sparkles } from "lucide-react";
+import { Activity, Plus, Settings, Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { getProjectInitial, normalizeProjectColor } from "@/lib/projectAvatar";
@@ -7,15 +7,17 @@ import { cn } from "@/lib/utils";
 export function ProjectRail({
   projects,
   selectedProjectId,
+  isActivitySelected,
   onSelectProject,
   onShowInbox,
   onAddProject,
+  onShowActivity,
   onShowSettings,
 }) {
   return (
     <aside className="flex h-full w-20 shrink-0 flex-col items-center overflow-hidden border-r bg-sidebar py-4">
       <Button
-        className={cn("mb-4 shrink-0", !selectedProjectId && "bg-sidebar-accent")}
+        className={cn("mb-4 shrink-0", !selectedProjectId && !isActivitySelected && "bg-sidebar-accent")}
         size="icon"
         variant="ghost"
         type="button"
@@ -63,7 +65,18 @@ export function ProjectRail({
       </div>
 
       <Button
-        className="mt-4 shrink-0"
+        className={cn("mt-4 shrink-0", isActivitySelected && "bg-sidebar-accent")}
+        size="icon"
+        variant="ghost"
+        type="button"
+        title="Activity"
+        onClick={onShowActivity}
+      >
+        <Activity />
+      </Button>
+
+      <Button
+        className="mt-2 shrink-0"
         size="icon"
         variant="ghost"
         type="button"

@@ -7,7 +7,10 @@ const markdownComponents = {
   a({ className, node: _node, ...props }) {
     return (
       <a
-        className={cn("font-medium text-blue-700 underline underline-offset-2 hover:text-blue-900", className)}
+        className={cn(
+          "font-medium break-all text-blue-700 underline underline-offset-2 hover:text-blue-900",
+          className,
+        )}
         target="_blank"
         rel="noreferrer"
         {...props}
@@ -26,7 +29,7 @@ const markdownComponents = {
     return (
       <code
         className={cn(
-          "rounded bg-muted px-1.5 py-0.5 font-mono text-[0.85em] text-foreground",
+          "rounded bg-muted px-1.5 py-0.5 font-mono text-[0.85em] break-all text-foreground",
           className,
         )}
         {...props}
@@ -55,7 +58,7 @@ const markdownComponents = {
     return <ol className={cn("list-decimal space-y-1 pl-5", className)} {...props} />;
   },
   p({ className, node: _node, ...props }) {
-    return <p className={cn("leading-6", className)} {...props} />;
+    return <p className={cn("min-w-0 leading-6", className)} {...props} />;
   },
   pre({ className, node: _node, ...props }) {
     return (
@@ -96,7 +99,7 @@ const markdownComponents = {
 
 export function TaskDescriptionMarkdown({ children }) {
   return (
-    <div className="grid min-w-0 gap-4 text-sm">
+    <div className="grid min-w-0 max-w-full gap-4 overflow-hidden text-sm">
       <ReactMarkdown components={markdownComponents} remarkPlugins={[remarkGfm]}>
         {children}
       </ReactMarkdown>

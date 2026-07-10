@@ -89,11 +89,11 @@ export function ProjectLocalResourcesDialog({
 
 export function LocalResourceList({ localResources, editable, onDeleteLocalResource, onSelectLocalResource }) {
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex min-w-0 flex-col gap-2">
       {localResources.map((resource) => {
         const content = (
           <>
-            <div className="min-w-0 flex-1 text-left">
+            <div className="min-w-0 max-w-full flex-1 text-left">
               <p className="truncate text-sm font-medium">{resource.name}</p>
               <p className="truncate text-xs text-muted-foreground">
                 {resource.provider} · {resource.repoUrl}
@@ -123,7 +123,7 @@ export function LocalResourceList({ localResources, editable, onDeleteLocalResou
             <button
               key={resource.id}
               type="button"
-              className="flex min-w-0 items-center gap-2 rounded-md border bg-card p-3 text-left hover:bg-accent"
+              className="flex min-w-0 w-full items-center gap-2 overflow-hidden rounded-md border bg-card p-3 text-left hover:bg-accent"
               onClick={() => onSelectLocalResource(resource)}
             >
               {content}
@@ -132,7 +132,7 @@ export function LocalResourceList({ localResources, editable, onDeleteLocalResou
         }
 
         return (
-          <div key={resource.id} className="flex min-w-0 items-center gap-2 rounded-md border bg-card p-3">
+          <div key={resource.id} className="flex min-w-0 w-full items-center gap-2 overflow-hidden rounded-md border bg-card p-3">
             {content}
           </div>
         );

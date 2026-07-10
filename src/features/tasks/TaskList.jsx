@@ -55,7 +55,9 @@ export function TaskList({ tasks, onOpenTask, onUpdateTask, readonly = false }) 
                 </span>
               )}
             </button>
-            <Badge className="shrink-0" variant="secondary">{task.status}</Badge>
+            <Badge className="max-w-24 shrink-0 justify-start" variant="secondary" title={task.status}>
+              <span className="min-w-0 truncate">{task.status}</span>
+            </Badge>
           </div>
         );
       })}

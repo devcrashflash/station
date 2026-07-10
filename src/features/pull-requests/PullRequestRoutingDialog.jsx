@@ -94,15 +94,15 @@ export function PullRequestRoutingDialog({
 
   return (
     <Modal title="Route pull request" onClose={onClose}>
-      <div className="mb-4 rounded-md border bg-muted/30 p-3">
-        <p className="truncate font-medium">{pending.parsed.title}</p>
-        <p className="mt-1 truncate text-xs text-muted-foreground">
+      <div className="mb-4 min-w-0 max-w-full overflow-hidden rounded-md border bg-muted/30 p-3">
+        <p className="min-w-0 truncate font-medium">{pending.parsed.title}</p>
+        <p className="mt-1 min-w-0 truncate text-xs text-muted-foreground">
           {providerLabels[pending.parsed.provider]} · {pending.parsed.url}
         </p>
       </div>
 
       {projects.length === 0 ? (
-        <form className="grid gap-3" onSubmit={createProject}>
+        <form className="grid min-w-0 gap-3" onSubmit={createProject}>
           <Input
             value={newProjectName}
             placeholder="Project name"
@@ -114,7 +114,7 @@ export function PullRequestRoutingDialog({
           </Button>
         </form>
       ) : (
-        <form className="grid gap-4" onSubmit={submit}>
+        <form className="grid min-w-0 gap-4" onSubmit={submit}>
           <Field>
             <FieldLabel>Project</FieldLabel>
             <SelectControl value={projectId} onValueChange={setProjectId} options={projectOptions} />

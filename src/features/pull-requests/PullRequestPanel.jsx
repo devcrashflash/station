@@ -52,11 +52,11 @@ export function PullRequestItem({ pullRequest, onUpdatePullRequest }) {
   }
 
   return (
-    <div className="rounded-md border bg-card p-4">
+    <div className="min-w-0 overflow-hidden rounded-md border bg-card p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <a
-            className="font-medium text-blue-700 underline-offset-2 hover:underline"
+            className="block min-w-0 max-w-full break-words font-medium text-blue-700 underline-offset-2 hover:underline"
             href={pullRequest.prUrl}
             target="_blank"
             rel="noreferrer"

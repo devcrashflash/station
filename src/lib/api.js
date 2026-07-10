@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { formatLocalDate, localDayBounds, sortActivities } from "./activity.js";
+import { EMAIL_DESKTOP_REQUIRED_MESSAGE, OCR_DESKTOP_REQUIRED_MESSAGE } from "./ocr.js";
 import { normalizeProjectColor } from "./projectAvatar.js";
 import { parseSmartInput } from "./smartInputParser.js";
 
@@ -8,16 +10,28 @@ const STORAGE_KEY = "dev-crash-flash-ai-studio-state";
 const defaultState = {
   projects: [],
   connections: [],
+  directories: [],
   projectConnections: {},
   resources: [],
   localResources: [],
   tasks: [],
+  smartInboxTodos: [],
   taskLinks: [],
   taskRelations: [],
   pullRequests: [],
+  activities: [],
+  activitySyncRuns: [],
+  browserSettings: {
+    detectedBrowserBundleId: null,
+    browserBundleId: null,
+  },
 };
 
 export const api = {
+  openBlankBrowserTab: () => call("open_blank_browser_tab", {}, () => null),
+  listBrowserSettings: () => call("list_browser_settings", {}, local.listBrowserSettings),
+  saveBrowserSettings: (payload) =>
+    call("save_browser_settings", { input: payload }, () => local.saveBrowserSettings(payload)),
   listProjects: () => call("list_projects", {}, local.listProjects),
   createProject: (payload) => call("create_project", payload, () => local.createProject(payload)),
   updateProject: (payload) => call("update_project", payload, () => local.updateProject(payload)),
@@ -42,8 +56,29 @@ export const api = {
     const selected = await open({ directory: true, multiple: false });
     return typeof selected === "string" ? selected : null;
   },
+  listDirectories: () => call("list_directories", {}, local.listDirectories),
+  saveDirectory: (payload) => call("save_directory", { input: payload }, () => local.saveDirectory(payload)),
+  deleteDirectory: (payload) => call("delete_directory", payload, () => local.deleteDirectory(payload)),
+  listRecentDirectoryFiles: () => call("list_recent_directory_files", {}, local.listRecentDirectoryFiles),
+  chooseDirectory: async () => {
+    if (typeof window === "undefined" || !window.__TAURI_INTERNALS__) {
+      throw new Error("Choosing directories requires the desktop app.");
+    }
+    const selected = await open({ directory: true, multiple: false });
+    return typeof selected === "string" ? selected : null;
+  },
   createTaskFromInput: (payload) =>
     call("create_task_from_input", payload, () => local.createTaskFromInput(payload)),
+  listSmartInboxTodos: () => call("list_smart_inbox_todos", {}, local.listSmartInboxTodos),
+  createSmartInboxTodo: (payload) =>
+    call("create_smart_inbox_todo", { input: payload }, () => local.createSmartInboxTodo(payload)),
+  deleteSmartInboxTodo: (payload) =>
+    call("delete_smart_inbox_todo", payload, () => local.deleteSmartInboxTodo(payload)),
+  ocrImageFile: (payload) => call("ocr_image_file", payload, () => local.ocrImageFile()),
+  ocrImageBytes: (payload) => call("ocr_image_bytes", payload, () => local.ocrImageFile()),
+  readEmailFile: (payload) => call("read_email_file", payload, () => local.readEmailFile()),
+  readEmailBytes: (payload) => call("read_email_bytes", payload, () => local.readEmailFile()),
+  readAppleMailMessage: (payload) => call("read_apple_mail_message", payload, () => local.readEmailFile()),
   listTasks: (payload) => call("list_tasks", payload, () => local.listTasks(payload)),
   updateTask: (payload) => call("update_task", payload, () => local.updateTask(payload)),
   deleteTask: (payload) => call("delete_task", payload, () => local.deleteTask(payload)),
@@ -70,6 +105,14 @@ export const api = {
   savePullRequest: (payload) => call("save_pull_request", { input: payload }, () => local.savePullRequest(payload)),
   updatePullRequestReviewState: (payload) =>
     call("update_pull_request_review_state", payload, () => local.updatePullRequestReviewState(payload)),
+  listActivities: (payload) => {
+    const input = activityRequestPayload(payload);
+    return call("list_activities", input, () => local.listActivities(input));
+  },
+  syncActivities: (payload) => {
+    const input = activityRequestPayload(payload);
+    return call("sync_activities", input, () => local.syncActivities(input));
+  },
 };
 
 async function call(command, payload, fallback) {
@@ -82,10 +125,30 @@ async function call(command, payload, fallback) {
 
 function readState() {
   try {
-    return { ...defaultState, ...JSON.parse(localStorage.getItem(STORAGE_KEY)) };
+    return { ...freshDefaultState(), ...JSON.parse(localStorage.getItem(STORAGE_KEY)) };
   } catch {
-    return { ...defaultState };
+    return freshDefaultState();
   }
+}
+
+function freshDefaultState() {
+  return {
+    ...defaultState,
+    projects: [],
+    connections: [],
+    directories: [],
+    projectConnections: {},
+    resources: [],
+    localResources: [],
+    tasks: [],
+    smartInboxTodos: [],
+    taskLinks: [],
+    taskRelations: [],
+    pullRequests: [],
+    activities: [],
+    activitySyncRuns: [],
+    browserSettings: { ...defaultState.browserSettings },
+  };
 }
 
 function writeState(state) {
@@ -100,6 +163,15 @@ function now() {
   return Date.now();
 }
 
+function activityRequestPayload(payload) {
+  const date = payload?.date || formatLocalDate();
+  const bounds = localDayBounds(date);
+  return {
+    date,
+    ...bounds,
+  };
+}
+
 function normalizeIcon(icon) {
   return icon?.trim() || "FolderKanban";
 }
@@ -110,6 +182,10 @@ function normalizeProject(project) {
     icon: normalizeIcon(project.icon),
     color: normalizeProjectColor(project.color),
   };
+}
+
+function directoryNameFromPath(path) {
+  return path.split(/[\\/]/).filter(Boolean).at(-1) || path;
 }
 
 export function toParsedPayload(parsed) {
@@ -225,6 +301,64 @@ function displayRepoUrl(repoUrl) {
   return normalized ? `https://${normalized}` : repoUrl;
 }
 
+function normalizeTaskFiles(files) {
+  if (!Array.isArray(files)) return [];
+  return files
+    .map((file) => ({
+      id: file?.id || file?.url || id("file"),
+      name: file?.name || file?.url || "File",
+      url: file?.url || "",
+      source: file?.source || "local",
+      contentType: file?.contentType ?? null,
+      bytes: Number.isFinite(file?.bytes) ? file.bytes : null,
+      createdAt: file?.createdAt ?? null,
+    }))
+    .filter((file) => file.url);
+}
+
+function normalizeTaskLink(link) {
+  return {
+    ...link,
+    files: normalizeTaskFiles(link?.files),
+  };
+}
+
+function normalizeSmartInboxTodo(todo) {
+  return {
+    id: todo.id,
+    kind: todo.kind === "file" ? "file" : "text",
+    title: todo.title?.trim() || (todo.kind === "file" ? "File" : "Untitled todo"),
+    rawText: todo.rawText ?? null,
+    filePath: todo.filePath ?? null,
+    fileName: todo.fileName ?? null,
+    mimeType: todo.mimeType ?? null,
+    fileMissing: Boolean(todo.fileMissing),
+    createdAt: Number.isFinite(todo.createdAt) ? todo.createdAt : now(),
+    updatedAt: Number.isFinite(todo.updatedAt) ? todo.updatedAt : now(),
+  };
+}
+
+function smartInboxTodoTitle(input) {
+  const kind = input?.kind === "file" ? "file" : "text";
+  if (input?.title?.trim()) return input.title.trim();
+  if (kind === "file") {
+    return input?.fileName?.trim() || fileNameFromPath(input?.filePath) || "File";
+  }
+  return firstLine(input?.rawText) || "Untitled todo";
+}
+
+function smartInboxTodoFilePath(input) {
+  return input?.kind === "file" ? input?.filePath?.trim() || "" : "";
+}
+
+function fileNameFromPath(path) {
+  return String(path || "").split(/[\\/]/).filter(Boolean).at(-1) || "";
+}
+
+function firstLine(value) {
+  return String(value || "").split(/\r?\n/).find((line) => line.trim())?.trim() || "";
+}
+
 function enrichTask(state, task) {
   const link = (state.taskLinks || []).find((item) => item.taskId === task.id);
   return {
@@ -256,7 +390,39 @@ function providerConnectionRequiredNotice(provider) {
   return `Please add a ${labels[provider] || provider} connection to this project.`;
 }
 
+function activityMatchesBounds(activity, startAt, endAt) {
+  return activity.occurredAt >= startAt && activity.occurredAt < endAt;
+}
+
+function activitySyncRunMatches(run, date) {
+  return run.date === date;
+}
+
+function localActivityResult(state, { date, startAt, endAt }) {
+  return {
+    activities: sortActivities((state.activities || []).filter((activity) => activityMatchesBounds(activity, startAt, endAt))),
+    syncRuns: (state.activitySyncRuns || []).filter((run) => activitySyncRunMatches(run, date)),
+  };
+}
+
 const local = {
+  listBrowserSettings() {
+    return {
+      detectedBrowserBundleId: null,
+      browserBundleId: readState().browserSettings?.browserBundleId || null,
+    };
+  },
+
+  saveBrowserSettings(input) {
+    const state = readState();
+    state.browserSettings = {
+      detectedBrowserBundleId: null,
+      browserBundleId: input.browserBundleId?.trim() || null,
+    };
+    writeState(state);
+    return state.browserSettings;
+  },
+
   listProjects() {
     const state = readState();
     const projects = state.projects.map(normalizeProject);
@@ -395,6 +561,101 @@ const local = {
     writeState(state);
   },
 
+  listDirectories() {
+    return [...(readState().directories || [])].sort((left, right) => right.updatedAt - left.updatedAt);
+  },
+
+  saveDirectory(input) {
+    const path = input.path?.trim();
+    if (!path) {
+      throw new Error("Directory path is required.");
+    }
+
+    const state = readState();
+    state.directories = state.directories || [];
+    const timestamp = now();
+    const existing = state.directories.find((item) => item.path === path);
+    const directory = existing || {
+      id: id("directory"),
+      createdAt: timestamp,
+    };
+
+    Object.assign(directory, {
+      path,
+      name: directoryNameFromPath(path),
+      updatedAt: timestamp,
+    });
+
+    if (!existing) {
+      state.directories.push(directory);
+    }
+
+    writeState(state);
+    return directory;
+  },
+
+  deleteDirectory({ id: directoryId }) {
+    const state = readState();
+    state.directories = (state.directories || []).filter((item) => item.id !== directoryId);
+    writeState(state);
+  },
+
+  listRecentDirectoryFiles() {
+    return [];
+  },
+
+  listSmartInboxTodos() {
+    const state = readState();
+    state.smartInboxTodos = (state.smartInboxTodos || []).map(normalizeSmartInboxTodo);
+    writeState(state);
+    return [...state.smartInboxTodos].sort((left, right) => (
+      right.updatedAt - left.updatedAt || right.createdAt - left.createdAt
+    ));
+  },
+
+  createSmartInboxTodo(input) {
+    const state = readState();
+    state.smartInboxTodos = (state.smartInboxTodos || []).map(normalizeSmartInboxTodo);
+    const timestamp = now();
+    const filePath = smartInboxTodoFilePath(input);
+    const existing = filePath
+      ? state.smartInboxTodos.find((todo) => todo.kind === "file" && todo.filePath?.trim() === filePath)
+      : null;
+
+    if (existing) {
+      existing.title = smartInboxTodoTitle(input);
+      existing.fileName = input?.fileName ?? existing.fileName ?? null;
+      existing.mimeType = input?.mimeType ?? existing.mimeType ?? null;
+      existing.updatedAt = timestamp;
+      const todo = normalizeSmartInboxTodo(existing);
+      Object.assign(existing, todo);
+      writeState(state);
+      return todo;
+    }
+
+    const todo = normalizeSmartInboxTodo({
+      id: id("smart_inbox_todo"),
+      kind: input?.kind,
+      title: smartInboxTodoTitle(input),
+      rawText: input?.rawText ?? null,
+      filePath: filePath || (input?.filePath ?? null),
+      fileName: input?.fileName ?? null,
+      mimeType: input?.mimeType ?? null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+
+    state.smartInboxTodos.push(todo);
+    writeState(state);
+    return todo;
+  },
+
+  deleteSmartInboxTodo({ id: todoId }) {
+    const state = readState();
+    state.smartInboxTodos = (state.smartInboxTodos || []).filter((todo) => todo.id !== todoId);
+    writeState(state);
+  },
+
   checkoutPullRequestForReview() {
     throw new Error("Review checkout requires the desktop app.");
   },
@@ -405,6 +666,14 @@ const local = {
 
   loadReviewDiffFile() {
     throw new Error("Loading review diffs requires the desktop app.");
+  },
+
+  ocrImageFile() {
+    throw new Error(OCR_DESKTOP_REQUIRED_MESSAGE);
+  },
+
+  readEmailFile() {
+    throw new Error(EMAIL_DESKTOP_REQUIRED_MESSAGE);
   },
 
   createTaskFromInput({ input, parsed: providedParsed, projectId }) {
@@ -509,6 +778,7 @@ const local = {
         externalBody: null,
         externalState: null,
         fetchedAt: null,
+        files: [],
       });
     }
 
@@ -557,14 +827,15 @@ const local = {
   linkTaskResource(payload) {
     const state = readState();
     state.taskLinks = state.taskLinks || [];
+    const normalizedPayload = normalizeTaskLink(payload);
     const existingIndex = state.taskLinks.findIndex((item) => item.taskId === payload.taskId);
     if (existingIndex >= 0) {
-      state.taskLinks[existingIndex] = {
+      state.taskLinks[existingIndex] = normalizeTaskLink({
         ...state.taskLinks[existingIndex],
-        ...payload,
-      };
+        ...normalizedPayload,
+      });
     } else {
-      state.taskLinks.push(payload);
+      state.taskLinks.push(normalizedPayload);
     }
     const task = state.tasks.find((item) => item.id === payload.taskId);
     if (task) {
@@ -575,14 +846,20 @@ const local = {
   },
 
   listTaskLinks({ taskId }) {
-    return (readState().taskLinks || []).filter((item) => item.taskId === taskId).slice(0, 1);
+    return (readState().taskLinks || [])
+      .filter((item) => item.taskId === taskId)
+      .slice(0, 1)
+      .map(normalizeTaskLink);
   },
 
   refreshTaskExternalDetails({ taskId }) {
     const state = readState();
     const task = state.tasks.find((item) => item.id === taskId);
     if (!task) throw new Error("Task not found");
-    const links = (state.taskLinks || []).filter((item) => item.taskId === taskId).slice(0, 1);
+    const links = (state.taskLinks || [])
+      .filter((item) => item.taskId === taskId)
+      .slice(0, 1)
+      .map(normalizeTaskLink);
     const link = links[0];
 
     if (!supportsExternalRefresh(link)) {
@@ -814,5 +1091,30 @@ const local = {
     pullRequest.updatedAt = now();
     writeState(state);
     return pullRequest;
+  },
+
+  listActivities(payload) {
+    return localActivityResult(readState(), payload);
+  },
+
+  syncActivities(payload) {
+    const state = readState();
+    const timestamp = now();
+    state.activitySyncRuns = state.activitySyncRuns || [];
+    const nextRuns = (state.connections || []).map((connection) => ({
+      connectionId: connection.id,
+      connectionName: connection.name,
+      provider: connection.provider,
+      date: payload.date,
+      status: "failed",
+      warning: "Remote activity sync requires the desktop app.",
+      syncedAt: timestamp,
+    }));
+    state.activitySyncRuns = [
+      ...(state.activitySyncRuns || []).filter((run) => run.date !== payload.date),
+      ...nextRuns,
+    ];
+    writeState(state);
+    return localActivityResult(state, payload);
   },
 };

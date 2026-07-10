@@ -8,7 +8,9 @@ import {
   FolderOpen,
   GitPullRequest,
   Link2,
+  LoaderCircle,
   MoreHorizontal,
+  Paperclip,
   Pencil,
   Plus,
   RefreshCw,
@@ -23,7 +25,7 @@ import { SelectControl } from "@/components/common/SelectControl";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { LocalResourceList } from "@/features/resources/LocalResourcesPanel";
-import { ResourceLink, taskLinkMeta } from "@/features/tasks/AttachmentLink";
+import { AttachmentLink, ResourceLink, taskLinkMeta } from "@/features/tasks/AttachmentLink";
 import { TaskDescriptionMarkdown } from "@/features/tasks/TaskDescriptionMarkdown";
 import { TaskEditDialog } from "@/features/tasks/TaskEditDialog";
 import { isPullRequestResource } from "@/lib/api";
@@ -33,6 +35,7 @@ const relationTypeOptions = [
   { value: "related", label: "Related" },
   { value: "sub_task", label: "Sub Task" },
 ];
+const EXTERNAL_REFRESH_STALE_MS = 60 * 1000;
 
 function formatLastSyncedAt(value) {
   if (!value) return "Not synced yet";
@@ -43,6 +46,65 @@ function formatLastSyncedAt(value) {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(date)}`;
+}
+
+function waitForNextPaint() {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(resolve);
+    });
+  });
+}
+
+function externalFetchedAtMs(value) {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+
+  const numericValue = Number(value);
+  if (Number.isFinite(numericValue)) {
+    return numericValue;
+  }
+
+  const parsedValue = Date.parse(value);
+  return Number.isNaN(parsedValue) ? null : parsedValue;
+}
+
+function shouldRefreshStaleExternalDetails(link) {
+  if (!link?.url) return false;
+
+  const fetchedAt = externalFetchedAtMs(link.fetchedAt);
+  return fetchedAt === null || Date.now() - fetchedAt > EXTERNAL_REFRESH_STALE_MS;
+}
+
+function formatFileBytes(value) {
+  if (!Number.isFinite(value) || value <= 0) return "";
+  const units = ["B", "KB", "MB", "GB"];
+  let size = value;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  const rounded = unitIndex === 0 ? size.toFixed(0) : size.toFixed(size >= 10 ? 1 : 2);
+  return `${rounded.replace(/\.0+$/, "")} ${units[unitIndex]}`;
+}
+
+function taskFileMeta(file) {
+  const sourceLabels = {
+    trello: "Trello",
+    local: "Local",
+  };
+  return [
+    sourceLabels[file.source] || file.source || "File",
+    file.contentType,
+    formatFileBytes(file.bytes),
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 export function TaskDetailView({
@@ -100,6 +162,9 @@ export function TaskDetailView({
             .then((items) => {
               if (!cancelled) {
                 setLinks(items);
+                if (onRefreshExternalDetails && shouldRefreshStaleExternalDetails(items[0])) {
+                  refreshExternalDetails();
+                }
               }
             })
             .catch(() => {
@@ -132,6 +197,8 @@ export function TaskDetailView({
       connectionRequired: false,
       notice: "",
     });
+    await waitForNextPaint();
+    if (externalRefreshTokenRef.current !== refreshToken) return;
 
     try {
       const result = await onRefreshExternalDetails(task.id);
@@ -307,6 +374,7 @@ export function TaskDetailView({
       fetchedAt: null,
     }
     : null);
+  const taskFiles = (links[0]?.files || []).filter((file) => file?.url);
   const reviewParsed = isPullRequestResource(taskResource) ? parseSmartInput(taskResource.url || "") : null;
   const canReviewResource = Boolean(
     task.projectId &&
@@ -327,7 +395,7 @@ export function TaskDetailView({
           <p className="text-xs font-medium uppercase text-muted-foreground">
             {project?.name || "Task"}
           </p>
-          <h2 className="mt-1 text-3xl font-semibold">{task.title}</h2>
+          <h2 className="mt-1 break-words text-3xl font-semibold">{task.title}</h2>
           <div className="mt-3 flex flex-wrap gap-2">
             <Badge variant="secondary">{task.status}</Badge>
             {taskResource && <Badge variant="secondary">Has resource</Badge>}
@@ -384,6 +452,21 @@ export function TaskDetailView({
               <EmptyState text="No description yet." />
             )}
           </Panel>
+
+          {taskFiles.length > 0 && (
+            <Panel title="Files" icon={Paperclip}>
+              <div className="grid gap-2">
+                {taskFiles.map((file) => (
+                  <AttachmentLink
+                    key={file.id || file.url}
+                    label={file.name || file.url}
+                    url={file.url}
+                    meta={taskFileMeta(file)}
+                  />
+                ))}
+              </div>
+            </Panel>
+          )}
         </div>
 
         <div className="grid min-w-0 gap-6">
@@ -404,10 +487,15 @@ export function TaskDetailView({
                       type="button"
                       variant="outline"
                       size="sm"
+                      aria-busy={isExternalRefreshing}
                       disabled={isExternalRefreshing}
                       onClick={refreshExternalDetails}
                     >
-                      <RefreshCw className={`size-4 ${isExternalRefreshing ? "animate-spin" : ""}`} />
+                      {isExternalRefreshing ? (
+                        <LoaderCircle className="size-4 animate-spin" />
+                      ) : (
+                        <RefreshCw className="size-4" />
+                      )}
                       {isExternalRefreshing ? "Syncing..." : "Sync external"}
                     </Button>
                   )}
@@ -738,9 +826,9 @@ function ReviewCheckoutDialog({
   return (
     <Modal title="Review pull request" onClose={onClose}>
       <div className="grid gap-4">
-        <div className="rounded-md border bg-muted/30 p-3">
-          <p className="truncate font-medium">{parsed.title}</p>
-          <p className="mt-1 truncate text-xs text-muted-foreground">{parsed.repoUrl}</p>
+        <div className="min-w-0 max-w-full overflow-hidden rounded-md border bg-muted/30 p-3">
+          <p className="min-w-0 truncate font-medium">{parsed.title}</p>
+          <p className="mt-1 min-w-0 truncate text-xs text-muted-foreground">{parsed.repoUrl}</p>
         </div>
 
         <Button type="button" variant="outline" disabled={isChoosing} onClick={chooseDirectory}>
@@ -763,7 +851,7 @@ function ReviewCheckoutDialog({
         {checkoutResourceId && (
           <p className="text-sm text-muted-foreground">Checking out review branch...</p>
         )}
-        {notice && <p className="text-sm text-muted-foreground">{notice}</p>}
+        {notice && <p className="break-words text-sm text-muted-foreground">{notice}</p>}
       </div>
     </Modal>
   );
@@ -843,9 +931,9 @@ function ReviewDiffOverlay({ session, onClose, onLoadReviewDiff, onLoadReviewDif
     >
       <div className="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)_auto] gap-4 overflow-hidden">
         <div className="grid gap-4">
-          <div className="rounded-md border bg-muted/30 p-3">
-            <p className="truncate font-medium">{currentPath || session.branch}</p>
-            <p className="mt-1 truncate text-xs text-muted-foreground">
+          <div className="min-w-0 max-w-full overflow-hidden rounded-md border bg-muted/30 p-3">
+            <p className="min-w-0 truncate font-medium">{currentPath || session.branch}</p>
+            <p className="mt-1 min-w-0 truncate text-xs text-muted-foreground">
               {reviewDiff ? `${reviewDiff.baseRef} -> ${reviewDiff.branch}` : session.path}
             </p>
           </div>
@@ -893,7 +981,7 @@ function ReviewDiffOverlay({ session, onClose, onLoadReviewDiff, onLoadReviewDif
           )}
         </div>
 
-        {notice && <p className="text-sm text-muted-foreground">{notice}</p>}
+        {notice && <p className="break-words text-sm text-muted-foreground">{notice}</p>}
       </div>
     </Modal>
   );

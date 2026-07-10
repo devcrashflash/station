@@ -7,7 +7,7 @@ import {
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
 
-export function AppBreadcrumb({ project, task, taskProject, onShowInbox, onShowProject }) {
+export function AppBreadcrumb({ project, task, taskProject, page, onShowInbox, onShowProject }) {
   const visibleProject = taskProject || project;
 
   return (
@@ -37,6 +37,14 @@ export function AppBreadcrumb({ project, task, taskProject, onShowInbox, onShowP
             <BreadcrumbSeparator />
             <BreadcrumbItem className="min-w-0">
               <BreadcrumbPage className="truncate">{task.title}</BreadcrumbPage>
+            </BreadcrumbItem>
+          </>
+        )}
+        {page && !task && (
+          <>
+            <BreadcrumbSeparator />
+            <BreadcrumbItem className="min-w-0">
+              <BreadcrumbPage className="truncate">{page}</BreadcrumbPage>
             </BreadcrumbItem>
           </>
         )}

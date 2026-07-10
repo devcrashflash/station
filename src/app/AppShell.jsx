@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -6,31 +7,57 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppBreadcrumb } from "@/features/navigation/AppBreadcrumb";
 import { ProjectRail } from "@/features/projects/ProjectRail";
 
+const NOTICE_TIMEOUT_MS = 4000;
+
 export function AppShell({
   projects,
   selectedProjectId,
   selectedProject,
   selectedTask,
   selectedTaskProject,
+  title,
+  breadcrumbPage,
+  isActivitySelected,
   notice,
+  noticeKey,
   onClearNotice,
   onSelectProject,
   onShowInbox,
   onShowProject,
   onAddProject,
+  onShowActivity,
   onShowSettings,
   onShowSmartInbox,
   children,
 }) {
+  const [isNoticeHeld, setIsNoticeHeld] = useState(false);
+
+  useEffect(() => {
+    if (!notice || isNoticeHeld) {
+      return undefined;
+    }
+
+    const timeoutId = window.setTimeout(onClearNotice, NOTICE_TIMEOUT_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [isNoticeHeld, notice, noticeKey, onClearNotice]);
+
+  useEffect(() => {
+    if (!notice) {
+      setIsNoticeHeld(false);
+    }
+  }, [notice]);
+
   return (
     <TooltipProvider>
       <main className="flex h-screen overflow-hidden bg-background text-foreground">
         <ProjectRail
           projects={projects}
           selectedProjectId={selectedProjectId}
+          isActivitySelected={isActivitySelected}
           onSelectProject={onSelectProject}
           onShowInbox={onShowInbox}
           onAddProject={onAddProject}
+          onShowActivity={onShowActivity}
           onShowSettings={onShowSettings}
         />
 
@@ -41,11 +68,12 @@ export function AppShell({
                 project={selectedProject}
                 task={selectedTask}
                 taskProject={selectedTaskProject}
+                page={breadcrumbPage}
                 onShowInbox={onShowInbox}
                 onShowProject={onShowProject}
               />
               <h1 className="truncate text-xl font-semibold">
-                {selectedTask ? selectedTask.title : selectedProject ? selectedProject.name : "Smart inbox"}
+                {title || (selectedTask ? selectedTask.title : selectedProject ? selectedProject.name : "Smart inbox")}
               </h1>
             </div>
             <div className="flex items-center gap-2">
@@ -55,6 +83,10 @@ export function AppShell({
                   variant="secondary"
                   size="sm"
                   onClick={onClearNotice}
+                  onMouseEnter={() => setIsNoticeHeld(true)}
+                  onMouseLeave={() => setIsNoticeHeld(false)}
+                  onFocus={() => setIsNoticeHeld(true)}
+                  onBlur={() => setIsNoticeHeld(false)}
                 >
                   {notice}
                 </Button>
