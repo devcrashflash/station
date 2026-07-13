@@ -128,6 +128,40 @@ test("local fallback stores and updates project colors", async () => {
   assert.equal(updated.color, "#dc2626");
 });
 
+test("local fallback review request feed is transient", async () => {
+  let stored = JSON.stringify({
+    smartInboxTodos: [{
+      id: "smart_inbox_todo_1",
+      kind: "text",
+      title: "Existing todo",
+      rawText: "Existing todo",
+      createdAt: 1,
+      updatedAt: 1,
+    }],
+    pullRequests: [{
+      id: "pr_1",
+      projectId: "project_1",
+      provider: "github",
+      repoUrl: "https://github.com/acme/app",
+      prUrl: "https://github.com/acme/app/pull/1",
+      title: "Tracked elsewhere",
+    }],
+  });
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => {
+      stored = value;
+    },
+  };
+
+  const result = await api.listSmartInboxReviewRequests({ provider: "github" });
+  const state = JSON.parse(stored);
+
+  assert.deepEqual(result, { items: [], warnings: [] });
+  assert.equal(state.smartInboxTodos.length, 1);
+  assert.equal(state.pullRequests.length, 1);
+});
+
 test("local fallback normalizes legacy project colors", async () => {
   let stored = JSON.stringify({
     projects: [{ id: "project_1", name: "Access", icon: "FolderKanban" }],
@@ -417,6 +451,92 @@ test("local fallback allows repeated text smart inbox todos", async () => {
   assert.notEqual(first.id, second.id);
 });
 
+test("local fallback updates smart inbox todos without creating tasks", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => {
+      stored = value;
+    },
+  };
+  const originalNow = Date.now;
+  let timestamp = 3000;
+  Date.now = () => timestamp++;
+  try {
+    const textTodo = await api.createSmartInboxTodo({
+      kind: "text",
+      rawText: "Original todo",
+    });
+    const fileTodo = await api.createSmartInboxTodo({
+      kind: "file",
+      filePath: "/tmp/archive.zip",
+      fileName: "archive.zip",
+      mimeType: "application/zip",
+    });
+
+    const updatedText = await api.updateSmartInboxTodo({
+      id: textTodo.id,
+      rawText: "\n  Updated todo\nKeep these details",
+    });
+    const updatedFile = await api.updateSmartInboxTodo({
+      id: fileTodo.id,
+      title: "  Release archive\nKeep for deployment  ",
+    });
+
+    assert.equal(updatedText.title, "Updated todo");
+    assert.equal(updatedText.rawText, "\n  Updated todo\nKeep these details");
+    assert.equal(updatedText.createdAt, textTodo.createdAt);
+    assert.ok(updatedText.updatedAt > textTodo.updatedAt);
+    assert.equal(updatedFile.title, "Release archive\nKeep for deployment");
+    assert.equal(updatedFile.filePath, fileTodo.filePath);
+    assert.equal(updatedFile.fileName, fileTodo.fileName);
+    assert.equal(updatedFile.mimeType, fileTodo.mimeType);
+    assert.equal(updatedFile.createdAt, fileTodo.createdAt);
+    assert.equal((await api.listSmartInboxTodos())[0].id, fileTodo.id);
+    assert.deepEqual(await api.listTasks({ projectId: null }), []);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("local fallback validates kind-specific smart inbox todo updates", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => {
+      stored = value;
+    },
+  };
+
+  const textTodo = await api.createSmartInboxTodo({ kind: "text", rawText: "Text todo" });
+  const fileTodo = await api.createSmartInboxTodo({
+    kind: "file",
+    filePath: "/tmp/file.txt",
+    fileName: "file.txt",
+  });
+
+  await assert.rejects(
+    api.updateSmartInboxTodo({ id: textTodo.id, rawText: "   " }),
+    /content cannot be blank/i,
+  );
+  await assert.rejects(
+    api.updateSmartInboxTodo({ id: textTodo.id, title: "Wrong field" }),
+    /only update rawText/i,
+  );
+  await assert.rejects(
+    api.updateSmartInboxTodo({ id: fileTodo.id, title: "" }),
+    /title cannot be blank/i,
+  );
+  await assert.rejects(
+    api.updateSmartInboxTodo({ id: fileTodo.id, rawText: "Wrong field" }),
+    /only update title/i,
+  );
+  await assert.rejects(
+    api.updateSmartInboxTodo({ id: "missing", rawText: "Missing" }),
+    /not found/i,
+  );
+});
+
 test("local fallback deletes smart inbox todos without touching tasks", async () => {
   let stored = "";
   global.localStorage = {
@@ -633,6 +753,107 @@ test("local fallback enriches gitlab tasks and requires gitlab connections for r
   const refreshed = await api.refreshTaskExternalDetails({ taskId: result.task.id });
   assert.equal(refreshed.connectionRequired, true);
   assert.equal(refreshed.notice, "Please add a GitLab connection to this project.");
+});
+
+test("local fallback auto-connects github repo resources from provider tasks", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => {
+      stored = value;
+    },
+  };
+
+  const project = await api.createProject({ name: "Access" });
+  await api.createTaskFromInput({
+    input: "Review issue",
+    parsed: {
+      kind: "github_issue",
+      provider: "github",
+      externalId: "owner/repo#12",
+      url: "https://github.com/owner/repo/issues/12",
+      title: "Review issue",
+      repoUrl: "https://github.com/owner/repo",
+    },
+    projectId: project.id,
+  });
+  await api.createTaskFromInput({
+    input: "Review pull request",
+    parsed: {
+      kind: "pull_request",
+      provider: "github",
+      externalId: "owner/repo#13",
+      url: "https://github.com/owner/repo/pull/13",
+      title: "Review pull request",
+      repoUrl: "https://github.com/owner/repo",
+    },
+    projectId: project.id,
+  });
+
+  const resources = await api.listProjectResources({ projectId: project.id });
+
+  assert.equal(resources.length, 1);
+  assert.equal(resources[0].provider, "github");
+  assert.equal(resources[0].kind, "github_repo");
+  assert.equal(resources[0].externalId, "github.com/owner/repo");
+  assert.equal(resources[0].url, "https://github.com/owner/repo");
+});
+
+test("local fallback auto-connects gitlab repos per project", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => {
+      stored = value;
+    },
+  };
+
+  const firstProject = await api.createProject({ name: "Access" });
+  const secondProject = await api.createProject({ name: "Portal" });
+  const parsed = {
+    kind: "merge_request",
+    provider: "gitlab",
+    externalId: "group/app!12",
+    url: "https://gitlab.example.org/group/app/-/merge_requests/12",
+    title: "Review merge request",
+    repoUrl: "https://gitlab.example.org/group/app",
+  };
+  await api.createTaskFromInput({
+    input: "Review merge request",
+    parsed,
+    projectId: firstProject.id,
+  });
+  await api.createTaskFromInput({
+    input: "Review issue",
+    parsed: {
+      ...parsed,
+      kind: "gitlab_issue",
+      externalId: "group/app!14",
+      url: "https://gitlab.example.org/group/app/-/issues/14",
+      title: "Review issue",
+    },
+    projectId: firstProject.id,
+  });
+  await api.createTaskFromInput({
+    input: "Review another merge request",
+    parsed: {
+      ...parsed,
+      externalId: "group/app!13",
+      url: "https://gitlab.example.org/group/app/-/merge_requests/13",
+    },
+    projectId: secondProject.id,
+  });
+
+  const firstResources = await api.listProjectResources({ projectId: firstProject.id });
+  const secondResources = await api.listProjectResources({ projectId: secondProject.id });
+
+  assert.equal(firstResources.length, 1);
+  assert.equal(secondResources.length, 1);
+  assert.equal(firstResources[0].kind, "gitlab_repo");
+  assert.equal(secondResources[0].kind, "gitlab_repo");
+  assert.equal(firstResources[0].externalId, "gitlab.example.org/group/app");
+  assert.equal(secondResources[0].externalId, "gitlab.example.org/group/app");
+  assert.notEqual(firstResources[0].id, secondResources[0].id);
 });
 
 test("local fallback preserves provider task status when update omits status", async () => {

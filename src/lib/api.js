@@ -69,9 +69,13 @@ export const api = {
   },
   createTaskFromInput: (payload) =>
     call("create_task_from_input", payload, () => local.createTaskFromInput(payload)),
+  listSmartInboxReviewRequests: (payload) =>
+    call("list_smart_inbox_review_requests", payload, () => local.listSmartInboxReviewRequests(payload)),
   listSmartInboxTodos: () => call("list_smart_inbox_todos", {}, local.listSmartInboxTodos),
   createSmartInboxTodo: (payload) =>
     call("create_smart_inbox_todo", { input: payload }, () => local.createSmartInboxTodo(payload)),
+  updateSmartInboxTodo: (payload) =>
+    call("update_smart_inbox_todo", { input: payload }, () => local.updateSmartInboxTodo(payload)),
   deleteSmartInboxTodo: (payload) =>
     call("delete_smart_inbox_todo", payload, () => local.deleteSmartInboxTodo(payload)),
   ocrImageFile: (payload) => call("ocr_image_file", payload, () => local.ocrImageFile()),
@@ -301,6 +305,85 @@ function displayRepoUrl(repoUrl) {
   return normalized ? `https://${normalized}` : repoUrl;
 }
 
+function repoResourceName(repoUrl) {
+  const normalized = normalizeRepoUrl(repoUrl);
+  const parts = normalized.split("/").filter(Boolean);
+  if (parts.length >= 3) {
+    return parts.slice(1).join("/");
+  }
+  return repoUrl || "Repository";
+}
+
+function parentResourceFromParsed(parsed) {
+  if (parsed?.kind === "trello_board" && parsed.externalId) {
+    return {
+      provider: "trello",
+      kind: "trello_board",
+      externalId: parsed.externalId,
+      url: parsed.url,
+      name: parsed.title || `Trello board ${parsed.externalId}`,
+      iconUrl: null,
+      connectionId: null,
+    };
+  }
+
+  if (parsed?.provider === "github" && ["github_issue", "pull_request"].includes(parsed.kind)) {
+    const externalId = normalizeRepoUrl(parsed.repoUrl || "");
+    if (!externalId) return null;
+    return {
+      provider: "github",
+      kind: "github_repo",
+      externalId,
+      url: displayRepoUrl(parsed.repoUrl),
+      name: repoResourceName(parsed.repoUrl),
+      iconUrl: null,
+      connectionId: null,
+    };
+  }
+
+  if (parsed?.provider === "gitlab" && ["gitlab_issue", "merge_request"].includes(parsed.kind)) {
+    const externalId = normalizeRepoUrl(parsed.repoUrl || "");
+    if (!externalId) return null;
+    return {
+      provider: "gitlab",
+      kind: "gitlab_repo",
+      externalId,
+      url: displayRepoUrl(parsed.repoUrl),
+      name: repoResourceName(parsed.repoUrl),
+      iconUrl: null,
+      connectionId: null,
+    };
+  }
+
+  return null;
+}
+
+function upsertProjectResource(state, projectId, input) {
+  if (!projectId || !input?.provider || !input?.kind || !input?.externalId) return null;
+  state.resources = state.resources || [];
+  const existing = state.resources.find(
+    (item) =>
+      item.projectId === projectId &&
+      item.provider === input.provider &&
+      item.kind === input.kind &&
+      item.externalId === input.externalId,
+  );
+
+  if (existing) {
+    return existing;
+  }
+
+  const resource = {
+    id: id("resource"),
+    projectId,
+    ...input,
+    iconUrl: input.iconUrl ?? null,
+    connectionId: input.connectionId ?? null,
+  };
+  state.resources.push(resource);
+  return resource;
+}
+
 function normalizeTaskFiles(files) {
   if (!Array.isArray(files)) return [];
   return files
@@ -486,7 +569,10 @@ const local = {
     const externalId = input.externalId?.trim() || input.url;
     const existing = state.resources.find(
       (item) =>
-        item.provider === input.provider && item.kind === input.kind && item.externalId === externalId,
+        item.projectId === input.projectId &&
+        item.provider === input.provider &&
+        item.kind === input.kind &&
+        item.externalId === externalId,
     );
 
     if (existing) {
@@ -604,6 +690,10 @@ const local = {
     return [];
   },
 
+  listSmartInboxReviewRequests() {
+    return { items: [], warnings: [] };
+  },
+
   listSmartInboxTodos() {
     const state = readState();
     state.smartInboxTodos = (state.smartInboxTodos || []).map(normalizeSmartInboxTodo);
@@ -650,6 +740,40 @@ const local = {
     return todo;
   },
 
+  updateSmartInboxTodo(input) {
+    const state = readState();
+    state.smartInboxTodos = (state.smartInboxTodos || []).map(normalizeSmartInboxTodo);
+    const todo = state.smartInboxTodos.find((item) => item.id === input?.id);
+    if (!todo) {
+      throw new Error("Smart inbox todo not found.");
+    }
+
+    if (todo.kind === "text") {
+      if (Object.prototype.hasOwnProperty.call(input || {}, "title")) {
+        throw new Error("Text todos can only update rawText.");
+      }
+      if (typeof input?.rawText !== "string" || !input.rawText.trim()) {
+        throw new Error("Todo content cannot be blank.");
+      }
+      todo.rawText = input.rawText;
+      todo.title = firstLine(input.rawText);
+    } else {
+      if (Object.prototype.hasOwnProperty.call(input || {}, "rawText")) {
+        throw new Error("File todos can only update title.");
+      }
+      if (typeof input?.title !== "string" || !input.title.trim()) {
+        throw new Error("Todo title cannot be blank.");
+      }
+      todo.title = input.title.trim();
+    }
+
+    todo.updatedAt = now();
+    const updated = normalizeSmartInboxTodo(todo);
+    Object.assign(todo, updated);
+    writeState(state);
+    return updated;
+  },
+
   deleteSmartInboxTodo({ id: todoId }) {
     const state = readState();
     state.smartInboxTodos = (state.smartInboxTodos || []).filter((todo) => todo.id !== todoId);
@@ -690,9 +814,17 @@ const local = {
       );
       const existingTask = existingLink && state.tasks.find((task) => task.id === existingLink.taskId);
       if (existingTask) {
+        const resource = upsertProjectResource(
+          state,
+          existingTask.projectId,
+          parentResourceFromParsed(parsed),
+        );
+        if (resource) {
+          writeState(state);
+        }
         return {
           task: enrichTask(state, existingTask),
-          resource: null,
+          resource,
           parsed: parsedPayload,
           projectRequired: false,
           created: false,
@@ -702,14 +834,17 @@ const local = {
 
     let resource = null;
     let targetProjectId = projectId ?? null;
-    if (parsed.kind === "trello_board") {
-      resource = state.resources.find(
+    if (parsed.kind === "trello_board" && !targetProjectId) {
+      const matches = state.resources.filter(
         (item) =>
           item.provider === "trello" &&
           item.kind === "trello_board" &&
           item.externalId === parsed.externalId,
       );
-      targetProjectId = resource?.projectId ?? targetProjectId;
+      if (matches.length === 1) {
+        resource = matches[0];
+        targetProjectId = resource.projectId;
+      }
     }
 
     if (!targetProjectId) {
@@ -722,20 +857,7 @@ const local = {
       };
     }
 
-    if (parsed.kind === "trello_board" && !resource) {
-      resource = {
-        id: id("resource"),
-        projectId: targetProjectId,
-        provider: "trello",
-        kind: "trello_board",
-        externalId: parsed.externalId,
-        url: parsed.url,
-        name: parsed.title,
-        iconUrl: null,
-        connectionId: null,
-      };
-      state.resources.push(resource);
-    }
+    resource = upsertProjectResource(state, targetProjectId, parentResourceFromParsed(parsed));
 
     if (parsed.kind === "trello_board") {
       writeState(state);
@@ -782,6 +904,7 @@ const local = {
       });
     }
 
+    resource = resource || upsertProjectResource(state, targetProjectId, parentResourceFromParsed(parsed));
     writeState(state);
     return {
       task: enrichTask(state, task),

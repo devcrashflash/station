@@ -39,6 +39,28 @@ export function latestActivitySyncAt(syncRuns = []) {
   return Math.max(0, ...syncRuns.map((run) => run.syncedAt || 0));
 }
 
+export function formatActivityLastSyncText(value, now = new Date()) {
+  if (!value) return "Last sync: never";
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Last sync: never";
+
+  const referenceDate = new Date(now);
+  const isToday = formatLocalDate(date) === formatLocalDate(referenceDate);
+  const options = isToday
+    ? { hour: "2-digit", minute: "2-digit" }
+    : {
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+        ...(date.getFullYear() === referenceDate.getFullYear() ? {} : { year: "numeric" }),
+        hour: "2-digit",
+        minute: "2-digit",
+      };
+
+  return `Last sync ${new Intl.DateTimeFormat(undefined, options).format(date)}`;
+}
+
 export function shouldAutoSyncActivity(dateValue, syncRuns = [], now = Date.now(), today = formatLocalDate()) {
   if (dateValue !== today) return false;
   const latestSyncAt = latestActivitySyncAt(syncRuns);

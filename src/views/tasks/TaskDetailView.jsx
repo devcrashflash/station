@@ -24,12 +24,15 @@ import { Panel } from "@/components/common/Panel";
 import { SelectControl } from "@/components/common/SelectControl";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Kbd } from "@/components/ui/kbd";
 import { LocalResourceList } from "@/features/resources/LocalResourcesPanel";
 import { AttachmentLink, ResourceLink, taskLinkMeta } from "@/features/tasks/AttachmentLink";
 import { TaskDescriptionMarkdown } from "@/features/tasks/TaskDescriptionMarkdown";
 import { TaskEditDialog } from "@/features/tasks/TaskEditDialog";
 import { isPullRequestResource } from "@/lib/api";
+import { shortcutModifier } from "@/lib/keyboardShortcut";
 import { parseSmartInput } from "@/lib/smartInputParser";
+import { taskStatusBadgeLabel } from "@/lib/taskStatus";
 
 const relationTypeOptions = [
   { value: "related", label: "Related" },
@@ -137,11 +140,24 @@ export function TaskDetailView({
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isExternalRefreshing, setIsExternalRefreshing] = useState(false);
+  const shortcutKey = shortcutModifier();
   const [externalRefreshState, setExternalRefreshState] = useState({
     connectionRequired: false,
     notice: "",
   });
   const externalRefreshTokenRef = useRef(0);
+
+  useEffect(() => {
+    function handleKeyDown(event) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "e") {
+        event.preventDefault();
+        setShowEdit(true);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -376,6 +392,7 @@ export function TaskDetailView({
     : null);
   const taskFiles = (links[0]?.files || []).filter((file) => file?.url);
   const reviewParsed = isPullRequestResource(taskResource) ? parseSmartInput(taskResource.url || "") : null;
+  const statusBadgeLabel = taskStatusBadgeLabel(task);
   const canReviewResource = Boolean(
     task.projectId &&
     reviewParsed?.repoUrl &&
@@ -397,13 +414,18 @@ export function TaskDetailView({
           </p>
           <h2 className="mt-1 break-words text-3xl font-semibold">{task.title}</h2>
           <div className="mt-3 flex flex-wrap gap-2">
-            <Badge variant="secondary">{task.status}</Badge>
+            <Badge variant="secondary">{statusBadgeLabel}</Badge>
             {taskResource && <Badge variant="secondary">Has resource</Badge>}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <Button type="button" onClick={() => setShowEdit(true)}>
+          <Button
+            type="button"
+            title={`Edit task with ${shortcutKey} E`}
+            onClick={() => setShowEdit(true)}
+          >
             Edit task
+            <Kbd className="bg-primary-foreground/15 text-primary-foreground">{shortcutKey} E</Kbd>
           </Button>
           <div className="relative">
             <Button
@@ -652,7 +674,7 @@ function RelationRow({ relation, taskId, onOpenTask, onUpdateRelationType, onDel
           <p className="min-w-0 max-w-full truncate font-medium">{relatedTask.title}</p>
           <Badge variant="secondary">{relationLabel}</Badge>
           {directionLabel && <Badge variant="secondary">{directionLabel}</Badge>}
-          <Badge variant="secondary">{relatedTask.status}</Badge>
+          <Badge variant="secondary">{taskStatusBadgeLabel(relatedTask)}</Badge>
         </div>
         {relatedTask.sourceUrl && (
           <span className="mt-2 block min-w-0 max-w-full truncate text-xs text-blue-700">

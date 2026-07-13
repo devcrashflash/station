@@ -9,3 +9,11 @@ export function isProviderBackedTask(task) {
 export function isTaskDone(task) {
   return !isProviderBackedTask(task) && task?.status === "done";
 }
+
+export function taskStatusBadgeLabel(task) {
+  if (!isProviderBackedTask(task) && (!task?.status || task.status === "open")) {
+    return "new";
+  }
+
+  return task?.status || "new";
+}

@@ -23,8 +23,10 @@ import {
   activityEventKindLabel,
   activityProviderLabel,
   addDays,
+  formatActivityLastSyncText,
   formatLocalDate,
   isTrelloAutomationActivity,
+  latestActivitySyncAt,
   parseLocalDate,
   shouldAutoSyncActivity,
   sortActivities,
@@ -295,10 +297,7 @@ export function useActivityData({ date, enabled = true, onError }) {
 }
 
 function SyncSummary({ syncRuns, isSyncing }) {
-  const latest = Math.max(0, ...(syncRuns || []).map((run) => run.syncedAt || 0));
-  const lastSyncText = latest
-    ? `Last sync ${new Date(latest).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
-    : "Last sync: never";
+  const lastSyncText = formatActivityLastSyncText(latestActivitySyncAt(syncRuns));
 
   if (isSyncing) {
     return <span className="text-xs text-muted-foreground">Syncing remote activity · {lastSyncText}</span>;

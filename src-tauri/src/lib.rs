@@ -380,6 +380,41 @@ struct SmartTaskResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct SmartInboxReviewRequest {
+    provider: String,
+    connection_id: String,
+    connection_name: String,
+    title: String,
+    url: String,
+    repo_path: String,
+    number: String,
+    author: Option<String>,
+    review_requested_at: Option<i64>,
+    updated_at: Option<i64>,
+    created_at: Option<i64>,
+    sort_at: Option<i64>,
+    sort_source: String,
+    state: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SmartInboxReviewRequestWarning {
+    provider: String,
+    connection_id: String,
+    connection_name: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SmartInboxReviewRequestResult {
+    items: Vec<SmartInboxReviewRequest>,
+    warnings: Vec<SmartInboxReviewRequestWarning>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct OcrImageResult {
     text: String,
 }
@@ -564,6 +599,14 @@ struct SmartInboxTodoInput {
     mime_type: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SmartInboxTodoUpdateInput {
+    id: String,
+    title: Option<String>,
+    raw_text: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct ProviderMetadata {
     connection_id: Option<String>,
@@ -574,7 +617,18 @@ struct ProviderMetadata {
     url: Option<String>,
     fetched_at: Option<i64>,
     files: Vec<TaskFile>,
+    parent_resource: Option<ProviderResourceMetadata>,
     notice: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderResourceMetadata {
+    provider: String,
+    kind: String,
+    external_id: String,
+    url: String,
+    name: String,
+    icon_url: Option<String>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -618,8 +672,10 @@ pub fn run() {
             load_review_diff,
             load_review_diff_file,
             create_task_from_input,
+            list_smart_inbox_review_requests,
             list_smart_inbox_todos,
             create_smart_inbox_todo,
+            update_smart_inbox_todo,
             delete_smart_inbox_todo,
             ocr_image_file,
             ocr_image_bytes,
@@ -770,7 +826,7 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
             name TEXT NOT NULL,
             icon_url TEXT,
             connection_id TEXT REFERENCES connections(id) ON DELETE SET NULL,
-            UNIQUE(provider, kind, external_id)
+            UNIQUE(project_id, provider, kind, external_id)
         );
 
         CREATE TABLE IF NOT EXISTS local_resources (
@@ -857,6 +913,7 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
     )?;
     add_column_if_missing(db, "projects", "color", "TEXT NOT NULL DEFAULT '#2563eb'")?;
     add_column_if_missing(db, "connections", "api_key", "TEXT")?;
+    migrate_resources_to_project_scoped_identity(db)?;
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_activities_occurred_at ON activities(occurred_at DESC)",
         [],
@@ -943,6 +1000,68 @@ fn keep_one_task_link_per_task(db: &SqliteConnection) -> rusqlite::Result<()> {
         [],
     )?;
     Ok(())
+}
+
+fn migrate_resources_to_project_scoped_identity(db: &SqliteConnection) -> rusqlite::Result<()> {
+    if !resources_have_global_unique_identity(db)? {
+        return Ok(());
+    }
+
+    db.execute_batch(
+        "
+        DROP TABLE IF EXISTS resources_legacy_global_identity;
+        ALTER TABLE resources RENAME TO resources_legacy_global_identity;
+        CREATE TABLE resources (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            provider TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            external_id TEXT NOT NULL,
+            url TEXT NOT NULL,
+            name TEXT NOT NULL,
+            icon_url TEXT,
+            connection_id TEXT REFERENCES connections(id) ON DELETE SET NULL,
+            UNIQUE(project_id, provider, kind, external_id)
+        );
+        INSERT OR IGNORE INTO resources
+            (id, project_id, provider, kind, external_id, url, name, icon_url, connection_id)
+        SELECT id, project_id, provider, kind, external_id, url, name, icon_url, connection_id
+        FROM resources_legacy_global_identity;
+        DROP TABLE resources_legacy_global_identity;
+        ",
+    )?;
+
+    Ok(())
+}
+
+fn resources_have_global_unique_identity(db: &SqliteConnection) -> rusqlite::Result<bool> {
+    let mut statement = db.prepare("PRAGMA index_list(resources)")?;
+    let indexes = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (index_name, unique) in indexes {
+        if unique != 1 {
+            continue;
+        }
+        let columns = index_columns(db, &index_name)?;
+        if columns == ["provider", "kind", "external_id"] {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn index_columns(db: &SqliteConnection, index_name: &str) -> rusqlite::Result<Vec<String>> {
+    let escaped = index_name.replace('"', "\"\"");
+    let mut statement = db.prepare(&format!("PRAGMA index_info(\"{escaped}\")"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(2))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(columns)
 }
 
 fn add_column_if_missing(
@@ -1218,14 +1337,15 @@ fn get_resource_by_id(db: &SqliteConnection, id: &str) -> rusqlite::Result<Optio
 
 fn get_resource_by_identity(
     db: &SqliteConnection,
+    project_id: &str,
     provider: &str,
     kind: &str,
     external_id: &str,
 ) -> rusqlite::Result<Option<Resource>> {
     db.query_row(
         "SELECT id, project_id, provider, kind, external_id, url, name, icon_url, connection_id
-         FROM resources WHERE provider = ?1 AND kind = ?2 AND external_id = ?3",
-        params![provider, kind, external_id],
+         FROM resources WHERE project_id = ?1 AND provider = ?2 AND kind = ?3 AND external_id = ?4",
+        params![project_id, provider, kind, external_id],
         row_to_resource,
     )
     .optional()
@@ -1241,9 +1361,13 @@ fn connect_resource_in_db(
         input.external_id.trim().to_string()
     };
 
-    if let Some(resource) =
-        get_resource_by_identity(db, &input.provider, &input.kind, &external_id)?
-    {
+    if let Some(resource) = get_resource_by_identity(
+        db,
+        &input.project_id,
+        &input.provider,
+        &input.kind,
+        &external_id,
+    )? {
         return Ok(resource);
     }
 
@@ -2953,7 +3077,7 @@ fn smart_inbox_todo_title(input: &SmartInboxTodoInput) -> String {
     }
 
     let raw_text = input.raw_text.as_deref().unwrap_or("");
-    let title = first_line(raw_text);
+    let title = first_non_empty_line(raw_text);
     if title.is_empty() {
         "Untitled todo".to_string()
     } else {
@@ -3022,6 +3146,57 @@ fn create_smart_inbox_todo_in_db(
     get_smart_inbox_todo(db, &id)?
         .map(mark_smart_inbox_todo_file_missing)
         .ok_or_else(|| "Smart inbox todo not found".to_string())
+}
+
+fn update_smart_inbox_todo_in_db(
+    db: &SqliteConnection,
+    input: SmartInboxTodoUpdateInput,
+) -> Result<SmartInboxTodo, String> {
+    let todo = get_smart_inbox_todo(db, &input.id)?
+        .ok_or_else(|| "Smart inbox todo not found.".to_string())?;
+    let timestamp = now_millis();
+
+    match todo.kind.as_str() {
+        "text" => {
+            if input.title.is_some() {
+                return Err("Text todos can only update rawText.".to_string());
+            }
+            let raw_text = input
+                .raw_text
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| "Todo content cannot be blank.".to_string())?;
+            let title = first_non_empty_line(raw_text);
+            db.execute(
+                "UPDATE smart_inbox_todos
+                 SET title = ?1, raw_text = ?2, updated_at = ?3
+                 WHERE id = ?4",
+                params![title, raw_text, timestamp, &input.id],
+            )
+            .map_err(db_error)?;
+        }
+        "file" => {
+            if input.raw_text.is_some() {
+                return Err("File todos can only update title.".to_string());
+            }
+            let title = input
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "Todo title cannot be blank.".to_string())?;
+            db.execute(
+                "UPDATE smart_inbox_todos SET title = ?1, updated_at = ?2 WHERE id = ?3",
+                params![title, timestamp, &input.id],
+            )
+            .map_err(db_error)?;
+        }
+        _ => return Err("Unsupported smart inbox todo kind.".to_string()),
+    }
+
+    get_smart_inbox_todo(db, &input.id)?
+        .map(mark_smart_inbox_todo_file_missing)
+        .ok_or_else(|| "Smart inbox todo not found.".to_string())
 }
 
 fn mark_smart_inbox_todo_file_missing(mut todo: SmartInboxTodo) -> SmartInboxTodo {
@@ -3652,6 +3827,7 @@ fn migrate_pull_requests_into_tasks(db: &SqliteConnection) -> rusqlite::Result<(
             url: Some(pull_request.pr_url.clone()),
             fetched_at: pull_request.fetched_at,
             files: Vec::new(),
+            parent_resource: None,
             notice: None,
         };
         link_task_resource_in_db(
@@ -3728,6 +3904,93 @@ fn gitlab_external_id_from_url(url: &str, marker: &str) -> Option<String> {
     Some(format!("{repo_path}!{number}"))
 }
 
+fn repo_resource_name(normalized_repo_url: &str) -> String {
+    let parts = normalized_repo_url
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() >= 3 {
+        return parts[1..].join("/");
+    }
+    normalized_repo_url.to_string()
+}
+
+fn parent_resource_from_parsed(
+    parsed: &ParsedInputPayload,
+    metadata: Option<&ProviderMetadata>,
+) -> Option<ProviderResourceMetadata> {
+    if parsed.kind == "trello_card" {
+        return metadata.and_then(|metadata| metadata.parent_resource.clone());
+    }
+
+    if parsed.kind == "trello_board" {
+        return Some(ProviderResourceMetadata {
+            provider: "trello".to_string(),
+            kind: "trello_board".to_string(),
+            external_id: parsed.external_id.clone()?,
+            url: parsed.url.clone()?,
+            name: parsed.title.clone(),
+            icon_url: None,
+        });
+    }
+
+    if parsed.provider.as_deref() == Some("github")
+        && matches!(parsed.kind.as_str(), "github_issue" | "pull_request")
+    {
+        let normalized = normalize_repository_url(parsed.repo_url.as_deref()?)?;
+        return Some(ProviderResourceMetadata {
+            provider: "github".to_string(),
+            kind: "github_repo".to_string(),
+            external_id: normalized.clone(),
+            url: display_repo_url(&normalized),
+            name: repo_resource_name(&normalized),
+            icon_url: None,
+        });
+    }
+
+    if parsed.provider.as_deref() == Some("gitlab")
+        && matches!(parsed.kind.as_str(), "gitlab_issue" | "merge_request")
+    {
+        let normalized = normalize_repository_url(parsed.repo_url.as_deref()?)?;
+        return Some(ProviderResourceMetadata {
+            provider: "gitlab".to_string(),
+            kind: "gitlab_repo".to_string(),
+            external_id: normalized.clone(),
+            url: display_repo_url(&normalized),
+            name: repo_resource_name(&normalized),
+            icon_url: None,
+        });
+    }
+
+    None
+}
+
+fn upsert_parent_resource_in_db(
+    db: &SqliteConnection,
+    project_id: &str,
+    parsed: &ParsedInputPayload,
+    metadata: Option<&ProviderMetadata>,
+) -> rusqlite::Result<Option<Resource>> {
+    let Some(parent) = parent_resource_from_parsed(parsed, metadata) else {
+        return Ok(None);
+    };
+
+    connect_resource_in_db(
+        db,
+        ResourceInput {
+            project_id: project_id.to_string(),
+            provider: parent.provider,
+            kind: parent.kind,
+            external_id: parent.external_id,
+            url: parent.url,
+            name: parent.name,
+            icon_url: parent.icon_url,
+            connection_id: metadata.and_then(|metadata| metadata.connection_id.clone()),
+        },
+    )
+    .map(Some)
+}
+
 fn create_smart_task_in_db(
     db: &SqliteConnection,
     input: String,
@@ -3779,9 +4042,14 @@ fn create_smart_task_in_db(
     if let Some(task) =
         get_task_by_link(db, &provider, &parsed.kind, &external_id).map_err(db_error)?
     {
+        let resource = if let Some(project_id) = task.project_id.as_deref() {
+            upsert_parent_resource_in_db(db, project_id, &parsed, None).map_err(db_error)?
+        } else {
+            None
+        };
         return Ok(SmartTaskResult {
             task: Some(task),
-            resource: None,
+            resource,
             parsed: response,
             project_required: false,
             created: false,
@@ -3791,14 +4059,13 @@ fn create_smart_task_in_db(
 
     let mut resource = None;
     let target_project_id = if parsed.kind == "trello_board" {
-        if let Some(existing) =
-            get_resource_by_identity(db, &provider, "trello_board", &external_id)
-                .map_err(db_error)?
-        {
-            resource = Some(existing.clone());
-            Some(existing.project_id)
+        if let Some(project_id) = project_id.clone() {
+            resource =
+                get_resource_by_identity(db, &project_id, &provider, "trello_board", &external_id)
+                    .map_err(db_error)?;
+            Some(project_id)
         } else {
-            project_id.clone()
+            None
         }
     } else {
         project_id.clone()
@@ -3816,24 +4083,10 @@ fn create_smart_task_in_db(
     };
 
     if parsed.kind == "trello_board" {
-        if resource.is_none() {
-            resource = Some(
-                connect_resource_in_db(
-                    db,
-                    ResourceInput {
-                        project_id: target_project_id.clone(),
-                        provider: provider.clone(),
-                        kind: "trello_board".to_string(),
-                        external_id: external_id.clone(),
-                        url: source_url.clone(),
-                        name: response.title.clone(),
-                        icon_url: None,
-                        connection_id: None,
-                    },
-                )
+        resource = resource.or(
+            upsert_parent_resource_in_db(db, &target_project_id, &parsed, None)
                 .map_err(db_error)?,
-            );
-        }
+        );
 
         return Ok(SmartTaskResult {
             task: None,
@@ -3857,6 +4110,8 @@ fn create_smart_task_in_db(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| input.trim().to_string());
     let enriched_url = metadata.url.clone().unwrap_or_else(|| source_url.clone());
+    resource = upsert_parent_resource_in_db(db, &target_project_id, &parsed, Some(&metadata))
+        .map_err(db_error)?;
 
     let task = create_task_in_db(
         db,
@@ -3869,7 +4124,7 @@ fn create_smart_task_in_db(
     link_task_resource_in_db(
         db,
         task.id.clone(),
-        provider,
+        provider.clone(),
         parsed.kind.clone(),
         external_id,
         enriched_url,
@@ -4051,6 +4306,7 @@ impl ProviderMetadata {
             url: None,
             fetched_at: None,
             files: Vec::new(),
+            parent_resource: None,
             notice: None,
         }
     }
@@ -4112,6 +4368,216 @@ fn fetch_connection_activities(
         "trello" => fetch_trello_activities(connection, date, start_at, end_at),
         _ => Err(format!("Unsupported provider: {}", connection.provider)),
     }
+}
+
+fn fetch_connection_review_requests(
+    connection: &ConnectionRecord,
+) -> Result<Vec<SmartInboxReviewRequest>, String> {
+    validate_connection_credentials(connection)?;
+
+    match connection.provider.as_str() {
+        "github" => fetch_github_review_requests(connection),
+        "gitlab" => fetch_gitlab_review_requests(connection),
+        _ => Err(format!("Unsupported provider: {}", connection.provider)),
+    }
+}
+
+fn fetch_github_review_requests(
+    connection: &ConnectionRecord,
+) -> Result<Vec<SmartInboxReviewRequest>, String> {
+    let query = "is:pr is:open user-review-requested:@me archived:false";
+    let url = format!(
+        "https://api.github.com/search/issues?q={}&sort=updated&order=desc&per_page=50",
+        percent_encode(query)
+    );
+    let json = fetch_json(
+        &url,
+        vec![
+            ("Authorization", format!("Bearer {}", connection.token)),
+            ("X-GitHub-Api-Version", "2022-11-28".to_string()),
+            ("User-Agent", "dev-crash-flash-ai-studio".to_string()),
+        ],
+    )?;
+
+    Ok(json
+        .get("items")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| github_review_request_from_json(connection, item))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+fn fetch_gitlab_review_requests(
+    connection: &ConnectionRecord,
+) -> Result<Vec<SmartInboxReviewRequest>, String> {
+    let base_url = normalize_base_url(&connection.base_url);
+    let url = format!(
+        "{base_url}/api/v4/merge_requests?scope=reviews_for_me&state=opened&order_by=updated_at&sort=desc&per_page=50&view=simple&non_archived=true"
+    );
+    let json = fetch_json(&url, vec![("PRIVATE-TOKEN", connection.token.clone())])?;
+
+    Ok(json
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| gitlab_review_request_from_json(connection, item))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+fn github_review_request_from_json(
+    connection: &ConnectionRecord,
+    item: &Value,
+) -> Option<SmartInboxReviewRequest> {
+    if json_string(item, "state")?.to_ascii_lowercase() != "open" {
+        return None;
+    }
+    if json_path_string(item, &["pull_request", "merged_at"]).is_some() {
+        return None;
+    }
+
+    let url = json_string(item, "html_url")?;
+    let (repo_path, number) = github_repo_and_number_from_url(&url).or_else(|| {
+        let repo_path = json_string(item, "repository_url").and_then(|value| {
+            value
+                .rsplit_once("/repos/")
+                .map(|(_, path)| path.to_string())
+        })?;
+        let number = json_value_string(item.get("number"))?;
+        Some((repo_path, number))
+    })?;
+    let review_requested_at = review_request_requested_at(item);
+    let updated_at = json_string(item, "updated_at").and_then(|value| parse_rfc3339_millis(&value));
+    let created_at = json_string(item, "created_at").and_then(|value| parse_rfc3339_millis(&value));
+    let (sort_at, sort_source) =
+        review_request_sort_metadata(review_requested_at, updated_at, created_at);
+
+    Some(SmartInboxReviewRequest {
+        provider: "github".to_string(),
+        connection_id: connection.id.clone(),
+        connection_name: connection.name.clone(),
+        title: json_string(item, "title").unwrap_or_else(|| format!("{repo_path} PR #{number}")),
+        url,
+        repo_path,
+        number,
+        author: json_path_string(item, &["user", "login"]),
+        review_requested_at,
+        updated_at,
+        created_at,
+        sort_at,
+        sort_source,
+        state: "open".to_string(),
+    })
+}
+
+fn gitlab_review_request_from_json(
+    connection: &ConnectionRecord,
+    item: &Value,
+) -> Option<SmartInboxReviewRequest> {
+    let state = json_string(item, "state")?.to_ascii_lowercase();
+    if state != "opened" {
+        return None;
+    }
+    if json_string(item, "merged_at").is_some() {
+        return None;
+    }
+
+    let url = json_string(item, "web_url")?;
+    let repo_path =
+        json_string(item, "path_with_namespace").or_else(|| gitlab_repo_path_from_url(&url))?;
+    let number = json_value_string(item.get("iid"))?;
+    let review_requested_at = review_request_requested_at(item);
+    let updated_at = json_string(item, "updated_at").and_then(|value| parse_rfc3339_millis(&value));
+    let created_at = json_string(item, "created_at").and_then(|value| parse_rfc3339_millis(&value));
+    let (sort_at, sort_source) =
+        review_request_sort_metadata(review_requested_at, updated_at, created_at);
+
+    Some(SmartInboxReviewRequest {
+        provider: "gitlab".to_string(),
+        connection_id: connection.id.clone(),
+        connection_name: connection.name.clone(),
+        title: json_string(item, "title").unwrap_or_else(|| format!("{repo_path} MR !{number}")),
+        url,
+        repo_path,
+        number,
+        author: json_path_string(item, &["author", "username"])
+            .or_else(|| json_path_string(item, &["author", "name"])),
+        review_requested_at,
+        updated_at,
+        created_at,
+        sort_at,
+        sort_source,
+        state: "opened".to_string(),
+    })
+}
+
+fn review_request_requested_at(item: &Value) -> Option<i64> {
+    json_string(item, "review_requested_at")
+        .or_else(|| json_string(item, "reviewer_added_at"))
+        .or_else(|| json_string(item, "requested_at"))
+        .or_else(|| json_path_string(item, &["review_request", "requested_at"]))
+        .and_then(|value| parse_rfc3339_millis(&value))
+}
+
+fn review_request_sort_metadata(
+    review_requested_at: Option<i64>,
+    updated_at: Option<i64>,
+    created_at: Option<i64>,
+) -> (Option<i64>, String) {
+    if let Some(value) = review_requested_at {
+        return (Some(value), "review_requested".to_string());
+    }
+    if let Some(value) = updated_at {
+        return (Some(value), "updated".to_string());
+    }
+    if let Some(value) = created_at {
+        return (Some(value), "created".to_string());
+    }
+    (None, "unknown".to_string())
+}
+
+fn github_repo_and_number_from_url(url: &str) -> Option<(String, String)> {
+    let without_scheme = url
+        .trim()
+        .strip_prefix("https://")
+        .or_else(|| url.trim().strip_prefix("http://"))
+        .unwrap_or(url.trim());
+    let parts = without_scheme.split('/').collect::<Vec<_>>();
+    if parts.len() < 5 || parts[3] != "pull" {
+        return None;
+    }
+    let owner = parts[1].trim().to_string();
+    let repo = parts[2].trim().to_string();
+    let number = parts[4].trim().to_string();
+    if owner.is_empty() || repo.is_empty() || number.is_empty() {
+        return None;
+    }
+    Some((format!("{owner}/{repo}"), number))
+}
+
+fn gitlab_repo_path_from_url(url: &str) -> Option<String> {
+    let without_scheme = url
+        .trim()
+        .strip_prefix("https://")
+        .or_else(|| url.trim().strip_prefix("http://"))
+        .unwrap_or(url.trim());
+    let mut path_parts = without_scheme.split('/').skip(1).collect::<Vec<_>>();
+    let marker = path_parts.iter().position(|part| *part == "-")?;
+    if path_parts.get(marker + 1) != Some(&"merge_requests") {
+        return None;
+    }
+    path_parts.truncate(marker);
+    let repo_path = path_parts.join("/");
+    if repo_path.is_empty() {
+        return None;
+    }
+    Some(repo_path)
 }
 
 fn fetch_github_activities(
@@ -4567,6 +5033,8 @@ fn fetch_trello_card(
         percent_encode(token)
     );
     let json = fetch_json(&url, vec![])?;
+    let parent_resource = json_string(&json, "idBoard")
+        .and_then(|board_id| fetch_trello_board_parent_resource(&board_id, api_key, token).ok());
     let list_url = format!(
         "https://api.trello.com/1/cards/{}/list?key={}&token={}",
         percent_encode(id),
@@ -4587,7 +5055,36 @@ fn fetch_trello_card(
         state: trello_list_state(&list_json),
         url: json_string(&json, "url").or_else(|| parsed.url.clone()),
         files: trello_attachment_files(&attachments_json),
+        parent_resource,
         ..ProviderMetadata::empty()
+    })
+}
+
+fn fetch_trello_board_parent_resource(
+    board_id: &str,
+    api_key: &str,
+    token: &str,
+) -> Result<ProviderResourceMetadata, String> {
+    let url = format!(
+        "https://api.trello.com/1/boards/{}?fields=name,shortLink,shortUrl,url&key={}&token={}",
+        percent_encode(board_id),
+        percent_encode(api_key),
+        percent_encode(token)
+    );
+    let json = fetch_json(&url, vec![])?;
+    let external_id = json_string(&json, "shortLink").unwrap_or_else(|| board_id.to_string());
+    let url = json_string(&json, "url")
+        .or_else(|| json_string(&json, "shortUrl"))
+        .unwrap_or_else(|| format!("https://trello.com/b/{external_id}"));
+    let name = json_string(&json, "name").unwrap_or_else(|| format!("Trello board {external_id}"));
+
+    Ok(ProviderResourceMetadata {
+        provider: "trello".to_string(),
+        kind: "trello_board".to_string(),
+        external_id,
+        url,
+        name,
+        icon_url: None,
     })
 }
 
@@ -4864,6 +5361,15 @@ fn json_path_bool(json: &Value, path: &[&str]) -> Option<bool> {
 
 fn first_line(value: &str) -> String {
     value.lines().next().unwrap_or(value).trim().to_string()
+}
+
+fn first_non_empty_line(value: &str) -> String {
+    value
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(value)
+        .trim()
+        .to_string()
 }
 
 fn title_case_words(value: &str) -> String {
@@ -5149,6 +5655,56 @@ fn create_task_from_input(
 }
 
 #[tauri::command]
+async fn list_smart_inbox_review_requests(
+    app_handle: tauri::AppHandle,
+    provider: String,
+) -> Result<SmartInboxReviewRequestResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let provider = provider.trim().to_ascii_lowercase();
+        if provider != "github" && provider != "gitlab" {
+            return Err("Unsupported review request provider.".to_string());
+        }
+
+        let connections = {
+            let state = app_handle.state::<AppState>();
+            let db = state.db.lock().map_err(db_error)?;
+            list_connections_in_db(&db).map_err(db_error)?
+        };
+        let mut items = Vec::new();
+        let mut warnings = Vec::new();
+
+        for connection in connections
+            .into_iter()
+            .filter(|connection| connection.provider == provider)
+        {
+            match fetch_connection_review_requests(&connection) {
+                Ok(mut fetched) => items.append(&mut fetched),
+                Err(error) => warnings.push(SmartInboxReviewRequestWarning {
+                    provider: connection.provider.clone(),
+                    connection_id: connection.id.clone(),
+                    connection_name: connection.name.clone(),
+                    message: connection_test_error_message(&connection.provider, &error),
+                }),
+            }
+        }
+
+        let mut seen = HashSet::new();
+        items.retain(|item| seen.insert(format!("{}:{}", item.provider, item.url)));
+        items.sort_by(|left, right| {
+            right
+                .sort_at
+                .unwrap_or_default()
+                .cmp(&left.sort_at.unwrap_or_default())
+                .then_with(|| left.title.cmp(&right.title))
+        });
+
+        Ok(SmartInboxReviewRequestResult { items, warnings })
+    })
+    .await
+    .map_err(|error| format!("Could not sync review requests: {error}"))?
+}
+
+#[tauri::command]
 fn list_smart_inbox_todos(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<SmartInboxTodo>, String> {
@@ -5163,6 +5719,15 @@ fn create_smart_inbox_todo(
 ) -> Result<SmartInboxTodo, String> {
     let db = state.db.lock().map_err(db_error)?;
     create_smart_inbox_todo_in_db(&db, input)
+}
+
+#[tauri::command]
+fn update_smart_inbox_todo(
+    state: tauri::State<'_, AppState>,
+    input: SmartInboxTodoUpdateInput,
+) -> Result<SmartInboxTodo, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    update_smart_inbox_todo_in_db(&db, input)
 }
 
 #[tauri::command]
@@ -5836,6 +6401,17 @@ mod tests {
         }
     }
 
+    fn parsed_trello_card(url: &str) -> ParsedInputPayload {
+        ParsedInputPayload {
+            kind: "trello_card".to_string(),
+            provider: Some("trello".to_string()),
+            external_id: Some("card123".to_string()),
+            url: Some(url.to_string()),
+            title: "Trello card card123".to_string(),
+            repo_url: None,
+        }
+    }
+
     fn temp_file(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "dev-crash-flash-ai-studio-{}-{}-{name}",
@@ -5868,6 +6444,102 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         }
+    }
+
+    #[test]
+    fn github_review_request_normalization_excludes_closed_and_merged_items() {
+        let connection = connection_record("github", None, "token");
+        let open = serde_json::json!({
+            "html_url": "https://github.com/owner/repo/pull/42",
+            "repository_url": "https://api.github.com/repos/owner/repo",
+            "number": 42,
+            "state": "open",
+            "title": "Improve checkout",
+            "review_requested_at": "2026-07-12T08:40:00Z",
+            "created_at": "2026-07-10T08:30:00Z",
+            "updated_at": "2026-07-12T08:30:00Z",
+            "user": { "login": "octocat" },
+            "pull_request": { "merged_at": null }
+        });
+        let closed = serde_json::json!({
+            "html_url": "https://github.com/owner/repo/pull/43",
+            "number": 43,
+            "state": "closed",
+            "title": "Closed review",
+            "pull_request": { "merged_at": null }
+        });
+        let merged = serde_json::json!({
+            "html_url": "https://github.com/owner/repo/pull/44",
+            "number": 44,
+            "state": "open",
+            "title": "Merged review",
+            "pull_request": { "merged_at": "2026-07-12T08:35:00Z" }
+        });
+
+        let request = github_review_request_from_json(&connection, &open).expect("open request");
+
+        assert_eq!(request.provider, "github");
+        assert_eq!(request.repo_path, "owner/repo");
+        assert_eq!(request.number, "42");
+        assert_eq!(request.author.as_deref(), Some("octocat"));
+        assert_eq!(request.sort_source, "review_requested");
+        assert_eq!(request.sort_at, request.review_requested_at);
+        assert!(request.updated_at.is_some());
+        assert!(github_review_request_from_json(&connection, &closed).is_none());
+        assert!(github_review_request_from_json(&connection, &merged).is_none());
+    }
+
+    #[test]
+    fn gitlab_review_request_normalization_excludes_closed_and_merged_items() {
+        let connection = connection_record("gitlab", None, "token");
+        let opened = serde_json::json!({
+            "web_url": "https://gitlab.example.org/group/app/-/merge_requests/17",
+            "path_with_namespace": "group/app",
+            "iid": 17,
+            "state": "opened",
+            "title": "Improve checkout",
+            "created_at": "2026-07-10T08:30:00Z",
+            "updated_at": "2026-07-12T08:30:00Z",
+            "merged_at": null,
+            "author": { "username": "alice" }
+        });
+        let closed = serde_json::json!({
+            "web_url": "https://gitlab.example.org/group/app/-/merge_requests/18",
+            "iid": 18,
+            "state": "closed",
+            "title": "Closed review",
+            "merged_at": null
+        });
+        let merged = serde_json::json!({
+            "web_url": "https://gitlab.example.org/group/app/-/merge_requests/19",
+            "iid": 19,
+            "state": "opened",
+            "title": "Merged review",
+            "merged_at": "2026-07-12T08:35:00Z"
+        });
+
+        let request =
+            gitlab_review_request_from_json(&connection, &opened).expect("opened request");
+
+        assert_eq!(request.provider, "gitlab");
+        assert_eq!(request.repo_path, "group/app");
+        assert_eq!(request.number, "17");
+        assert_eq!(request.author.as_deref(), Some("alice"));
+        assert_eq!(request.sort_source, "updated");
+        assert_eq!(request.sort_at, request.updated_at);
+        assert!(request.updated_at.is_some());
+        assert!(gitlab_review_request_from_json(&connection, &closed).is_none());
+        assert!(gitlab_review_request_from_json(&connection, &merged).is_none());
+    }
+
+    #[test]
+    fn review_request_sort_metadata_falls_back_to_created_at() {
+        let created_at = parse_rfc3339_millis("2026-07-10T08:30:00Z");
+
+        let (sort_at, sort_source) = review_request_sort_metadata(None, None, created_at);
+
+        assert_eq!(sort_at, created_at);
+        assert_eq!(sort_source, "created");
     }
 
     #[cfg(target_os = "macos")]
@@ -6474,6 +7146,25 @@ mod tests {
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
+            CREATE TABLE projects (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                icon TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE resources (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                provider TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                external_id TEXT NOT NULL,
+                url TEXT NOT NULL,
+                name TEXT NOT NULL,
+                icon_url TEXT,
+                connection_id TEXT REFERENCES connections(id) ON DELETE SET NULL,
+                UNIQUE(provider, kind, external_id)
+            );
             CREATE TABLE task_links (
                 task_id TEXT NOT NULL,
                 provider TEXT NOT NULL,
@@ -6495,6 +7186,14 @@ mod tests {
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
+            INSERT INTO projects (id, name, icon, created_at, updated_at)
+            VALUES ('project_1', 'Access', 'FolderKanban', 1, 1),
+                   ('project_2', 'Portal', 'FolderKanban', 1, 1);
+            INSERT INTO resources
+                (id, project_id, provider, kind, external_id, url, name, icon_url, connection_id)
+            VALUES
+                ('resource_1', 'project_1', 'github', 'github_repo', 'github.com/owner/repo',
+                 'https://github.com/owner/repo', 'owner/repo', NULL, NULL);
             ",
         )
         .expect("create legacy schema");
@@ -6513,6 +7212,36 @@ mod tests {
         assert!(column_exists(&db, "activity_sync_runs", "synced_at"));
         assert!(column_exists(&db, "smart_inbox_todos", "raw_text"));
         assert!(column_exists(&db, "smart_inbox_todos", "file_path"));
+
+        connect_resource_in_db(
+            &db,
+            ResourceInput {
+                project_id: "project_2".to_string(),
+                provider: "github".to_string(),
+                kind: "github_repo".to_string(),
+                external_id: "github.com/owner/repo".to_string(),
+                url: "https://github.com/owner/repo".to_string(),
+                name: "owner/repo".to_string(),
+                icon_url: None,
+                connection_id: None,
+            },
+        )
+        .expect("connect same repo to second project after migration");
+        let duplicate = connect_resource_in_db(
+            &db,
+            ResourceInput {
+                project_id: "project_1".to_string(),
+                provider: "github".to_string(),
+                kind: "github_repo".to_string(),
+                external_id: "github.com/owner/repo".to_string(),
+                url: "https://github.com/owner/repo".to_string(),
+                name: "owner/repo".to_string(),
+                icon_url: None,
+                connection_id: None,
+            },
+        )
+        .expect("dedupe existing first project resource");
+        assert_eq!(duplicate.id, "resource_1");
     }
 
     #[test]
@@ -6688,6 +7417,153 @@ mod tests {
         let todos = list_smart_inbox_todos_in_db(&db).expect("list todos");
         assert_eq!(todos.len(), 2);
         assert_ne!(first.id, second.id);
+    }
+
+    #[test]
+    fn smart_inbox_todos_update_content_and_file_titles() {
+        let db = memory_db();
+        let text = create_smart_inbox_todo_in_db(
+            &db,
+            SmartInboxTodoInput {
+                kind: "text".to_string(),
+                title: None,
+                raw_text: Some("Original todo".to_string()),
+                file_path: None,
+                file_name: None,
+                mime_type: None,
+            },
+        )
+        .expect("create text todo");
+        let file = create_smart_inbox_todo_in_db(
+            &db,
+            SmartInboxTodoInput {
+                kind: "file".to_string(),
+                title: None,
+                raw_text: None,
+                file_path: Some("/tmp/archive.zip".to_string()),
+                file_name: Some("archive.zip".to_string()),
+                mime_type: Some("application/zip".to_string()),
+            },
+        )
+        .expect("create file todo");
+        db.execute(
+            "UPDATE smart_inbox_todos SET updated_at = 1 WHERE id IN (?1, ?2)",
+            params![&text.id, &file.id],
+        )
+        .expect("age todos");
+
+        let updated_file = update_smart_inbox_todo_in_db(
+            &db,
+            SmartInboxTodoUpdateInput {
+                id: file.id.clone(),
+                title: Some("  Release archive\nKeep for deployment  ".to_string()),
+                raw_text: None,
+            },
+        )
+        .expect("update file todo");
+        let updated_text = update_smart_inbox_todo_in_db(
+            &db,
+            SmartInboxTodoUpdateInput {
+                id: text.id.clone(),
+                title: None,
+                raw_text: Some("\n  Updated todo\nKeep these details".to_string()),
+            },
+        )
+        .expect("update text todo");
+
+        assert_eq!(updated_text.title, "Updated todo");
+        assert_eq!(
+            updated_text.raw_text.as_deref(),
+            Some("\n  Updated todo\nKeep these details")
+        );
+        assert_eq!(updated_text.created_at, text.created_at);
+        assert!(updated_text.updated_at > 1);
+        assert_eq!(updated_file.title, "Release archive\nKeep for deployment");
+        assert_eq!(updated_file.file_path, file.file_path);
+        assert_eq!(updated_file.file_name, file.file_name);
+        assert_eq!(updated_file.mime_type, file.mime_type);
+        assert_eq!(updated_file.created_at, file.created_at);
+    }
+
+    #[test]
+    fn smart_inbox_todo_updates_validate_kind_fields_and_values() {
+        let db = memory_db();
+        let text = create_smart_inbox_todo_in_db(
+            &db,
+            SmartInboxTodoInput {
+                kind: "text".to_string(),
+                title: None,
+                raw_text: Some("Text todo".to_string()),
+                file_path: None,
+                file_name: None,
+                mime_type: None,
+            },
+        )
+        .expect("create text todo");
+        let file = create_smart_inbox_todo_in_db(
+            &db,
+            SmartInboxTodoInput {
+                kind: "file".to_string(),
+                title: None,
+                raw_text: None,
+                file_path: Some("/tmp/file.txt".to_string()),
+                file_name: Some("file.txt".to_string()),
+                mime_type: Some("text/plain".to_string()),
+            },
+        )
+        .expect("create file todo");
+
+        let blank_text = update_smart_inbox_todo_in_db(
+            &db,
+            SmartInboxTodoUpdateInput {
+                id: text.id.clone(),
+                title: None,
+                raw_text: Some("   ".to_string()),
+            },
+        );
+        assert!(blank_text.unwrap_err().contains("cannot be blank"));
+
+        let wrong_text_field = update_smart_inbox_todo_in_db(
+            &db,
+            SmartInboxTodoUpdateInput {
+                id: text.id,
+                title: Some("Wrong field".to_string()),
+                raw_text: None,
+            },
+        );
+        assert!(wrong_text_field
+            .unwrap_err()
+            .contains("only update rawText"));
+
+        let blank_file_title = update_smart_inbox_todo_in_db(
+            &db,
+            SmartInboxTodoUpdateInput {
+                id: file.id.clone(),
+                title: Some(" ".to_string()),
+                raw_text: None,
+            },
+        );
+        assert!(blank_file_title.unwrap_err().contains("cannot be blank"));
+
+        let wrong_file_field = update_smart_inbox_todo_in_db(
+            &db,
+            SmartInboxTodoUpdateInput {
+                id: file.id,
+                title: None,
+                raw_text: Some("Wrong field".to_string()),
+            },
+        );
+        assert!(wrong_file_field.unwrap_err().contains("only update title"));
+
+        let missing = update_smart_inbox_todo_in_db(
+            &db,
+            SmartInboxTodoUpdateInput {
+                id: "missing".to_string(),
+                title: None,
+                raw_text: Some("Missing".to_string()),
+            },
+        );
+        assert!(missing.unwrap_err().contains("not found"));
     }
 
     #[test]
@@ -7115,6 +7991,120 @@ mod tests {
     }
 
     #[test]
+    fn connects_same_external_resource_to_multiple_projects() {
+        let db = memory_db();
+        let first_project =
+            create_project_in_db(&db, "Access".to_string(), None, None).expect("first project");
+        let second_project =
+            create_project_in_db(&db, "Portal".to_string(), None, None).expect("second project");
+
+        let first = connect_resource_in_db(
+            &db,
+            ResourceInput {
+                project_id: first_project.id.clone(),
+                provider: "github".to_string(),
+                kind: "github_repo".to_string(),
+                external_id: "github.com/owner/repo".to_string(),
+                url: "https://github.com/owner/repo".to_string(),
+                name: "owner/repo".to_string(),
+                icon_url: None,
+                connection_id: None,
+            },
+        )
+        .expect("connect first resource");
+        let second = connect_resource_in_db(
+            &db,
+            ResourceInput {
+                project_id: second_project.id.clone(),
+                provider: "github".to_string(),
+                kind: "github_repo".to_string(),
+                external_id: "github.com/owner/repo".to_string(),
+                url: "https://github.com/owner/repo".to_string(),
+                name: "owner/repo".to_string(),
+                icon_url: None,
+                connection_id: None,
+            },
+        )
+        .expect("connect second resource");
+
+        assert_ne!(first.id, second.id);
+        assert_eq!(first.project_id, first_project.id);
+        assert_eq!(second.project_id, second_project.id);
+    }
+
+    #[test]
+    fn smart_task_auto_connects_github_repo_resource() {
+        let db = memory_db();
+        let project = create_project_in_db(&db, "Access".to_string(), None, None).expect("project");
+
+        let result = create_smart_task_in_db(
+            &db,
+            "https://github.com/owner/repo/pull/42".to_string(),
+            parsed_github_pull_request("https://github.com/owner/repo/pull/42"),
+            Some(project.id.clone()),
+        )
+        .expect("create smart task");
+
+        let resource = result.resource.expect("resource");
+        assert_eq!(resource.project_id, project.id);
+        assert_eq!(resource.provider, "github");
+        assert_eq!(resource.kind, "github_repo");
+        assert_eq!(resource.external_id, "github.com/owner/repo");
+        assert_eq!(resource.url, "https://github.com/owner/repo");
+    }
+
+    #[test]
+    fn smart_task_auto_connects_gitlab_repo_resource() {
+        let db = memory_db();
+        let project = create_project_in_db(&db, "Access".to_string(), None, None).expect("project");
+
+        let result = create_smart_task_in_db(
+            &db,
+            "https://gitlab.example.org/group/app/-/merge_requests/17".to_string(),
+            parsed_gitlab(
+                "https://gitlab.example.org/group/app/-/merge_requests/17",
+                "gitlab.example.org",
+            ),
+            Some(project.id.clone()),
+        )
+        .expect("create smart task");
+
+        let resource = result.resource.expect("resource");
+        assert_eq!(resource.project_id, project.id);
+        assert_eq!(resource.provider, "gitlab");
+        assert_eq!(resource.kind, "gitlab_repo");
+        assert_eq!(resource.external_id, "gitlab.example.org/group/app");
+        assert_eq!(resource.url, "https://gitlab.example.org/group/app");
+    }
+
+    #[test]
+    fn trello_card_parent_metadata_connects_board_resource() {
+        let db = memory_db();
+        let project = create_project_in_db(&db, "Access".to_string(), None, None).expect("project");
+        let parsed = parsed_trello_card("https://trello.com/c/card123/review");
+        let metadata = ProviderMetadata {
+            parent_resource: Some(ProviderResourceMetadata {
+                provider: "trello".to_string(),
+                kind: "trello_board".to_string(),
+                external_id: "board123".to_string(),
+                url: "https://trello.com/b/board123/access".to_string(),
+                name: "Access".to_string(),
+                icon_url: None,
+            }),
+            ..ProviderMetadata::empty()
+        };
+
+        let resource = upsert_parent_resource_in_db(&db, &project.id, &parsed, Some(&metadata))
+            .expect("connect parent resource")
+            .expect("parent resource");
+
+        assert_eq!(resource.provider, "trello");
+        assert_eq!(resource.kind, "trello_board");
+        assert_eq!(resource.external_id, "board123");
+        assert_eq!(resource.project_id, project.id);
+    }
+
+    #[test]
     fn creates_task_and_links_resource() {
         let db = memory_db();
         let project = create_project_in_db(&db, "Access".to_string(), None, None).expect("project");
@@ -7328,6 +8318,7 @@ mod tests {
                 bytes: Some(2048),
                 created_at: Some("2026-07-09T10:00:00.000Z".to_string()),
             }],
+            parent_resource: None,
             notice: None,
         };
 
@@ -7398,6 +8389,7 @@ mod tests {
                 url: None,
                 fetched_at: Some(123),
                 files: Vec::new(),
+                parent_resource: None,
                 notice: None,
             },
         )

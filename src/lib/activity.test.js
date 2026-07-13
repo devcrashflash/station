@@ -5,6 +5,7 @@ import {
   activityActionLabel,
   activityEventKindLabel,
   addDays,
+  formatActivityLastSyncText,
   formatLocalDate,
   isTrelloAutomationActivity,
   isPastLocalDate,
@@ -32,6 +33,31 @@ test("detects past local dates from yyyy-mm-dd values", () => {
   assert.equal(isPastLocalDate("2026-07-09", "2026-07-10"), true);
   assert.equal(isPastLocalDate("2026-07-10", "2026-07-10"), false);
   assert.equal(isPastLocalDate("2026-07-11", "2026-07-10"), false);
+});
+
+test("formats last activity sync time with the day for non-today syncs", () => {
+  const now = new Date(2026, 6, 13, 12, 30);
+  const todaySync = new Date(2026, 6, 13, 9, 5);
+  const olderSync = new Date(2026, 6, 12, 9, 5);
+
+  assert.equal(
+    formatActivityLastSyncText(todaySync.getTime(), now),
+    `Last sync ${new Intl.DateTimeFormat(undefined, {
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(todaySync)}`,
+  );
+  assert.equal(
+    formatActivityLastSyncText(olderSync.getTime(), now),
+    `Last sync ${new Intl.DateTimeFormat(undefined, {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(olderSync)}`,
+  );
+  assert.equal(formatActivityLastSyncText(null, now), "Last sync: never");
 });
 
 test("only auto-syncs today when cached sync is stale", () => {

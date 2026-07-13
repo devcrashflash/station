@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { isProviderBackedTask, isTaskDone } from "./taskStatus.js";
+import { isProviderBackedTask, isTaskDone, taskStatusBadgeLabel } from "./taskStatus.js";
 
 test("detects provider-backed task statuses", () => {
   assert.equal(isProviderBackedTask({ sourceProvider: "trello", sourceKind: "trello_card" }), true);
@@ -17,4 +17,13 @@ test("only plain done tasks use local done state", () => {
   assert.equal(isTaskDone({ status: "done" }), true);
   assert.equal(isTaskDone({ status: "closed", sourceProvider: "github", sourceKind: "github_issue" }), false);
   assert.equal(isTaskDone({ status: "Done", sourceProvider: "trello", sourceKind: "trello_card" }), false);
+});
+
+test("shows new badge for open tasks without provider state", () => {
+  assert.equal(taskStatusBadgeLabel({ status: "open" }), "new");
+  assert.equal(taskStatusBadgeLabel({ status: "done" }), "done");
+  assert.equal(
+    taskStatusBadgeLabel({ status: "open", sourceProvider: "github", sourceKind: "github_issue" }),
+    "open",
+  );
 });

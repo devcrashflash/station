@@ -6,6 +6,7 @@ import { Kbd } from "@/components/ui/kbd";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppBreadcrumb } from "@/features/navigation/AppBreadcrumb";
 import { ProjectRail } from "@/features/projects/ProjectRail";
+import { shortcutModifier } from "@/lib/keyboardShortcut";
 
 const NOTICE_TIMEOUT_MS = 4000;
 
@@ -31,6 +32,7 @@ export function AppShell({
   children,
 }) {
   const [isNoticeHeld, setIsNoticeHeld] = useState(false);
+  const shortcutKey = shortcutModifier();
 
   useEffect(() => {
     if (!notice || isNoticeHeld) {
@@ -95,11 +97,11 @@ export function AppShell({
                 type="button"
                 variant="outline"
                 onClick={onShowSmartInbox}
-                title="Open smart inbox with Command K or Control K"
+                title={`Open smart inbox with ${shortcutKey} K`}
               >
                 <Sparkles />
                 Smart inbox
-                <Kbd>⌘/Ctrl K</Kbd>
+                <Kbd>{shortcutKey} K</Kbd>
               </Button>
             </div>
           </header>

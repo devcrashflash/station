@@ -12,6 +12,7 @@ import { ProjectDialog } from "@/features/projects/ProjectDialog";
 import { ProjectPickerDialog } from "@/features/projects/ProjectPickerDialog";
 import { SettingsDialog } from "@/features/settings/SettingsDialog";
 import { SmartInput } from "@/features/smart-input/SmartInput";
+import { TodoEditDialog } from "@/features/smart-input/TodoEditDialog";
 import { api, toParsedPayload } from "@/lib/api";
 import { formatLocalDate } from "@/lib/activity";
 import {
@@ -131,6 +132,7 @@ function App() {
   });
   const [recentDirectoryFiles, setRecentDirectoryFiles] = useState([]);
   const [smartInboxTodos, setSmartInboxTodos] = useState([]);
+  const [editingSmartInboxTodo, setEditingSmartInboxTodo] = useState(null);
   const [projectConnectionIds, setProjectConnectionIds] = useState([]);
   const [selectedTask, setSelectedTask] = useState(null);
   const [pendingInput, setPendingInput] = useState(null);
@@ -322,6 +324,13 @@ function App() {
     await api.deleteSmartInboxTodo({ id: todo.id });
     await refreshSmartInboxTodos();
     showNotice("Todo removed.");
+  }
+
+  async function updateSmartInboxTodo(payload) {
+    await api.updateSmartInboxTodo(payload);
+    await refreshSmartInboxTodos();
+    setEditingSmartInboxTodo(null);
+    showNotice("Todo updated.");
   }
 
   async function promoteSmartInboxTodo(todo) {
@@ -639,6 +648,7 @@ function App() {
       ) : (
         <InboxView
           tasks={tasks}
+          projects={projects}
           smartInboxTodos={smartInboxTodos}
           recentDirectoryFiles={recentDirectoryFiles}
           onSubmit={(input) => captureSmartInboxText(input).catch(reportError)}
@@ -647,6 +657,7 @@ function App() {
               ? undefined
               : (fileDrop) => captureSmartInboxFile(fileDrop).catch(reportError)
           }
+          onEditTodo={setEditingSmartInboxTodo}
           onOpenTodo={(todo) => promoteSmartInboxTodo(todo).catch(reportError)}
           onDeleteTodo={(todo) => deleteSmartInboxTodo(todo).catch(reportError)}
           onOpenRecentFile={
@@ -655,6 +666,8 @@ function App() {
               : openRecentDirectoryFile
           }
           onRefreshRecentFiles={() => refreshRecentDirectoryFiles().catch(reportError)}
+          onLoadReviewRequests={(provider) => api.listSmartInboxReviewRequests({ provider })}
+          onOpenReviewRequest={(input) => submitSmartInput(input).catch(reportError)}
           onOpenTask={openTask}
         />
       )}
@@ -663,6 +676,14 @@ function App() {
         <ProjectDialog
           onClose={() => setShowProjectForm(false)}
           onCreate={(name, color) => createProject(name, color).catch(reportError)}
+        />
+      )}
+
+      {editingSmartInboxTodo && (
+        <TodoEditDialog
+          todo={editingSmartInboxTodo}
+          onClose={() => setEditingSmartInboxTodo(null)}
+          onSave={updateSmartInboxTodo}
         />
       )}
 

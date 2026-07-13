@@ -12,7 +12,7 @@ import {
   ProjectEditDialog,
   ProjectSettingsPanel,
 } from "@/features/projects/ProjectSettingsPanel";
-import { ProjectResourcesDialog, ResourcesPanel } from "@/features/resources/ResourcesPanel";
+import { ResourcesPanel } from "@/features/resources/ResourcesPanel";
 import { TaskList } from "@/features/tasks/TaskList";
 
 export function ProjectWorkspaceView({
@@ -25,8 +25,6 @@ export function ProjectWorkspaceView({
   onRefresh,
   onUpdateProject,
   onUpdateProjectConnections,
-  onConnectResource,
-  onDisconnectResource,
   onChooseLocalResourceDirectory,
   onSaveLocalResource,
   onDeleteLocalResource,
@@ -54,8 +52,6 @@ export function ProjectWorkspaceView({
           />
           <ResourcesPanel
             resources={resources}
-            connections={connections}
-            onManageResources={() => setActiveOverlay("resources")}
           />
           <LocalResourcesPanel
             localResources={localResources}
@@ -87,18 +83,6 @@ export function ProjectWorkspaceView({
             await onUpdateProjectConnections(connectionIds);
             setActiveOverlay(null);
           }}
-        />
-      )}
-
-      {activeOverlay === "resources" && (
-        <ProjectResourcesDialog
-          project={project}
-          resources={resources}
-          connections={connections}
-          projectConnectionIds={projectConnectionIds}
-          onClose={() => setActiveOverlay(null)}
-          onConnectResource={onConnectResource}
-          onDisconnectResource={onDisconnectResource}
         />
       )}
 
