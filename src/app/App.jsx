@@ -666,7 +666,10 @@ function App() {
               : openRecentDirectoryFile
           }
           onRefreshRecentFiles={() => refreshRecentDirectoryFiles().catch(reportError)}
-          onLoadReviewRequests={(provider) => api.listSmartInboxReviewRequests({ provider })}
+          onLoadProviderItems={(provider) => api.listSmartInboxProviderItems({ provider })}
+          onSyncProviderItems={(provider) => api.syncSmartInboxProviderItems({ provider })}
+          onLoadProviderSources={(provider) => api.listSmartInboxProviderSources({ provider })}
+          onUpdateProviderSources={(provider, changes) => api.updateSmartInboxProviderSources({ provider, changes })}
           onOpenReviewRequest={(input) => submitSmartInput(input).catch(reportError)}
           onOpenTask={openTask}
         />

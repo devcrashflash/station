@@ -4,10 +4,11 @@ export function reviewRequestInput(item) {
 
 export function reviewRequestSubtitle(item) {
   const parts = [
-    item?.repoPath,
+    item?.contextPath || item?.repoPath,
+    item?.contextDetail,
     item?.number ? requestNumberLabel(item.provider, item.number) : null,
     item?.connectionName,
-    reviewRequestDateLabel(item),
+    providerItemDateLabel(item),
   ];
   return parts.filter(Boolean).join(" · ");
 }
@@ -16,7 +17,7 @@ function requestNumberLabel(provider, number) {
   return provider === "gitlab" ? `!${number}` : `#${number}`;
 }
 
-function reviewRequestDateLabel(item) {
+function providerItemDateLabel(item) {
   const timestamp = item?.sortAt || item?.reviewRequestedAt || item?.updatedAt || item?.createdAt;
   if (!timestamp) return "";
 

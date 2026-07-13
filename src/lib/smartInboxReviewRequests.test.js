@@ -40,3 +40,15 @@ test("review request subtitle shows the ordering timestamp when available", () =
     /^owner\/repo · #42 · GitHub · Review requested /,
   );
 });
+
+test("trello card subtitle shows board, list, and connection", () => {
+  assert.equal(
+    reviewRequestSubtitle({
+      provider: "trello",
+      connectionName: "Work Trello",
+      contextPath: "Studio",
+      contextDetail: "Doing",
+    }),
+    "Studio · Doing · Work Trello",
+  );
+});

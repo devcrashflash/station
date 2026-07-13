@@ -1,12 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ClipboardList, ExternalLink, Eye, Files, FileText, GitPullRequest, Inbox, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { ClipboardList, ExternalLink, Eye, Files, FileText, GitPullRequest, Inbox, Pencil, Plus, RefreshCw, Settings, SquareKanban, Trash2 } from "lucide-react";
 
 import { EmptyState } from "@/components/common/EmptyState";
+import { Modal } from "@/components/common/Modal";
 import { Panel } from "@/components/common/Panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { DialogFooter } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SmartInput } from "@/features/smart-input/SmartInput";
 import { dashboardTaskCreatedAt, dashboardTaskProjectName, latestDashboardTasks } from "@/lib/dashboardTasks";
@@ -26,7 +29,10 @@ export function InboxView({
   onDeleteTodo,
   onOpenRecentFile,
   onRefreshRecentFiles,
-  onLoadReviewRequests,
+  onLoadProviderItems,
+  onSyncProviderItems,
+  onLoadProviderSources,
+  onUpdateProviderSources,
   onOpenReviewRequest,
   onOpenTask,
 }) {
@@ -61,7 +67,10 @@ export function InboxView({
           onDeleteTodo={onDeleteTodo}
           onOpenFile={onOpenRecentFile}
           onRefresh={onRefreshRecentFiles}
-          onLoadReviewRequests={onLoadReviewRequests}
+          onLoadProviderItems={onLoadProviderItems}
+          onSyncProviderItems={onSyncProviderItems}
+          onLoadProviderSources={onLoadProviderSources}
+          onUpdateProviderSources={onUpdateProviderSources}
           onOpenReviewRequest={onOpenReviewRequest}
           onOpenTask={onOpenTask}
         />
@@ -99,33 +108,45 @@ function InboxCaptureTabs({
   onDeleteTodo,
   onOpenFile,
   onRefresh,
-  onLoadReviewRequests,
+  onLoadProviderItems,
+  onSyncProviderItems,
+  onLoadProviderSources,
+  onUpdateProviderSources,
   onOpenReviewRequest,
   onOpenTask,
 }) {
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [reviewRequests, setReviewRequests] = useState({
-    github: { items: [], warnings: [], loaded: false, loading: false },
-    gitlab: { items: [], warnings: [], loaded: false, loading: false },
+  const [settingsProvider, setSettingsProvider] = useState(null);
+  const [providerItems, setProviderItems] = useState({
+    github: { items: [], warnings: [], loaded: false, syncing: false },
+    gitlab: { items: [], warnings: [], loaded: false, syncing: false },
+    trello: { items: [], warnings: [], loaded: false, syncing: false },
   });
+  const startedProviders = useRef(new Set());
   const tabs = [
     { id: "todos", label: "Todo", count: todos.length, icon: Inbox },
     { id: "tasks", label: "Tasks", count: taskCount, icon: ClipboardList },
     { id: "latest-files", label: "Latest files", count: files.length, icon: Files },
-    { id: "github", label: "GitHub", count: reviewRequests.github.items.length, icon: GitPullRequest },
-    { id: "gitlab", label: "GitLab", count: reviewRequests.gitlab.items.length, icon: GitPullRequest },
+    { id: "github", label: "GitHub", count: providerItems.github.items.length, icon: GitPullRequest },
+    { id: "gitlab", label: "GitLab", count: providerItems.gitlab.items.length, icon: GitPullRequest },
+    { id: "trello", label: "Trello", count: providerItems.trello.items.length, icon: SquareKanban },
   ];
-  const isReviewTab = activeTab === "github" || activeTab === "gitlab";
+  const isProviderTab = ["github", "gitlab", "trello"].includes(activeTab);
 
   useEffect(() => {
-    if (!onLoadReviewRequests) return;
+    if (!onLoadProviderItems) return;
 
-    for (const provider of ["github", "gitlab"]) {
-      if (!reviewRequests[provider].loaded && !reviewRequests[provider].loading) {
-        refreshReviewRequests(provider);
-      }
+    for (const provider of ["github", "gitlab", "trello"]) {
+      if (startedProviders.current.has(provider)) continue;
+      startedProviders.current.add(provider);
+      loadThenSyncProvider(provider);
     }
-  }, [onLoadReviewRequests, reviewRequests]);
+  }, [onLoadProviderItems, onSyncProviderItems]);
+
+  useEffect(() => {
+    if (!startedProviders.current.has("trello")) return;
+    loadProviderItems("trello");
+  }, [tasks]);
 
   async function refreshFiles() {
     if (!onRefresh || isRefreshing) return;
@@ -138,43 +159,71 @@ function InboxCaptureTabs({
     }
   }
 
-  async function refreshReviewRequests(provider) {
-    if (!onLoadReviewRequests) return;
+  async function loadThenSyncProvider(provider) {
+    await loadProviderItems(provider);
+    await syncProviderItems(provider);
+  }
 
-    setReviewRequests((current) => ({
+  async function loadProviderItems(provider) {
+    if (!onLoadProviderItems) return;
+
+    try {
+      const result = await onLoadProviderItems(provider);
+      setProviderItems((current) => ({
+        ...current,
+        [provider]: {
+          ...current[provider],
+          items: result?.items || [],
+          warnings: result?.warnings || [],
+          loaded: true,
+        },
+      }));
+    } catch (error) {
+      setProviderError(provider, error);
+    }
+  }
+
+  async function syncProviderItems(provider) {
+    if (!onSyncProviderItems) return;
+
+    setProviderItems((current) => ({
       ...current,
       [provider]: {
         ...current[provider],
-        loading: true,
+        syncing: true,
       },
     }));
     try {
-      const result = await onLoadReviewRequests(provider);
-      setReviewRequests((current) => ({
+      const result = await onSyncProviderItems(provider);
+      setProviderItems((current) => ({
         ...current,
         [provider]: {
           items: result?.items || [],
           warnings: result?.warnings || [],
           loaded: true,
-          loading: false,
+          syncing: false,
         },
       }));
     } catch (error) {
-      setReviewRequests((current) => ({
+      setProviderError(provider, error);
+    }
+  }
+
+  function setProviderError(provider, error) {
+    setProviderItems((current) => ({
         ...current,
         [provider]: {
           ...current[provider],
           warnings: [{
             provider,
             connectionId: "",
-            connectionName: provider === "github" ? "GitHub" : "GitLab",
+            connectionName: providerName(provider),
             message: error?.message || String(error),
           }],
           loaded: true,
-          loading: false,
+          syncing: false,
         },
       }));
-    }
   }
 
   return (
@@ -221,22 +270,42 @@ function InboxCaptureTabs({
             <TooltipContent>Refresh latest files</TooltipContent>
           </Tooltip>
         )}
-        {isReviewTab && onLoadReviewRequests && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                variant="outline"
-                size="icon-sm"
-                aria-label={`Refresh ${activeTab} review requests`}
-                disabled={reviewRequests[activeTab]?.loading}
-                onClick={() => refreshReviewRequests(activeTab)}
-              >
-                <RefreshCw className={reviewRequests[activeTab]?.loading ? "animate-spin" : ""} />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Refresh review requests</TooltipContent>
-          </Tooltip>
+        {isProviderTab && (
+          <div className="flex items-center gap-2">
+            {onLoadProviderSources && onUpdateProviderSources && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon-sm"
+                    aria-label={`Configure ${activeTab} smart inbox sources`}
+                    onClick={() => setSettingsProvider(activeTab)}
+                  >
+                    <Settings />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Configure {providerName(activeTab)} sources</TooltipContent>
+              </Tooltip>
+            )}
+            {onSyncProviderItems && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="icon-sm"
+                    aria-label={`Refresh ${activeTab} smart inbox items`}
+                    disabled={providerItems[activeTab]?.syncing}
+                    onClick={() => syncProviderItems(activeTab)}
+                  >
+                    <RefreshCw className={providerItems[activeTab]?.syncing ? "animate-spin" : ""} />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Refresh {providerName(activeTab)} items</TooltipContent>
+              </Tooltip>
+            )}
+          </div>
         )}
       </div>
 
@@ -258,13 +327,118 @@ function InboxCaptureTabs({
         ) : (
           <ReviewRequestList
             provider={activeTab}
-            result={reviewRequests[activeTab]}
+            result={providerItems[activeTab]}
             onOpenReviewRequest={onOpenReviewRequest}
           />
         )}
       </div>
+
+      {settingsProvider && (
+        <SmartInboxSourceSettingsDialog
+          provider={settingsProvider}
+          onClose={() => setSettingsProvider(null)}
+          onLoad={onLoadProviderSources}
+          onSave={onUpdateProviderSources}
+          onSaved={() => syncProviderItems(settingsProvider)}
+        />
+      )}
     </div>
   );
+}
+
+function SmartInboxSourceSettingsDialog({ provider, onClose, onLoad, onSave, onSaved }) {
+  const [sources, setSources] = useState([]);
+  const [enabledByKey, setEnabledByKey] = useState({});
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    setIsLoading(true);
+    onLoad(provider)
+      .then((result) => {
+        if (!active) return;
+        setSources(result || []);
+        setEnabledByKey(Object.fromEntries((result || []).map((source) => [sourceKey(source), source.enabled])));
+      })
+      .catch((loadError) => active && setError(loadError?.message || String(loadError)))
+      .finally(() => active && setIsLoading(false));
+    return () => { active = false; };
+  }, [onLoad, provider]);
+
+  const groups = sources.reduce((result, source) => {
+    const existing = result.find((group) => group.connectionId === source.connectionId);
+    if (existing) existing.sources.push(source);
+    else result.push({ connectionId: source.connectionId, connectionName: source.connectionName, sources: [source] });
+    return result;
+  }, []);
+
+  async function save() {
+    const changes = sources
+      .filter((source) => enabledByKey[sourceKey(source)] !== source.enabled)
+      .map((source) => ({
+        connectionId: source.connectionId,
+        sourceId: source.sourceId,
+        enabled: enabledByKey[sourceKey(source)] === true,
+      }));
+    setIsSaving(true);
+    setError("");
+    try {
+      await onSave(provider, changes);
+      await onSaved();
+      onClose();
+    } catch (saveError) {
+      setError(saveError?.message || String(saveError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <Modal title={`${providerName(provider)} Smart Inbox sources`} onClose={() => !isSaving && onClose()}>
+      <p className="text-sm text-muted-foreground">
+        New {provider === "trello" ? "boards" : "repositories"} are enabled automatically when discovered.
+      </p>
+      <div className="mt-4 grid max-h-[55vh] gap-4 overflow-y-auto">
+        {isLoading ? (
+          <p className="text-sm text-muted-foreground">Loading sources…</p>
+        ) : groups.length === 0 ? (
+          <EmptyState text={`No ${provider === "trello" ? "boards" : "repositories"} discovered yet.`} />
+        ) : groups.map((group) => (
+          <section key={group.connectionId} className="grid gap-2">
+            <h3 className="text-sm font-medium">{group.connectionName}</h3>
+            <div className="grid gap-1 rounded-md border p-2">
+              {group.sources.map((source) => (
+                <label key={sourceKey(source)} className="flex items-center gap-3 rounded-sm px-2 py-2 hover:bg-muted/50">
+                  <Checkbox
+                    checked={enabledByKey[sourceKey(source)] === true}
+                    disabled={isSaving}
+                    onCheckedChange={(checked) => setEnabledByKey((current) => ({
+                      ...current,
+                      [sourceKey(source)]: checked === true,
+                    }))}
+                  />
+                  <span className="min-w-0 truncate text-sm">{source.sourceName}</span>
+                </label>
+              ))}
+            </div>
+          </section>
+        ))}
+      </div>
+      {error && <p className="mt-3 text-sm text-destructive">{error}</p>}
+      <DialogFooter className="mt-5">
+        <Button type="button" variant="outline" disabled={isSaving} onClick={onClose}>Cancel</Button>
+        <Button type="button" disabled={isLoading || isSaving} onClick={save}>
+          {isSaving ? "Saving…" : "Save"}
+        </Button>
+      </DialogFooter>
+    </Modal>
+  );
+}
+
+function sourceKey(source) {
+  return `${source.connectionId}:${source.sourceId}`;
 }
 
 export function DashboardTaskList({ tasks = [], projects = [], onOpenTask }) {
@@ -304,11 +478,7 @@ function tabLabel(tabs, activeTab) {
 }
 
 function ReviewRequestList({ provider, result, onOpenReviewRequest }) {
-  if (result?.loading && !result.loaded) {
-    return <EmptyState text="Loading review requests..." />;
-  }
-
-  const providerName = provider === "github" ? "GitHub" : "GitLab";
+  const displayName = providerName(provider);
   const items = result?.items || [];
   const warnings = result?.warnings || [];
 
@@ -323,7 +493,7 @@ function ReviewRequestList({ provider, result, onOpenReviewRequest }) {
         </div>
       ))}
       {items.length === 0 ? (
-        <EmptyState text={`No ${providerName} review requests.`} />
+        <EmptyState text={provider === "trello" ? "No unlinked assigned Trello cards." : `No ${displayName} review requests.`} />
       ) : (
         <div className="flex flex-col gap-2">
           {items.map((item) => {
@@ -331,14 +501,14 @@ function ReviewRequestList({ provider, result, onOpenReviewRequest }) {
             const canOpen = Boolean(item.url);
             return (
               <div
-                key={`${item.provider}:${item.url}`}
+                key={`${item.provider}:${item.externalId || item.url}`}
                 className={cn(
                   "grid min-w-0 max-w-full grid-cols-[auto_minmax(0,1fr)] items-center gap-3 rounded-md border bg-card p-3 transition-colors sm:grid-cols-[auto_minmax(0,1fr)_auto_auto]",
                   canOpen && "cursor-pointer hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
                 )}
                 role={canOpen ? "link" : undefined}
                 tabIndex={canOpen ? 0 : undefined}
-                title={canOpen ? "Open review request" : undefined}
+                title={canOpen ? `Open ${provider === "trello" ? "Trello card" : "review request"}` : undefined}
                 onClick={() => openReviewRequestLink(item.url)}
                 onKeyDown={(event) => {
                   if (!canOpen || (event.key !== "Enter" && event.key !== " ")) return;
@@ -347,7 +517,11 @@ function ReviewRequestList({ provider, result, onOpenReviewRequest }) {
                 }}
               >
                 <span className="flex size-10 shrink-0 items-center justify-center rounded-md border bg-muted/40">
-                  <GitPullRequest className="size-4 text-muted-foreground" />
+                  {provider === "trello" ? (
+                    <SquareKanban className="size-4 text-muted-foreground" />
+                  ) : (
+                    <GitPullRequest className="size-4 text-muted-foreground" />
+                  )}
                 </span>
                 <span
                   className="min-w-0 overflow-hidden text-left"
@@ -393,6 +567,10 @@ function ReviewRequestList({ provider, result, onOpenReviewRequest }) {
       )}
     </div>
   );
+}
+
+function providerName(provider) {
+  return { github: "GitHub", gitlab: "GitLab", trello: "Trello" }[provider] || provider;
 }
 
 async function openReviewRequestLink(url) {

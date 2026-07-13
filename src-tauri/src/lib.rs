@@ -2,7 +2,7 @@ use rusqlite::{params, Connection as SqliteConnection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -384,10 +384,14 @@ struct SmartInboxReviewRequest {
     provider: String,
     connection_id: String,
     connection_name: String,
+    source_id: String,
+    source_name: String,
+    external_id: String,
     title: String,
     url: String,
-    repo_path: String,
-    number: String,
+    context_path: Option<String>,
+    context_detail: Option<String>,
+    number: Option<String>,
     author: Option<String>,
     review_requested_at: Option<i64>,
     updated_at: Option<i64>,
@@ -408,9 +412,33 @@ struct SmartInboxReviewRequestWarning {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct SmartInboxProviderSyncRun {
+    provider: String,
+    connection_id: String,
+    connection_name: String,
+    status: String,
+    synced_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SmartInboxReviewRequestResult {
     items: Vec<SmartInboxReviewRequest>,
     warnings: Vec<SmartInboxReviewRequestWarning>,
+    sync_runs: Vec<SmartInboxProviderSyncRun>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SmartInboxProviderSource {
+    provider: String,
+    connection_id: String,
+    connection_name: String,
+    source_id: String,
+    source_name: String,
+    enabled: bool,
+    discovered_at: i64,
+    updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -607,6 +635,14 @@ struct SmartInboxTodoUpdateInput {
     raw_text: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SmartInboxProviderSourceChange {
+    connection_id: String,
+    source_id: String,
+    enabled: bool,
+}
+
 #[derive(Debug, Clone)]
 struct ProviderMetadata {
     connection_id: Option<String>,
@@ -672,7 +708,10 @@ pub fn run() {
             load_review_diff,
             load_review_diff_file,
             create_task_from_input,
-            list_smart_inbox_review_requests,
+            list_smart_inbox_provider_items,
+            sync_smart_inbox_provider_items,
+            list_smart_inbox_provider_sources,
+            update_smart_inbox_provider_sources,
             list_smart_inbox_todos,
             create_smart_inbox_todo,
             update_smart_inbox_todo,
@@ -865,6 +904,48 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
             updated_at INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS smart_inbox_provider_items (
+            connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+            provider TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            source_name TEXT NOT NULL,
+            external_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            url TEXT NOT NULL,
+            context_path TEXT,
+            context_detail TEXT,
+            number TEXT,
+            author TEXT,
+            review_requested_at INTEGER,
+            updated_at INTEGER,
+            created_at INTEGER,
+            sort_at INTEGER,
+            sort_source TEXT NOT NULL,
+            state TEXT NOT NULL,
+            fetched_at INTEGER NOT NULL,
+            PRIMARY KEY(connection_id, provider, external_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS smart_inbox_provider_sync_runs (
+            connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+            provider TEXT NOT NULL,
+            status TEXT NOT NULL,
+            warning TEXT,
+            synced_at INTEGER NOT NULL,
+            PRIMARY KEY(connection_id, provider)
+        );
+
+        CREATE TABLE IF NOT EXISTS smart_inbox_provider_sources (
+            connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+            provider TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            source_name TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            discovered_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(connection_id, provider, source_id)
+        );
+
         CREATE TABLE IF NOT EXISTS task_links (
             task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
             provider TEXT NOT NULL,
@@ -913,9 +994,34 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
     )?;
     add_column_if_missing(db, "projects", "color", "TEXT NOT NULL DEFAULT '#2563eb'")?;
     add_column_if_missing(db, "connections", "api_key", "TEXT")?;
+    add_column_if_missing(db, "smart_inbox_provider_items", "source_id", "TEXT")?;
+    add_column_if_missing(db, "smart_inbox_provider_items", "source_name", "TEXT")?;
+    db.execute(
+        "UPDATE smart_inbox_provider_items
+         SET source_id = context_path, source_name = context_path
+         WHERE provider IN ('github', 'gitlab')
+           AND (source_id IS NULL OR trim(source_id) = '')
+           AND context_path IS NOT NULL",
+        [],
+    )?;
+    db.execute(
+        "INSERT OR IGNORE INTO smart_inbox_provider_sources
+         (connection_id, provider, source_id, source_name, enabled, discovered_at, updated_at)
+         SELECT connection_id, provider, source_id, COALESCE(source_name, source_id), 1,
+                MIN(fetched_at), MAX(fetched_at)
+         FROM smart_inbox_provider_items
+         WHERE source_id IS NOT NULL AND trim(source_id) != ''
+         GROUP BY connection_id, provider, source_id",
+        [],
+    )?;
     migrate_resources_to_project_scoped_identity(db)?;
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_activities_occurred_at ON activities(occurred_at DESC)",
+        [],
+    )?;
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_smart_inbox_provider_items_sort
+         ON smart_inbox_provider_items(provider, sort_at DESC)",
         [],
     )?;
     add_column_if_missing(
@@ -4378,8 +4484,111 @@ fn fetch_connection_review_requests(
     match connection.provider.as_str() {
         "github" => fetch_github_review_requests(connection),
         "gitlab" => fetch_gitlab_review_requests(connection),
+        "trello" => fetch_trello_assigned_cards(connection),
         _ => Err(format!("Unsupported provider: {}", connection.provider)),
     }
+}
+
+fn fetch_trello_assigned_cards(
+    connection: &ConnectionRecord,
+) -> Result<Vec<SmartInboxReviewRequest>, String> {
+    let api_key = connection
+        .api_key
+        .as_deref()
+        .ok_or_else(|| "Trello API key is required.".to_string())?;
+    let url = format!(
+        "https://api.trello.com/1/members/me/cards?filter=open&fields=id,name,shortLink,shortUrl,url,closed,dateLastActivity,idBoard,idList&board=true&board_fields=name&list=true&list_fields=name&key={}&token={}",
+        percent_encode(api_key),
+        percent_encode(&connection.token)
+    );
+    let json = fetch_json(&url, Vec::new())?;
+    let boards_url = format!(
+        "https://api.trello.com/1/members/me/boards?filter=all&fields=id,name&key={}&token={}",
+        percent_encode(api_key),
+        percent_encode(&connection.token)
+    );
+    let boards_json = fetch_json(&boards_url, Vec::new())?;
+    let board_names = boards_json
+        .as_array()
+        .map(|boards| {
+            boards
+                .iter()
+                .filter_map(|board| Some((json_string(board, "id")?, json_string(board, "name")?)))
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    Ok(json
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    trello_assigned_card_from_json_with_board_names(connection, item, &board_names)
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+#[cfg(test)]
+fn trello_assigned_card_from_json(
+    connection: &ConnectionRecord,
+    item: &Value,
+) -> Option<SmartInboxReviewRequest> {
+    trello_assigned_card_from_json_with_board_names(connection, item, &HashMap::new())
+}
+
+fn trello_assigned_card_from_json_with_board_names(
+    connection: &ConnectionRecord,
+    item: &Value,
+    board_names: &HashMap<String, String>,
+) -> Option<SmartInboxReviewRequest> {
+    if item.get("closed").and_then(Value::as_bool).unwrap_or(false) {
+        return None;
+    }
+
+    // Smart-input task links use the `/c/{shortLink}` URL identity, so the cache
+    // must use that same value for immediate local exclusion after task creation.
+    let external_id = json_string(item, "shortLink").or_else(|| json_string(item, "id"))?;
+    let title = json_string(item, "name")?;
+    let url = json_string(item, "shortUrl")
+        .or_else(|| json_string(item, "url"))
+        .or_else(|| {
+            json_string(item, "shortLink").map(|value| format!("https://trello.com/c/{value}"))
+        })?;
+    let updated_at =
+        json_string(item, "dateLastActivity").and_then(|value| parse_rfc3339_millis(&value));
+    let source_id = json_string(item, "idBoard")?;
+    let source_name = json_path_string(item, &["board", "name"])
+        .or_else(|| board_names.get(&source_id).cloned())
+        .unwrap_or_else(|| source_id.clone());
+
+    Some(SmartInboxReviewRequest {
+        provider: "trello".to_string(),
+        connection_id: connection.id.clone(),
+        connection_name: connection.name.clone(),
+        source_id,
+        source_name: source_name.clone(),
+        external_id,
+        title,
+        url,
+        context_path: Some(source_name),
+        context_detail: json_path_string(item, &["list", "name"]),
+        number: None,
+        author: None,
+        review_requested_at: None,
+        updated_at,
+        created_at: None,
+        sort_at: updated_at,
+        sort_source: if updated_at.is_some() {
+            "updated"
+        } else {
+            "unknown"
+        }
+        .to_string(),
+        state: "open".to_string(),
+    })
 }
 
 fn fetch_github_review_requests(
@@ -4462,10 +4671,14 @@ fn github_review_request_from_json(
         provider: "github".to_string(),
         connection_id: connection.id.clone(),
         connection_name: connection.name.clone(),
+        source_id: repo_path.clone(),
+        source_name: repo_path.clone(),
+        external_id: format!("{repo_path}#{number}"),
         title: json_string(item, "title").unwrap_or_else(|| format!("{repo_path} PR #{number}")),
         url,
-        repo_path,
-        number,
+        context_path: Some(repo_path),
+        context_detail: None,
+        number: Some(number),
         author: json_path_string(item, &["user", "login"]),
         review_requested_at,
         updated_at,
@@ -4502,10 +4715,14 @@ fn gitlab_review_request_from_json(
         provider: "gitlab".to_string(),
         connection_id: connection.id.clone(),
         connection_name: connection.name.clone(),
+        source_id: repo_path.clone(),
+        source_name: repo_path.clone(),
+        external_id: format!("{repo_path}!{number}"),
         title: json_string(item, "title").unwrap_or_else(|| format!("{repo_path} MR !{number}")),
         url,
-        repo_path,
-        number,
+        context_path: Some(repo_path),
+        context_detail: None,
+        number: Some(number),
         author: json_path_string(item, &["author", "username"])
             .or_else(|| json_path_string(item, &["author", "name"])),
         review_requested_at,
@@ -5654,54 +5871,366 @@ fn create_task_from_input(
     create_smart_task_in_db(&db, input, parsed, project_id)
 }
 
+fn normalize_smart_inbox_provider(provider: &str) -> Result<String, String> {
+    let provider = provider.trim().to_ascii_lowercase();
+    if ["github", "gitlab", "trello"].contains(&provider.as_str()) {
+        Ok(provider)
+    } else {
+        Err("Unsupported smart inbox provider.".to_string())
+    }
+}
+
+fn list_smart_inbox_provider_items_in_db(
+    db: &SqliteConnection,
+    provider: &str,
+) -> Result<SmartInboxReviewRequestResult, String> {
+    let mut statement = db
+        .prepare(
+            "SELECT i.provider, i.connection_id, c.name, i.source_id, i.source_name,
+                    i.external_id, i.title, i.url,
+                    i.context_path, i.context_detail, i.number, i.author,
+                    i.review_requested_at, i.updated_at, i.created_at, i.sort_at,
+                    i.sort_source, i.state
+             FROM smart_inbox_provider_items i
+             JOIN connections c ON c.id = i.connection_id
+             WHERE i.provider = ?1
+               AND i.source_id IS NOT NULL
+               AND i.source_name IS NOT NULL
+               AND (i.provider != 'trello' OR NOT EXISTS (
+                   SELECT 1 FROM task_links link
+                   WHERE link.provider = 'trello'
+                     AND link.kind = 'trello_card'
+                     AND link.external_id = i.external_id
+               ))
+             ORDER BY COALESCE(i.sort_at, 0) DESC, i.title ASC",
+        )
+        .map_err(db_error)?;
+    let mut items = statement
+        .query_map(params![provider], |row| {
+            Ok(SmartInboxReviewRequest {
+                provider: row.get(0)?,
+                connection_id: row.get(1)?,
+                connection_name: row.get(2)?,
+                source_id: row.get(3)?,
+                source_name: row.get(4)?,
+                external_id: row.get(5)?,
+                title: row.get(6)?,
+                url: row.get(7)?,
+                context_path: row.get(8)?,
+                context_detail: row.get(9)?,
+                number: row.get(10)?,
+                author: row.get(11)?,
+                review_requested_at: row.get(12)?,
+                updated_at: row.get(13)?,
+                created_at: row.get(14)?,
+                sort_at: row.get(15)?,
+                sort_source: row.get(16)?,
+                state: row.get(17)?,
+            })
+        })
+        .map_err(db_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_error)?;
+
+    let mut seen = HashSet::new();
+    items.retain(|item| seen.insert(format!("{}:{}", item.provider, item.url)));
+
+    let mut warning_statement = db
+        .prepare(
+            "SELECT r.provider, r.connection_id, c.name, r.warning
+             FROM smart_inbox_provider_sync_runs r
+             JOIN connections c ON c.id = r.connection_id
+             WHERE r.provider = ?1 AND r.status = 'error' AND r.warning IS NOT NULL
+             ORDER BY c.name ASC",
+        )
+        .map_err(db_error)?;
+    let warnings = warning_statement
+        .query_map(params![provider], |row| {
+            Ok(SmartInboxReviewRequestWarning {
+                provider: row.get(0)?,
+                connection_id: row.get(1)?,
+                connection_name: row.get(2)?,
+                message: row.get(3)?,
+            })
+        })
+        .map_err(db_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_error)?;
+
+    let mut sync_statement = db
+        .prepare(
+            "SELECT r.provider, r.connection_id, c.name, r.status, r.synced_at
+             FROM smart_inbox_provider_sync_runs r
+             JOIN connections c ON c.id = r.connection_id
+             WHERE r.provider = ?1
+             ORDER BY c.name ASC",
+        )
+        .map_err(db_error)?;
+    let sync_runs = sync_statement
+        .query_map(params![provider], |row| {
+            Ok(SmartInboxProviderSyncRun {
+                provider: row.get(0)?,
+                connection_id: row.get(1)?,
+                connection_name: row.get(2)?,
+                status: row.get(3)?,
+                synced_at: row.get(4)?,
+            })
+        })
+        .map_err(db_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_error)?;
+
+    Ok(SmartInboxReviewRequestResult {
+        items,
+        warnings,
+        sync_runs,
+    })
+}
+
+fn replace_smart_inbox_provider_items(
+    db: &SqliteConnection,
+    connection: &ConnectionRecord,
+    items: &[SmartInboxReviewRequest],
+) -> Result<(), String> {
+    let transaction = db.unchecked_transaction().map_err(db_error)?;
+    let fetched_at = now_millis();
+    for item in items {
+        transaction
+            .execute(
+                "INSERT INTO smart_inbox_provider_sources
+                 (connection_id, provider, source_id, source_name, enabled, discovered_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5)
+                 ON CONFLICT(connection_id, provider, source_id) DO UPDATE SET
+                   source_name = excluded.source_name, updated_at = excluded.updated_at",
+                params![
+                    connection.id,
+                    connection.provider,
+                    item.source_id,
+                    item.source_name,
+                    fetched_at,
+                ],
+            )
+            .map_err(db_error)?;
+    }
+    transaction
+        .execute(
+            "DELETE FROM smart_inbox_provider_items WHERE connection_id = ?1 AND provider = ?2",
+            params![connection.id, connection.provider],
+        )
+        .map_err(db_error)?;
+    for item in items {
+        let enabled = transaction
+            .query_row(
+                "SELECT enabled FROM smart_inbox_provider_sources
+                 WHERE connection_id = ?1 AND provider = ?2 AND source_id = ?3",
+                params![connection.id, connection.provider, item.source_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(db_error)?;
+        if !enabled {
+            continue;
+        }
+        transaction
+            .execute(
+                "INSERT INTO smart_inbox_provider_items
+                 (connection_id, provider, source_id, source_name, external_id, title, url, context_path, context_detail,
+                  number, author, review_requested_at, updated_at, created_at, sort_at,
+                  sort_source, state, fetched_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                params![
+                    connection.id,
+                    connection.provider,
+                    item.source_id,
+                    item.source_name,
+                    item.external_id,
+                    item.title,
+                    item.url,
+                    item.context_path,
+                    item.context_detail,
+                    item.number,
+                    item.author,
+                    item.review_requested_at,
+                    item.updated_at,
+                    item.created_at,
+                    item.sort_at,
+                    item.sort_source,
+                    item.state,
+                    fetched_at,
+                ],
+            )
+            .map_err(db_error)?;
+    }
+    transaction
+        .execute(
+            "INSERT INTO smart_inbox_provider_sync_runs
+             (connection_id, provider, status, warning, synced_at)
+             VALUES (?1, ?2, 'success', NULL, ?3)
+             ON CONFLICT(connection_id, provider) DO UPDATE SET
+               status = 'success', warning = NULL, synced_at = excluded.synced_at",
+            params![connection.id, connection.provider, fetched_at],
+        )
+        .map_err(db_error)?;
+    transaction.commit().map_err(db_error)
+}
+
+fn list_smart_inbox_provider_sources_in_db(
+    db: &SqliteConnection,
+    provider: &str,
+) -> Result<Vec<SmartInboxProviderSource>, String> {
+    let mut statement = db
+        .prepare(
+            "SELECT s.provider, s.connection_id, c.name, s.source_id, s.source_name,
+                    s.enabled, s.discovered_at, s.updated_at
+             FROM smart_inbox_provider_sources s
+             JOIN connections c ON c.id = s.connection_id
+             WHERE s.provider = ?1
+             ORDER BY c.name COLLATE NOCASE, s.source_name COLLATE NOCASE",
+        )
+        .map_err(db_error)?;
+    let sources = statement
+        .query_map(params![provider], |row| {
+            Ok(SmartInboxProviderSource {
+                provider: row.get(0)?,
+                connection_id: row.get(1)?,
+                connection_name: row.get(2)?,
+                source_id: row.get(3)?,
+                source_name: row.get(4)?,
+                enabled: row.get(5)?,
+                discovered_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })
+        .map_err(db_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_error)?;
+    Ok(sources)
+}
+
 #[tauri::command]
-async fn list_smart_inbox_review_requests(
+fn list_smart_inbox_provider_sources(
+    state: tauri::State<'_, AppState>,
+    provider: String,
+) -> Result<Vec<SmartInboxProviderSource>, String> {
+    let provider = normalize_smart_inbox_provider(&provider)?;
+    let db = state.db.lock().map_err(db_error)?;
+    list_smart_inbox_provider_sources_in_db(&db, &provider)
+}
+
+#[tauri::command]
+fn update_smart_inbox_provider_sources(
+    state: tauri::State<'_, AppState>,
+    provider: String,
+    changes: Vec<SmartInboxProviderSourceChange>,
+) -> Result<Vec<SmartInboxProviderSource>, String> {
+    let provider = normalize_smart_inbox_provider(&provider)?;
+    let db = state.db.lock().map_err(db_error)?;
+    update_smart_inbox_provider_sources_in_db(&db, &provider, changes)
+}
+
+fn update_smart_inbox_provider_sources_in_db(
+    db: &SqliteConnection,
+    provider: &str,
+    changes: Vec<SmartInboxProviderSourceChange>,
+) -> Result<Vec<SmartInboxProviderSource>, String> {
+    let transaction = db.unchecked_transaction().map_err(db_error)?;
+    let updated_at = now_millis();
+    for change in changes {
+        let changed = transaction
+            .execute(
+                "UPDATE smart_inbox_provider_sources SET enabled = ?1, updated_at = ?2
+                 WHERE connection_id = ?3 AND provider = ?4 AND source_id = ?5",
+                params![
+                    change.enabled,
+                    updated_at,
+                    change.connection_id,
+                    provider,
+                    change.source_id
+                ],
+            )
+            .map_err(db_error)?;
+        if changed == 0 {
+            return Err("Smart inbox source not found.".to_string());
+        }
+        if !change.enabled {
+            transaction
+                .execute(
+                    "DELETE FROM smart_inbox_provider_items
+                     WHERE connection_id = ?1 AND provider = ?2 AND source_id = ?3",
+                    params![change.connection_id, provider, change.source_id],
+                )
+                .map_err(db_error)?;
+        }
+    }
+    transaction.commit().map_err(db_error)?;
+    list_smart_inbox_provider_sources_in_db(db, provider)
+}
+
+fn save_smart_inbox_provider_warning(
+    db: &SqliteConnection,
+    connection: &ConnectionRecord,
+    message: &str,
+) -> Result<(), String> {
+    db.execute(
+        "INSERT INTO smart_inbox_provider_sync_runs
+         (connection_id, provider, status, warning, synced_at)
+         VALUES (?1, ?2, 'error', ?3, ?4)
+         ON CONFLICT(connection_id, provider) DO UPDATE SET
+           status = 'error', warning = excluded.warning, synced_at = excluded.synced_at",
+        params![connection.id, connection.provider, message, now_millis()],
+    )
+    .map_err(db_error)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn list_smart_inbox_provider_items(
+    state: tauri::State<'_, AppState>,
+    provider: String,
+) -> Result<SmartInboxReviewRequestResult, String> {
+    let provider = normalize_smart_inbox_provider(&provider)?;
+    let db = state.db.lock().map_err(db_error)?;
+    list_smart_inbox_provider_items_in_db(&db, &provider)
+}
+
+#[tauri::command]
+async fn sync_smart_inbox_provider_items(
     app_handle: tauri::AppHandle,
     provider: String,
 ) -> Result<SmartInboxReviewRequestResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let provider = provider.trim().to_ascii_lowercase();
-        if provider != "github" && provider != "gitlab" {
-            return Err("Unsupported review request provider.".to_string());
-        }
-
+        let provider = normalize_smart_inbox_provider(&provider)?;
         let connections = {
             let state = app_handle.state::<AppState>();
             let db = state.db.lock().map_err(db_error)?;
-            list_connections_in_db(&db).map_err(db_error)?
+            list_connections_in_db(&db)
+                .map_err(db_error)?
+                .into_iter()
+                .filter(|connection| connection.provider == provider)
+                .collect::<Vec<_>>()
         };
-        let mut items = Vec::new();
-        let mut warnings = Vec::new();
 
-        for connection in connections
-            .into_iter()
-            .filter(|connection| connection.provider == provider)
-        {
+        for connection in connections {
             match fetch_connection_review_requests(&connection) {
-                Ok(mut fetched) => items.append(&mut fetched),
-                Err(error) => warnings.push(SmartInboxReviewRequestWarning {
-                    provider: connection.provider.clone(),
-                    connection_id: connection.id.clone(),
-                    connection_name: connection.name.clone(),
-                    message: connection_test_error_message(&connection.provider, &error),
-                }),
+                Ok(items) => {
+                    let state = app_handle.state::<AppState>();
+                    let db = state.db.lock().map_err(db_error)?;
+                    replace_smart_inbox_provider_items(&db, &connection, &items)?;
+                }
+                Err(error) => {
+                    let message = connection_test_error_message(&connection.provider, &error);
+                    let state = app_handle.state::<AppState>();
+                    let db = state.db.lock().map_err(db_error)?;
+                    save_smart_inbox_provider_warning(&db, &connection, &message)?;
+                }
             }
         }
 
-        let mut seen = HashSet::new();
-        items.retain(|item| seen.insert(format!("{}:{}", item.provider, item.url)));
-        items.sort_by(|left, right| {
-            right
-                .sort_at
-                .unwrap_or_default()
-                .cmp(&left.sort_at.unwrap_or_default())
-                .then_with(|| left.title.cmp(&right.title))
-        });
-
-        Ok(SmartInboxReviewRequestResult { items, warnings })
+        let state = app_handle.state::<AppState>();
+        let db = state.db.lock().map_err(db_error)?;
+        list_smart_inbox_provider_items_in_db(&db, &provider)
     })
     .await
-    .map_err(|error| format!("Could not sync review requests: {error}"))?
+    .map_err(|error| format!("Could not sync smart inbox provider: {error}"))?
 }
 
 #[tauri::command]
@@ -6479,8 +7008,10 @@ mod tests {
         let request = github_review_request_from_json(&connection, &open).expect("open request");
 
         assert_eq!(request.provider, "github");
-        assert_eq!(request.repo_path, "owner/repo");
-        assert_eq!(request.number, "42");
+        assert_eq!(request.source_id, "owner/repo");
+        assert_eq!(request.source_name, "owner/repo");
+        assert_eq!(request.context_path.as_deref(), Some("owner/repo"));
+        assert_eq!(request.number.as_deref(), Some("42"));
         assert_eq!(request.author.as_deref(), Some("octocat"));
         assert_eq!(request.sort_source, "review_requested");
         assert_eq!(request.sort_at, request.review_requested_at);
@@ -6522,14 +7053,260 @@ mod tests {
             gitlab_review_request_from_json(&connection, &opened).expect("opened request");
 
         assert_eq!(request.provider, "gitlab");
-        assert_eq!(request.repo_path, "group/app");
-        assert_eq!(request.number, "17");
+        assert_eq!(request.source_id, "group/app");
+        assert_eq!(request.source_name, "group/app");
+        assert_eq!(request.context_path.as_deref(), Some("group/app"));
+        assert_eq!(request.number.as_deref(), Some("17"));
         assert_eq!(request.author.as_deref(), Some("alice"));
         assert_eq!(request.sort_source, "updated");
         assert_eq!(request.sort_at, request.updated_at);
         assert!(request.updated_at.is_some());
         assert!(gitlab_review_request_from_json(&connection, &closed).is_none());
         assert!(gitlab_review_request_from_json(&connection, &merged).is_none());
+    }
+
+    #[test]
+    fn trello_assigned_card_normalization_keeps_open_cards_with_context() {
+        let connection = connection_record("trello", Some("key"), "token");
+        let open = serde_json::json!({
+            "id": "card123",
+            "shortLink": "abc123",
+            "name": "Ship local-first inbox",
+            "shortUrl": "https://trello.com/c/abc123",
+            "closed": false,
+            "dateLastActivity": "2026-07-12T08:30:00Z",
+            "idBoard": "board-studio",
+            "board": { "name": "Studio" },
+            "list": { "name": "Doing" }
+        });
+        let closed = serde_json::json!({
+            "id": "card124",
+            "name": "Already done",
+            "shortUrl": "https://trello.com/c/abc124",
+            "closed": true
+        });
+
+        let item = trello_assigned_card_from_json(&connection, &open).expect("open card");
+        assert_eq!(item.source_id, "board-studio");
+        assert_eq!(item.source_name, "Studio");
+        assert_eq!(item.external_id, "abc123");
+        assert_eq!(item.context_path.as_deref(), Some("Studio"));
+        assert_eq!(item.context_detail.as_deref(), Some("Doing"));
+        assert_eq!(item.sort_source, "updated");
+        let without_embedded_board = serde_json::json!({
+            "id": "card125", "name": "Board lookup", "shortUrl": "https://trello.com/c/lookup",
+            "closed": false, "idBoard": "board-lookup"
+        });
+        let looked_up = trello_assigned_card_from_json_with_board_names(
+            &connection,
+            &without_embedded_board,
+            &HashMap::from([("board-lookup".to_string(), "Resolved board".to_string())]),
+        )
+        .expect("card with looked-up board");
+        assert_eq!(looked_up.source_name, "Resolved board");
+        assert_eq!(looked_up.context_path.as_deref(), Some("Resolved board"));
+        assert!(trello_assigned_card_from_json(&connection, &closed).is_none());
+        assert!(trello_assigned_card_from_json(&connection, &serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn smart_inbox_cache_reconciles_and_preserves_rows_after_warning() {
+        let db = memory_db();
+        let connection = save_connection_in_db(
+            &db,
+            ConnectionInput {
+                id: None,
+                provider: "trello".to_string(),
+                name: "Work Trello".to_string(),
+                base_url: "https://api.trello.com".to_string(),
+                api_key: Some("key".to_string()),
+                token: "token".to_string(),
+            },
+        )
+        .expect("save connection");
+        let first = trello_assigned_card_from_json(
+            &connection,
+            &serde_json::json!({
+                "id": "card1", "name": "First", "shortUrl": "https://trello.com/c/first",
+                "closed": false, "dateLastActivity": "2026-07-12T08:30:00Z",
+                "idBoard": "board-work", "board": { "name": "Work" }
+            }),
+        )
+        .expect("first card");
+        replace_smart_inbox_provider_items(&db, &connection, &[first]).expect("cache first");
+        save_smart_inbox_provider_warning(&db, &connection, "offline").expect("save warning");
+
+        let stale = list_smart_inbox_provider_items_in_db(&db, "trello").expect("list stale");
+        assert_eq!(stale.items.len(), 1);
+        assert_eq!(stale.warnings.len(), 1);
+        assert_eq!(stale.sync_runs[0].status, "error");
+
+        let second = trello_assigned_card_from_json(
+            &connection,
+            &serde_json::json!({
+                "id": "card2", "name": "Second", "shortUrl": "https://trello.com/c/second",
+                "closed": false, "dateLastActivity": "2026-07-13T08:30:00Z",
+                "idBoard": "board-work", "board": { "name": "Work" }
+            }),
+        )
+        .expect("second card");
+        replace_smart_inbox_provider_items(&db, &connection, &[second]).expect("reconcile");
+
+        let refreshed =
+            list_smart_inbox_provider_items_in_db(&db, "trello").expect("list refreshed");
+        assert_eq!(refreshed.items.len(), 1);
+        assert_eq!(refreshed.items[0].external_id, "card2");
+        assert!(refreshed.warnings.is_empty());
+        assert_eq!(refreshed.sync_runs[0].status, "success");
+    }
+
+    #[test]
+    fn smart_inbox_sources_default_enabled_and_disabled_sources_stay_out_of_cache() {
+        let db = memory_db();
+        let connection = save_connection_in_db(
+            &db,
+            ConnectionInput {
+                id: None,
+                provider: "trello".to_string(),
+                name: "Work Trello".to_string(),
+                base_url: "https://api.trello.com".to_string(),
+                api_key: Some("key".to_string()),
+                token: "token".to_string(),
+            },
+        )
+        .expect("save connection");
+        let card = trello_assigned_card_from_json(
+            &connection,
+            &serde_json::json!({
+                "id": "card1", "shortLink": "card-one", "name": "Card one",
+                "shortUrl": "https://trello.com/c/card-one", "closed": false,
+                "idBoard": "board-work", "board": { "name": "Work" }
+            }),
+        )
+        .expect("card");
+
+        replace_smart_inbox_provider_items(&db, &connection, std::slice::from_ref(&card))
+            .expect("initial sync");
+        let sources = list_smart_inbox_provider_sources_in_db(&db, "trello").expect("sources");
+        assert_eq!(sources.len(), 1);
+        assert!(sources[0].enabled);
+        assert_eq!(sources[0].source_id, "board-work");
+
+        update_smart_inbox_provider_sources_in_db(
+            &db,
+            "trello",
+            vec![SmartInboxProviderSourceChange {
+                connection_id: connection.id.clone(),
+                source_id: "board-work".to_string(),
+                enabled: false,
+            }],
+        )
+        .expect("disable source");
+        assert!(list_smart_inbox_provider_items_in_db(&db, "trello")
+            .expect("items after disable")
+            .items
+            .is_empty());
+        assert!(
+            !list_smart_inbox_provider_sources_in_db(&db, "trello")
+                .expect("source remains")
+                .first()
+                .expect("source")
+                .enabled
+        );
+
+        replace_smart_inbox_provider_items(&db, &connection, std::slice::from_ref(&card))
+            .expect("sync while disabled");
+        assert!(list_smart_inbox_provider_items_in_db(&db, "trello")
+            .expect("disabled cache")
+            .items
+            .is_empty());
+
+        update_smart_inbox_provider_sources_in_db(
+            &db,
+            "trello",
+            vec![SmartInboxProviderSourceChange {
+                connection_id: connection.id.clone(),
+                source_id: "board-work".to_string(),
+                enabled: true,
+            }],
+        )
+        .expect("enable source");
+        replace_smart_inbox_provider_items(&db, &connection, &[card]).expect("sync enabled");
+        assert_eq!(
+            list_smart_inbox_provider_items_in_db(&db, "trello")
+                .expect("enabled cache")
+                .items
+                .len(),
+            1
+        );
+
+        db.execute(
+            "DELETE FROM connections WHERE id = ?1",
+            params![connection.id],
+        )
+        .expect("delete connection");
+        assert!(list_smart_inbox_provider_sources_in_db(&db, "trello")
+            .expect("sources after connection deletion")
+            .is_empty());
+    }
+
+    #[test]
+    fn linked_trello_cards_are_excluded_across_projects() {
+        let db = memory_db();
+        let connection = save_connection_in_db(
+            &db,
+            ConnectionInput {
+                id: None,
+                provider: "trello".to_string(),
+                name: "Trello".to_string(),
+                base_url: "https://api.trello.com".to_string(),
+                api_key: Some("key".to_string()),
+                token: "token".to_string(),
+            },
+        )
+        .expect("save connection");
+        let card = trello_assigned_card_from_json(
+            &connection,
+            &serde_json::json!({
+                "id": "card1", "shortLink": "linked", "name": "Linked", "shortUrl": "https://trello.com/c/linked",
+                "closed": false, "idBoard": "board-linked", "board": { "name": "Linked board" }
+            }),
+        )
+        .expect("card");
+        replace_smart_inbox_provider_items(&db, &connection, &[card]).expect("cache card");
+        db.execute(
+            "INSERT INTO projects (id, name, icon, color, created_at, updated_at)
+             VALUES ('project1', 'Project', 'FolderKanban', '#2563eb', 1, 1)",
+            [],
+        )
+        .expect("insert project");
+        db.execute(
+            "INSERT INTO tasks (id, project_id, title, body, status, source_url, created_at, updated_at)
+             VALUES ('task1', 'project1', 'Task', '', 'todo', NULL, 1, 1)",
+            [],
+        )
+        .expect("insert task");
+        db.execute(
+            "INSERT INTO task_links
+             (task_id, provider, kind, external_id, url, connection_id, files_json)
+             VALUES ('task1', 'trello', 'trello_card', 'linked', 'https://trello.com/c/linked', ?1, '[]')",
+            params![connection.id],
+        )
+        .expect("link task");
+
+        assert!(list_smart_inbox_provider_items_in_db(&db, "trello")
+            .expect("list linked")
+            .items
+            .is_empty());
+        db.execute("DELETE FROM task_links WHERE task_id = 'task1'", [])
+            .expect("unlink task");
+        assert_eq!(
+            list_smart_inbox_provider_items_in_db(&db, "trello")
+                .expect("list unlinked")
+                .items
+                .len(),
+            1
+        );
     }
 
     #[test]

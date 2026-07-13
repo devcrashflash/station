@@ -16,6 +16,8 @@ const defaultState = {
   localResources: [],
   tasks: [],
   smartInboxTodos: [],
+  smartInboxProviderItems: [],
+  smartInboxProviderSources: [],
   taskLinks: [],
   taskRelations: [],
   pullRequests: [],
@@ -69,8 +71,14 @@ export const api = {
   },
   createTaskFromInput: (payload) =>
     call("create_task_from_input", payload, () => local.createTaskFromInput(payload)),
-  listSmartInboxReviewRequests: (payload) =>
-    call("list_smart_inbox_review_requests", payload, () => local.listSmartInboxReviewRequests(payload)),
+  listSmartInboxProviderItems: (payload) =>
+    call("list_smart_inbox_provider_items", payload, () => local.listSmartInboxProviderItems(payload)),
+  syncSmartInboxProviderItems: (payload) =>
+    call("sync_smart_inbox_provider_items", payload, () => local.listSmartInboxProviderItems(payload)),
+  listSmartInboxProviderSources: (payload) =>
+    call("list_smart_inbox_provider_sources", payload, () => local.listSmartInboxProviderSources(payload)),
+  updateSmartInboxProviderSources: (payload) =>
+    call("update_smart_inbox_provider_sources", payload, () => local.updateSmartInboxProviderSources(payload)),
   listSmartInboxTodos: () => call("list_smart_inbox_todos", {}, local.listSmartInboxTodos),
   createSmartInboxTodo: (payload) =>
     call("create_smart_inbox_todo", { input: payload }, () => local.createSmartInboxTodo(payload)),
@@ -146,6 +154,8 @@ function freshDefaultState() {
     localResources: [],
     tasks: [],
     smartInboxTodos: [],
+    smartInboxProviderItems: [],
+    smartInboxProviderSources: [],
     taskLinks: [],
     taskRelations: [],
     pullRequests: [],
@@ -481,6 +491,34 @@ function activitySyncRunMatches(run, date) {
   return run.date === date;
 }
 
+function discoverLocalSmartInboxSources(state, provider) {
+  state.smartInboxProviderSources = state.smartInboxProviderSources || [];
+  const timestamp = now();
+  for (const item of state.smartInboxProviderItems || []) {
+    if (item.provider !== provider || !item.connectionId || !item.sourceId) continue;
+    const existing = state.smartInboxProviderSources.find((source) => (
+      source.provider === provider &&
+      source.connectionId === item.connectionId &&
+      source.sourceId === item.sourceId
+    ));
+    if (existing) {
+      existing.sourceName = item.sourceName || existing.sourceName;
+      existing.connectionName = item.connectionName || existing.connectionName;
+      continue;
+    }
+    state.smartInboxProviderSources.push({
+      provider,
+      connectionId: item.connectionId,
+      connectionName: item.connectionName || state.connections.find(({ id }) => id === item.connectionId)?.name || provider,
+      sourceId: item.sourceId,
+      sourceName: item.sourceName || item.sourceId,
+      enabled: true,
+      discoveredAt: timestamp,
+      updatedAt: timestamp,
+    });
+  }
+}
+
 function localActivityResult(state, { date, startAt, endAt }) {
   return {
     activities: sortActivities((state.activities || []).filter((activity) => activityMatchesBounds(activity, startAt, endAt))),
@@ -690,8 +728,61 @@ const local = {
     return [];
   },
 
-  listSmartInboxReviewRequests() {
-    return { items: [], warnings: [] };
+  listSmartInboxProviderItems({ provider }) {
+    const state = readState();
+    discoverLocalSmartInboxSources(state, provider);
+    const disabledSources = new Set((state.smartInboxProviderSources || [])
+      .filter((source) => source.provider === provider && source.enabled === false)
+      .map((source) => `${source.connectionId}:${source.sourceId}`));
+    const linkedTrelloCardIds = new Set(
+      (state.taskLinks || [])
+        .filter((link) => link.provider === "trello" && link.kind === "trello_card")
+        .map((link) => link.externalId),
+    );
+    return {
+      items: (state.smartInboxProviderItems || []).filter((item) => (
+        item.provider === provider &&
+        !disabledSources.has(`${item.connectionId}:${item.sourceId}`) &&
+        (provider !== "trello" || !linkedTrelloCardIds.has(item.externalId))
+      )),
+      warnings: [],
+      syncRuns: [],
+    };
+  },
+
+  listSmartInboxProviderSources({ provider }) {
+    const state = readState();
+    discoverLocalSmartInboxSources(state, provider);
+    writeState(state);
+    return (state.smartInboxProviderSources || [])
+      .filter((source) => source.provider === provider)
+      .sort((left, right) => (
+        left.connectionName.localeCompare(right.connectionName) || left.sourceName.localeCompare(right.sourceName)
+      ));
+  },
+
+  updateSmartInboxProviderSources({ provider, changes = [] }) {
+    const state = readState();
+    discoverLocalSmartInboxSources(state, provider);
+    for (const change of changes) {
+      const source = state.smartInboxProviderSources.find((item) => (
+        item.provider === provider &&
+        item.connectionId === change.connectionId &&
+        item.sourceId === change.sourceId
+      ));
+      if (!source) throw new Error("Smart inbox source not found.");
+      source.enabled = change.enabled === true;
+      source.updatedAt = now();
+      if (!source.enabled) {
+        state.smartInboxProviderItems = (state.smartInboxProviderItems || []).filter((item) => !(
+          item.provider === provider &&
+          item.connectionId === change.connectionId &&
+          item.sourceId === change.sourceId
+        ));
+      }
+    }
+    writeState(state);
+    return local.listSmartInboxProviderSources({ provider });
   },
 
   listSmartInboxTodos() {
@@ -1137,6 +1228,10 @@ const local = {
     state.resources = state.resources.map((resource) =>
       resource.connectionId === connectionId ? { ...resource, connectionId: null } : resource,
     );
+    state.smartInboxProviderItems = (state.smartInboxProviderItems || [])
+      .filter((item) => item.connectionId !== connectionId);
+    state.smartInboxProviderSources = (state.smartInboxProviderSources || [])
+      .filter((source) => source.connectionId !== connectionId);
     writeState(state);
   },
 

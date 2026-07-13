@@ -154,12 +154,81 @@ test("local fallback review request feed is transient", async () => {
     },
   };
 
-  const result = await api.listSmartInboxReviewRequests({ provider: "github" });
+  const result = await api.listSmartInboxProviderItems({ provider: "github" });
   const state = JSON.parse(stored);
 
-  assert.deepEqual(result, { items: [], warnings: [] });
+  assert.deepEqual(result, { items: [], warnings: [], syncRuns: [] });
   assert.equal(state.smartInboxTodos.length, 1);
   assert.equal(state.pullRequests.length, 1);
+});
+
+test("local fallback discovers, disables, and retains smart inbox source settings", async () => {
+  let stored = JSON.stringify({
+    connections: [{ id: "connection_1", provider: "github", name: "GitHub" }],
+    smartInboxProviderItems: [{
+      provider: "github",
+      connectionId: "connection_1",
+      connectionName: "GitHub",
+      sourceId: "acme/app",
+      sourceName: "acme/app",
+      externalId: "acme/app#42",
+      title: "Review me",
+      url: "https://github.com/acme/app/pull/42",
+    }],
+  });
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => { stored = value; },
+  };
+
+  const discovered = await api.listSmartInboxProviderSources({ provider: "github" });
+  assert.equal(discovered.length, 1);
+  assert.equal(discovered[0].enabled, true);
+
+  await api.updateSmartInboxProviderSources({
+    provider: "github",
+    changes: [{ connectionId: "connection_1", sourceId: "acme/app", enabled: false }],
+  });
+
+  const state = JSON.parse(stored);
+  assert.deepEqual(state.smartInboxProviderItems, []);
+  assert.equal(state.smartInboxProviderSources[0].enabled, false);
+  assert.equal((await api.listSmartInboxProviderSources({ provider: "github" })).length, 1);
+  assert.deepEqual((await api.listSmartInboxProviderItems({ provider: "github" })).items, []);
+});
+
+test("local fallback keeps matching source names independent across connections", async () => {
+  let stored = JSON.stringify({
+    connections: [
+      { id: "connection_1", provider: "gitlab", name: "GitLab One" },
+      { id: "connection_2", provider: "gitlab", name: "GitLab Two" },
+    ],
+    smartInboxProviderItems: ["connection_1", "connection_2"].map((connectionId, index) => ({
+      provider: "gitlab",
+      connectionId,
+      connectionName: `GitLab ${index + 1}`,
+      sourceId: "acme/app",
+      sourceName: "acme/app",
+      externalId: `acme/app!${index + 1}`,
+      title: `Review ${index + 1}`,
+      url: `https://gitlab-${index + 1}.example/acme/app/-/merge_requests/${index + 1}`,
+    })),
+  });
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => { stored = value; },
+  };
+
+  assert.equal((await api.listSmartInboxProviderSources({ provider: "gitlab" })).length, 2);
+  await api.updateSmartInboxProviderSources({
+    provider: "gitlab",
+    changes: [{ connectionId: "connection_1", sourceId: "acme/app", enabled: false }],
+  });
+
+  const sources = await api.listSmartInboxProviderSources({ provider: "gitlab" });
+  assert.equal(sources.find(({ connectionId }) => connectionId === "connection_1").enabled, false);
+  assert.equal(sources.find(({ connectionId }) => connectionId === "connection_2").enabled, true);
+  assert.equal((await api.listSmartInboxProviderItems({ provider: "gitlab" })).items.length, 1);
 });
 
 test("local fallback normalizes legacy project colors", async () => {
