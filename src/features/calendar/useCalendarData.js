@@ -48,6 +48,8 @@ export function useCalendarData({ date, enabled = true, hasAccounts = true, onEr
   useEffect(() => {
     if (!enabled) return undefined;
     let cancelled = false;
+    setEvents([]);
+    setSyncRuns([]);
     api.listCalendarEvents({ date })
       .then((result) => {
         if (cancelled) return;

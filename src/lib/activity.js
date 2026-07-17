@@ -75,6 +75,60 @@ export function sortActivities(activities) {
   });
 }
 
+export function activityOpenUrl(activity) {
+  if (!activity) return null;
+  if (activity.provider !== "github" && activity.provider !== "gitlab") {
+    return activity.targetUrl || null;
+  }
+
+  const subject = parseActivityJson(activity.subjectJson)
+    || activitySubjectFromRawJson(activity);
+  return subject?.web_url || subject?.html_url || activity.targetUrl || null;
+}
+
+export function timelineItemsToCsv(items = []) {
+  const rows = items.map(({ type, value }) => {
+    if (type === "calendar") {
+      return [
+        formatCsvTimestamp(value.startAt),
+        "Calendar",
+        value.calendarName || value.accountName || "Calendar",
+        "Scheduled",
+        value.allDay ? "All-day event" : "Event",
+        value.organizer || "",
+        value.title || value.uid || "",
+        value.joinUrl || value.eventUrl || "",
+      ];
+    }
+
+    return [
+      formatCsvTimestamp(value.occurredAt),
+      activityProviderLabel(value.provider),
+      value.connectionName || value.connectionId || "",
+      activityActionLabel(value),
+      activityEventKindLabel(value),
+      value.actor || "",
+      value.title || value.externalId || "",
+      value.targetUrl || "",
+    ];
+  });
+
+  return [
+    ["Timestamp", "Provider", "Connection", "Action", "Type", "Actor", "Title", "Link"],
+    ...rows,
+  ].map((row) => row.map(escapeCsvValue).join(",")).join("\r\n");
+}
+
+function formatCsvTimestamp(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
+function escapeCsvValue(value) {
+  return `"${String(value ?? "").replaceAll('"', '""')}"`;
+}
+
 export function isTrelloAutomationActivity(activity) {
   if (activity?.provider !== "trello" || !activity?.rawJson) return false;
 
@@ -82,6 +136,44 @@ export function isTrelloAutomationActivity(activity) {
     return hasAppCreatorMetadata(JSON.parse(activity.rawJson));
   } catch {
     return false;
+  }
+}
+
+export function isTrelloPositionOnlyActivity(activity) {
+  if (activity?.provider !== "trello" || activity?.eventType !== "updateCard" || !activity?.rawJson) {
+    return false;
+  }
+
+  try {
+    const old = JSON.parse(activity.rawJson)?.data?.old;
+    return old?.pos != null && old?.idList == null;
+  } catch {
+    return false;
+  }
+}
+
+export function isTrelloListMoveActivity(activity) {
+  if (activity?.provider !== "trello") return false;
+  return activityActionLabel(activity).toLowerCase().startsWith("moved");
+}
+
+function activitySubjectFromRawJson(activity) {
+  const raw = parseActivityJson(activity.rawJson);
+  if (activity.provider === "github") {
+    return raw?.payload?.pull_request || raw?.payload?.issue || null;
+  }
+  if (activity.provider === "gitlab") {
+    return raw?.web_url ? raw : null;
+  }
+  return null;
+}
+
+function parseActivityJson(value) {
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
   }
 }
 
@@ -126,6 +218,7 @@ export function activityActionLabel(activity) {
   const label = activity?.actionLabel || activity?.eventType || "Activity";
   const normalized = label.toLowerCase();
   const eventType = String(activity?.eventType || "").toLowerCase();
+  if (eventType.includes("comment")) return "Commented";
   if (normalized.includes("attach") || eventType.includes("attachment")) return "Changed";
   if (normalized.startsWith("moved:")) return label;
   if (normalized.includes("move")) return "Moved";
@@ -144,7 +237,7 @@ export function activityActionLabel(activity) {
 export function activityEventKindLabel(activity) {
   const type = activity?.eventType || "";
   const normalized = type.toLowerCase();
-  if (normalized.includes("pullrequest") || normalized.includes("merge_request") || normalized.includes("merge request")) {
+  if (normalized.includes("pullrequest") || normalized.includes("mergerequest") || normalized.includes("merge_request") || normalized.includes("merge request")) {
     return "Pull Request";
   }
   if (normalized.includes("issue")) return "Issue";

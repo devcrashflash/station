@@ -219,6 +219,7 @@ struct ActivityRecord {
     occurred_at: i64,
     fetched_at: i64,
     raw_json: String,
+    subject_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -252,6 +253,31 @@ struct ActivityInput {
     target_url: Option<String>,
     occurred_at: i64,
     raw_json: String,
+    subject_json: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolveTrelloTicketsInput {
+    urls: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolvedTrelloTicket {
+    external_id: String,
+    title: String,
+    url: String,
+    board_external_id: Option<String>,
+    board_name: Option<String>,
+    connection_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolveTrelloTicketsResult {
+    tickets: Vec<ResolvedTrelloTicket>,
+    warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -945,6 +971,7 @@ pub fn run() {
             sync_calendar_events,
             list_activities,
             sync_activities,
+            resolve_trello_tickets,
             list_pull_requests,
             save_pull_request,
             update_pull_request_review_state
@@ -1054,7 +1081,8 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
             target_url TEXT,
             occurred_at INTEGER NOT NULL,
             fetched_at INTEGER NOT NULL,
-            raw_json TEXT NOT NULL
+            raw_json TEXT NOT NULL,
+            subject_json TEXT
         );
 
         CREATE TABLE IF NOT EXISTS activity_sync_runs (
@@ -1310,6 +1338,7 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
     add_column_if_missing(db, "pull_requests", "external_state", "TEXT")?;
     add_column_if_missing(db, "pull_requests", "target_branch", "TEXT")?;
     add_column_if_missing(db, "pull_requests", "fetched_at", "INTEGER")?;
+    add_column_if_missing(db, "activities", "subject_json", "TEXT")?;
     add_column_if_missing(db, "review_comment_drafts", "start_old_line", "INTEGER")?;
     add_column_if_missing(db, "review_comment_drafts", "start_new_line", "INTEGER")?;
     add_column_if_missing(
@@ -1547,6 +1576,7 @@ fn row_to_activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActivityRecord> 
         occurred_at: row.get(10)?,
         fetched_at: row.get(11)?,
         raw_json: row.get(12)?,
+        subject_json: row.get(13)?,
     })
 }
 
@@ -4253,7 +4283,8 @@ fn list_activities_in_db(
     let mut activity_statement = db
         .prepare(
             "SELECT a.id, a.provider, a.connection_id, c.name, a.external_id, a.event_type,
-                    a.action_label, a.actor, a.title, a.target_url, a.occurred_at, a.fetched_at, a.raw_json
+                    a.action_label, a.actor, a.title, a.target_url, a.occurred_at, a.fetched_at, a.raw_json,
+                    a.subject_json
              FROM activities a
              LEFT JOIN connections c ON c.id = a.connection_id
              WHERE a.occurred_at >= ?1 AND a.occurred_at < ?2
@@ -4300,9 +4331,9 @@ fn upsert_activity_in_db(
     db.execute(
         "INSERT INTO activities (
             id, provider, connection_id, external_id, event_type, action_label, actor,
-            title, target_url, occurred_at, fetched_at, raw_json
+            title, target_url, occurred_at, fetched_at, raw_json, subject_json
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT(id) DO UPDATE SET
             event_type = excluded.event_type,
             action_label = excluded.action_label,
@@ -4311,7 +4342,8 @@ fn upsert_activity_in_db(
             target_url = excluded.target_url,
             occurred_at = excluded.occurred_at,
             fetched_at = excluded.fetched_at,
-            raw_json = excluded.raw_json",
+            raw_json = excluded.raw_json,
+            subject_json = excluded.subject_json",
         params![
             id,
             &activity.provider,
@@ -4325,6 +4357,7 @@ fn upsert_activity_in_db(
             activity.occurred_at,
             fetched_at,
             &activity.raw_json,
+            &activity.subject_json,
         ],
     )?;
     Ok(())
@@ -4348,6 +4381,36 @@ fn save_activity_sync_run_in_db(
         params![connection_id, date, status, warning, synced_at],
     )?;
     Ok(())
+}
+
+fn replace_gitlab_activity_sync_in_db(
+    db: &mut SqliteConnection,
+    connection_id: &str,
+    date: &str,
+    start_at: i64,
+    end_at: i64,
+    activities: &[ActivityInput],
+    fetched_at: i64,
+) -> rusqlite::Result<()> {
+    let transaction = db.transaction()?;
+    transaction.execute(
+        "DELETE FROM activities
+         WHERE provider = 'gitlab' AND connection_id = ?1
+           AND occurred_at >= ?2 AND occurred_at < ?3",
+        params![connection_id, start_at, end_at],
+    )?;
+    for activity in activities {
+        upsert_activity_in_db(&transaction, activity, fetched_at)?;
+    }
+    save_activity_sync_run_in_db(
+        &transaction,
+        connection_id,
+        date,
+        "success",
+        None,
+        fetched_at,
+    )?;
+    transaction.commit()
 }
 
 fn smart_inbox_todo_title(input: &SmartInboxTodoInput) -> String {
@@ -6835,6 +6898,10 @@ fn github_activity_from_json(
         target_url,
         occurred_at,
         raw_json: event.to_string(),
+        subject_json: event
+            .get("payload")
+            .and_then(|payload| payload.get("pull_request").or_else(|| payload.get("issue")))
+            .map(Value::to_string),
     })
 }
 
@@ -6845,31 +6912,364 @@ fn fetch_gitlab_activities(
     end_at: i64,
 ) -> Result<Vec<ActivityInput>, String> {
     let base_url = normalize_base_url(&connection.base_url);
-    let before = add_days_to_date(date, 1).unwrap_or_else(|| date.to_string());
-    let url = format!(
-        "{base_url}/api/v4/events?scope=all&after={}&before={}&sort=desc&per_page=100",
-        percent_encode(date),
-        percent_encode(&before)
-    );
-    let events = fetch_json(&url, vec![("PRIVATE-TOKEN", connection.token.clone())])?;
+    let headers = vec![("PRIVATE-TOKEN", connection.token.clone())];
+    let user = fetch_json(&format!("{base_url}/api/v4/user"), headers.clone())?;
+    let user_id =
+        json_i64(&user, "id").ok_or_else(|| "GitLab account id was not returned.".to_string())?;
+    // GitLab's date-only event filters are evaluated independently of the
+    // desktop's local timezone. Query a wider window and keep the exact local
+    // day filtering in gitlab_activity_from_json.
+    let after = add_days_to_date(date, -1).unwrap_or_else(|| date.to_string());
+    let before = add_days_to_date(date, 2).unwrap_or_else(|| date.to_string());
+    let events = fetch_paginated_json(
+        &format!(
+            "{base_url}/api/v4/users/{user_id}/events?after={}&before={}&sort=desc",
+            percent_encode(&after),
+            percent_encode(&before)
+        ),
+        headers.clone(),
+    )?;
+    let mut activities = Vec::new();
+    for event in &events {
+        let Some(mut activity) =
+            gitlab_activity_from_json(connection, event, user_id, start_at, end_at)
+        else {
+            continue;
+        };
+        if let Some((project_id, merge_request_iid)) = gitlab_event_merge_request_locator(event) {
+            let merge_request_url = format!(
+                "{base_url}/api/v4/projects/{}/merge_requests/{}",
+                percent_encode(&project_id),
+                percent_encode(&merge_request_iid)
+            );
+            if let Ok(merge_request) = fetch_json(&merge_request_url, headers.clone()) {
+                hydrate_gitlab_merge_request_event_activity(
+                    &mut activity,
+                    event,
+                    &project_id,
+                    &merge_request_iid,
+                    &merge_request,
+                );
+            }
+        }
+        activities.push(activity);
+    }
 
-    Ok(events
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|event| gitlab_activity_from_json(connection, event, start_at, end_at))
-                .collect()
+    // GitLab's Events API omits merge-request-associated events and does not
+    // support DiscussionNote events. Inspect every MR updated during the day
+    // so authored notes, inline notes, and replies are represented reliably.
+    let start = gitlab_datetime_parameter(start_at)?;
+    let end = gitlab_datetime_parameter(end_at)?;
+    let updated_merge_requests_url = format!(
+        "{base_url}/api/v4/merge_requests?scope=all&state=all&updated_after={}&updated_before={}&order_by=updated_at&sort=desc",
+        percent_encode(&start),
+        percent_encode(&end)
+    );
+    let updated_merge_requests =
+        fetch_paginated_json(&updated_merge_requests_url, headers.clone())?;
+    attach_gitlab_branch_activities_to_merge_requests(&mut activities, &updated_merge_requests);
+    for merge_request in &updated_merge_requests {
+        activities.extend(gitlab_merge_request_activities_from_json(
+            connection,
+            merge_request,
+            user_id,
+            start_at,
+            end_at,
+        ));
+        let project_id = json_id_string(merge_request, "project_id")
+            .ok_or_else(|| "GitLab merge request project id was not returned.".to_string())?;
+        let merge_request_iid = json_id_string(merge_request, "iid")
+            .ok_or_else(|| "GitLab merge request iid was not returned.".to_string())?;
+        let discussions = fetch_paginated_json(
+            &format!(
+                "{base_url}/api/v4/projects/{}/merge_requests/{}/discussions",
+                percent_encode(&project_id),
+                percent_encode(&merge_request_iid)
+            ),
+            headers.clone(),
+        )?;
+        activities.extend(gitlab_merge_request_note_activities_from_json(
+            connection,
+            merge_request,
+            &discussions,
+            user_id,
+            start_at,
+            end_at,
+        ));
+    }
+
+    Ok(deduplicate_activities_prefer_latest(activities))
+}
+
+fn attach_gitlab_branch_activities_to_merge_requests(
+    activities: &mut [ActivityInput],
+    merge_requests: &[Value],
+) {
+    for activity in activities {
+        if activity.action_label != "Pushed" && activity.action_label != "Deleted" {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<Value>(&activity.raw_json) else {
+            continue;
+        };
+        let Some(branch) = json_path_string(&event, &["push_data", "ref"]) else {
+            continue;
+        };
+        let Some(project_id) = json_value_string(event.get("project_id")) else {
+            continue;
+        };
+        let Some(merge_request) = merge_requests.iter().find(|merge_request| {
+            json_string(merge_request, "source_branch").as_deref() == Some(branch.as_str())
+                && [
+                    json_value_string(merge_request.get("source_project_id")),
+                    json_value_string(merge_request.get("project_id")),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|candidate| candidate == project_id)
+        }) else {
+            continue;
+        };
+
+        activity.title = json_string(merge_request, "title").unwrap_or(activity.title.clone());
+        activity.target_url = json_string(merge_request, "web_url").or(activity.target_url.clone());
+        activity.subject_json = Some(merge_request.to_string());
+    }
+}
+
+fn gitlab_datetime_parameter(timestamp: i64) -> Result<String, String> {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(timestamp)
+        .map(|value| value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+        .ok_or_else(|| "Activity date is outside GitLab's supported range.".to_string())
+}
+
+fn gitlab_merge_request_activities_from_json(
+    connection: &ConnectionRecord,
+    merge_request: &Value,
+    user_id: i64,
+    start_at: i64,
+    end_at: i64,
+) -> Vec<ActivityInput> {
+    let Some(id) = json_id_string(merge_request, "id") else {
+        return Vec::new();
+    };
+    let title =
+        json_string(merge_request, "title").unwrap_or_else(|| format!("Merge request {id}"));
+    let target_url = json_string(merge_request, "web_url");
+    let raw_json = merge_request.to_string();
+    let mut activities = Vec::new();
+
+    let candidates = [
+        (
+            "created",
+            "Created",
+            "created_at",
+            json_i64(merge_request.get("author").unwrap_or(&Value::Null), "id") == Some(user_id),
+            json_path_string(merge_request, &["author", "username"])
+                .or_else(|| json_path_string(merge_request, &["author", "name"])),
+        ),
+        (
+            "merged",
+            "Merged",
+            "merged_at",
+            json_i64(
+                merge_request.get("merge_user").unwrap_or(&Value::Null),
+                "id",
+            ) == Some(user_id),
+            json_path_string(merge_request, &["merge_user", "username"])
+                .or_else(|| json_path_string(merge_request, &["merge_user", "name"])),
+        ),
+        (
+            "closed",
+            "Closed",
+            "closed_at",
+            json_i64(merge_request.get("closed_by").unwrap_or(&Value::Null), "id") == Some(user_id),
+            json_path_string(merge_request, &["closed_by", "username"])
+                .or_else(|| json_path_string(merge_request, &["closed_by", "name"])),
+        ),
+    ];
+
+    for (suffix, action_label, timestamp_key, performed_by_user, actor) in candidates {
+        if !performed_by_user {
+            continue;
+        }
+        let Some(occurred_at) = json_string(merge_request, timestamp_key)
+            .and_then(|value| parse_rfc3339_millis(&value))
+        else {
+            continue;
+        };
+        if occurred_at < start_at || occurred_at >= end_at {
+            continue;
+        }
+        activities.push(ActivityInput {
+            provider: "gitlab".to_string(),
+            connection_id: connection.id.clone(),
+            external_id: format!("merge-request:{id}:{suffix}"),
+            event_type: "MergeRequest".to_string(),
+            action_label: action_label.to_string(),
+            actor,
+            title: title.clone(),
+            target_url: target_url.clone(),
+            occurred_at,
+            raw_json: raw_json.clone(),
+            subject_json: Some(raw_json.clone()),
+        });
+    }
+
+    activities
+}
+
+fn gitlab_merge_request_note_activities_from_json(
+    connection: &ConnectionRecord,
+    merge_request: &Value,
+    discussions: &[Value],
+    user_id: i64,
+    start_at: i64,
+    end_at: i64,
+) -> Vec<ActivityInput> {
+    let Some(project_id) = json_id_string(merge_request, "project_id") else {
+        return Vec::new();
+    };
+    let Some(merge_request_iid) = json_id_string(merge_request, "iid") else {
+        return Vec::new();
+    };
+    let title = json_string(merge_request, "title")
+        .unwrap_or_else(|| format!("Merge request {merge_request_iid}"));
+    let merge_request_url = json_string(merge_request, "web_url");
+    let subject_json = merge_request.to_string();
+    let mut activities = discussions
+        .iter()
+        .flat_map(|discussion| {
+            discussion
+                .get("notes")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
         })
-        .unwrap_or_default())
+        .filter_map(|note| {
+            if json_i64(note.get("author").unwrap_or(&Value::Null), "id") != Some(user_id) {
+                return None;
+            }
+            let is_approval = json_bool(note, "system") == Some(true)
+                && json_string(note, "body").is_some_and(|body| {
+                    body.trim()
+                        .eq_ignore_ascii_case("approved this merge request")
+                });
+            if json_bool(note, "system") == Some(true) && !is_approval {
+                return None;
+            }
+            let note_id = json_id_string(note, "id")?;
+            let occurred_at =
+                json_string(note, "created_at").and_then(|value| parse_rfc3339_millis(&value))?;
+            if occurred_at < start_at || occurred_at >= end_at {
+                return None;
+            }
+            let actor = json_path_string(note, &["author", "username"])
+                .or_else(|| json_path_string(note, &["author", "name"]));
+            Some(ActivityInput {
+                provider: "gitlab".to_string(),
+                connection_id: connection.id.clone(),
+                external_id: gitlab_merge_request_note_external_id(
+                    &project_id,
+                    &merge_request_iid,
+                    &note_id,
+                ),
+                event_type: if is_approval {
+                    "MergeRequestApproval".to_string()
+                } else {
+                    "Note".to_string()
+                },
+                action_label: if is_approval {
+                    "Approved".to_string()
+                } else {
+                    "Commented".to_string()
+                },
+                actor,
+                title: title.clone(),
+                target_url: if is_approval {
+                    merge_request_url.clone()
+                } else {
+                    merge_request_url
+                        .as_ref()
+                        .map(|url| format!("{url}#note_{note_id}"))
+                },
+                occurred_at,
+                raw_json: note.to_string(),
+                subject_json: Some(subject_json.clone()),
+            })
+        })
+        .collect::<Vec<_>>();
+    activities.sort_by(|left, right| {
+        left.occurred_at
+            .cmp(&right.occurred_at)
+            .then_with(|| left.external_id.cmp(&right.external_id))
+    });
+    activities
+}
+
+fn gitlab_merge_request_note_external_id(
+    project_id: &str,
+    merge_request_iid: &str,
+    note_id: &str,
+) -> String {
+    format!("merge-request-note:{project_id}:{merge_request_iid}:{note_id}")
+}
+
+fn gitlab_event_merge_request_note_id(event: &Value) -> Option<String> {
+    let note = event.get("note")?;
+    let noteable_type = json_string(note, "noteable_type")?;
+    if !noteable_type.eq_ignore_ascii_case("mergerequest")
+        && !noteable_type.eq_ignore_ascii_case("merge_request")
+    {
+        return None;
+    }
+    json_id_string(note, "id")
+}
+
+fn hydrate_gitlab_merge_request_event_activity(
+    activity: &mut ActivityInput,
+    event: &Value,
+    project_id: &str,
+    merge_request_iid: &str,
+    merge_request: &Value,
+) {
+    activity.title = json_string(merge_request, "title").unwrap_or_else(|| activity.title.clone());
+    let merge_request_web_url = json_string(merge_request, "web_url");
+    activity.target_url = merge_request_web_url
+        .clone()
+        .or_else(|| activity.target_url.clone());
+    activity.subject_json = Some(merge_request.to_string());
+    if let Some(note_id) = gitlab_event_merge_request_note_id(event) {
+        activity.external_id =
+            gitlab_merge_request_note_external_id(project_id, merge_request_iid, &note_id);
+        activity.target_url = merge_request_web_url.map(|url| format!("{url}#note_{note_id}"));
+    }
+}
+
+fn deduplicate_activities_prefer_latest(activities: Vec<ActivityInput>) -> Vec<ActivityInput> {
+    let mut by_external_id = HashMap::new();
+    for activity in activities {
+        by_external_id.insert(activity.external_id.clone(), activity);
+    }
+    let mut activities = by_external_id.into_values().collect::<Vec<_>>();
+    activities.sort_by(|left, right| {
+        left.occurred_at
+            .cmp(&right.occurred_at)
+            .then_with(|| left.external_id.cmp(&right.external_id))
+    });
+    activities
 }
 
 fn gitlab_activity_from_json(
     connection: &ConnectionRecord,
     event: &Value,
+    user_id: i64,
     start_at: i64,
     end_at: i64,
 ) -> Option<ActivityInput> {
+    if json_i64(event, "author_id") != Some(user_id) {
+        return None;
+    }
     let occurred_at = parse_rfc3339_millis(&json_string(event, "created_at")?)?;
     if occurred_at < start_at || occurred_at >= end_at {
         return None;
@@ -6904,7 +7304,29 @@ fn gitlab_activity_from_json(
         target_url: json_string(event, "target_url"),
         occurred_at,
         raw_json: event.to_string(),
+        subject_json: None,
     })
+}
+
+fn gitlab_event_merge_request_locator(event: &Value) -> Option<(String, String)> {
+    let project_id = json_value_string(event.get("project_id"))?;
+    if let Some(note) = event.get("note") {
+        let noteable_type = json_string(note, "noteable_type").unwrap_or_default();
+        if noteable_type.eq_ignore_ascii_case("mergerequest")
+            || noteable_type.eq_ignore_ascii_case("merge_request")
+        {
+            return Some((project_id, json_value_string(note.get("noteable_iid"))?));
+        }
+    }
+    let target_type = json_string(event, "target_type").unwrap_or_default();
+    if target_type.eq_ignore_ascii_case("mergerequest")
+        || target_type.eq_ignore_ascii_case("merge_request")
+    {
+        let iid = json_value_string(event.get("target_iid"))
+            .or_else(|| json_value_string(event.get("iid")))?;
+        return Some((project_id, iid));
+    }
+    None
 }
 
 fn fetch_trello_activities(
@@ -6942,6 +7364,53 @@ fn fetch_trello_activities(
         .unwrap_or_default())
 }
 
+fn trello_card_short_link_from_url(value: &str) -> Option<String> {
+    let without_query = value.trim().split(['?', '#']).next().unwrap_or_default();
+    let parts = without_query.split('/').collect::<Vec<_>>();
+    let marker = parts.iter().position(|part| *part == "c")?;
+    let short_link = parts.get(marker + 1)?.trim();
+    if short_link.is_empty()
+        || !short_link
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return None;
+    }
+    Some(short_link.to_string())
+}
+
+fn fetch_resolved_trello_ticket(
+    connection: &ConnectionRecord,
+    external_id: &str,
+) -> Result<ResolvedTrelloTicket, String> {
+    let api_key = connection.api_key.as_deref().unwrap_or_default().trim();
+    let token = connection.token.trim();
+    if api_key.is_empty() || token.is_empty() {
+        return Err("Trello API key and token are required".to_string());
+    }
+    let url = format!(
+        "https://api.trello.com/1/cards/{}?fields=name,shortLink,shortUrl,url,idBoard&board=true&board_fields=name,shortLink,shortUrl,url&key={}&token={}",
+        percent_encode(external_id),
+        percent_encode(api_key),
+        percent_encode(token)
+    );
+    let json = fetch_json(&url, vec![])?;
+    let canonical_external_id =
+        json_string(&json, "shortLink").unwrap_or_else(|| external_id.to_string());
+    Ok(ResolvedTrelloTicket {
+        external_id: canonical_external_id.clone(),
+        title: json_string(&json, "name")
+            .unwrap_or_else(|| format!("Trello ticket {canonical_external_id}")),
+        url: json_string(&json, "shortUrl")
+            .or_else(|| json_string(&json, "url"))
+            .unwrap_or_else(|| format!("https://trello.com/c/{canonical_external_id}")),
+        board_external_id: json_path_string(&json, &["board", "shortLink"])
+            .or_else(|| json_string(&json, "idBoard")),
+        board_name: json_path_string(&json, &["board", "name"]),
+        connection_id: connection.id.clone(),
+    })
+}
+
 fn trello_activity_from_json(
     connection: &ConnectionRecord,
     action: &Value,
@@ -6954,6 +7423,9 @@ fn trello_activity_from_json(
     }
 
     let event_type = json_string(action, "type").unwrap_or_else(|| "action".to_string());
+    if is_trello_position_only_update(action, &event_type) {
+        return None;
+    }
     let title = json_path_string(action, &["data", "card", "name"])
         .or_else(|| json_path_string(action, &["data", "board", "name"]))
         .or_else(|| json_path_string(action, &["data", "list", "name"]))
@@ -6977,7 +7449,17 @@ fn trello_activity_from_json(
         target_url,
         occurred_at,
         raw_json: action.to_string(),
+        subject_json: None,
     })
+}
+
+fn is_trello_position_only_update(action: &Value, event_type: &str) -> bool {
+    if event_type != "updateCard" {
+        return false;
+    }
+    let old = action.get("data").and_then(|data| data.get("old"));
+    old.and_then(|value| value.get("pos")).is_some()
+        && old.and_then(|value| value.get("idList")).is_none()
 }
 
 fn github_activity_label(event: &Value, event_type: &str, action: Option<&str>) -> String {
@@ -6988,6 +7470,14 @@ fn github_activity_label(event: &Value, event_type: &str, action: Option<&str>) 
         return "Merged".to_string();
     }
 
+    match event_type {
+        "IssueCommentEvent" | "CommitCommentEvent" | "PullRequestReviewCommentEvent" => {
+            return "Commented".to_string();
+        }
+        "PullRequestReviewEvent" => return "Reviewed".to_string(),
+        _ => {}
+    }
+
     if let Some(action) = action.and_then(canonical_activity_action) {
         return action;
     }
@@ -6996,10 +7486,6 @@ fn github_activity_label(event: &Value, event_type: &str, action: Option<&str>) 
         "PushEvent" => "Pushed".to_string(),
         "CreateEvent" => "Created".to_string(),
         "DeleteEvent" => "Deleted".to_string(),
-        "IssueCommentEvent" | "CommitCommentEvent" | "PullRequestReviewCommentEvent" => {
-            "Commented".to_string()
-        }
-        "PullRequestReviewEvent" => "Reviewed".to_string(),
         "WatchEvent" => "Starred".to_string(),
         "ForkEvent" => "Forked".to_string(),
         _ => event_type
@@ -7033,9 +7519,7 @@ fn trello_activity_label(action: &Value, event_type: &str) -> String {
                 .is_some() =>
         {
             let old = action.get("data").and_then(|data| data.get("old"));
-            if old.and_then(|value| value.get("idList")).is_some()
-                || old.and_then(|value| value.get("pos")).is_some()
-            {
+            if old.and_then(|value| value.get("idList")).is_some() {
                 trello_moved_label(action)
             } else {
                 "Changed".to_string()
@@ -7062,6 +7546,7 @@ fn canonical_activity_action(value: &str) -> Option<String> {
         "move" | "moved" => "Moved",
         "update" | "updated" | "change" | "changed" | "edit" | "edited" => "Changed",
         "comment" | "commented" | "commented on" => "Commented",
+        "approve" | "approved" => "Approved",
         "merge" | "merged" | "accept" | "accepted" => "Merged",
         "close" | "closed" => "Closed",
         "reopen" | "reopened" => "Reopened",
@@ -9227,53 +9712,123 @@ fn list_activities(
 }
 
 #[tauri::command]
-fn sync_activities(
-    state: tauri::State<'_, AppState>,
+async fn sync_activities(
+    app: tauri::AppHandle,
     date: String,
     start_at: i64,
     end_at: i64,
 ) -> Result<ActivityResult, String> {
-    let connections = {
-        let db = state.db.lock().map_err(db_error)?;
-        list_connections_in_db(&db).map_err(db_error)?
-    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let db_path = app.state::<AppState>().db_path.clone();
+        let mut db = SqliteConnection::open(db_path).map_err(db_error)?;
+        db.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(db_error)?;
+        let fetched_at = now_millis();
+        list_connections_in_db(&db)
+            .map_err(db_error)?
+            .into_iter()
+            .try_for_each(|connection| {
+                let result = validate_connection_credentials(&connection).and_then(|_| {
+                    fetch_connection_activities(&connection, &date, start_at, end_at)
+                });
 
-    let fetched_at = now_millis();
-    for connection in connections {
-        let result = validate_connection_credentials(&connection)
-            .and_then(|_| fetch_connection_activities(&connection, &date, start_at, end_at));
-        let db = state.db.lock().map_err(db_error)?;
-        match result {
-            Ok(activities) => {
-                for activity in activities {
-                    upsert_activity_in_db(&db, &activity, fetched_at).map_err(db_error)?;
+                match result {
+                    Ok(activities) => {
+                        if connection.provider == "gitlab" {
+                            replace_gitlab_activity_sync_in_db(
+                                &mut db,
+                                &connection.id,
+                                &date,
+                                start_at,
+                                end_at,
+                                &activities,
+                                fetched_at,
+                            )
+                            .map_err(db_error)?;
+                        } else {
+                            for activity in activities {
+                                upsert_activity_in_db(&db, &activity, fetched_at)
+                                    .map_err(db_error)?;
+                            }
+                            save_activity_sync_run_in_db(
+                                &db,
+                                &connection.id,
+                                &date,
+                                "success",
+                                None,
+                                fetched_at,
+                            )
+                            .map_err(db_error)?;
+                        }
+                    }
+                    Err(error) => {
+                        save_activity_sync_run_in_db(
+                            &db,
+                            &connection.id,
+                            &date,
+                            "failed",
+                            Some(&connection_test_error_message(&connection.provider, &error)),
+                            fetched_at,
+                        )
+                        .map_err(db_error)?;
+                    }
                 }
-                save_activity_sync_run_in_db(
-                    &db,
-                    &connection.id,
-                    &date,
-                    "success",
-                    None,
-                    fetched_at,
-                )
-                .map_err(db_error)?;
+                Ok::<(), String>(())
+            })?;
+
+        list_activities_in_db(&db, &date, start_at, end_at)
+    })
+    .await
+    .map_err(|error| format!("Activity sync task failed: {error}"))?
+}
+
+#[tauri::command]
+async fn resolve_trello_tickets(
+    app: tauri::AppHandle,
+    input: ResolveTrelloTicketsInput,
+) -> Result<ResolveTrelloTicketsResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let db_path = app.state::<AppState>().db_path.clone();
+        let db = SqliteConnection::open(db_path).map_err(db_error)?;
+        db.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(db_error)?;
+        let connections = list_connections_in_db(&db)
+            .map_err(db_error)?
+            .into_iter()
+            .filter(|connection| connection.provider == "trello")
+            .collect::<Vec<_>>();
+        let mut seen = HashSet::new();
+        let mut tickets = Vec::new();
+        let mut warnings = Vec::new();
+
+        for url in input.urls {
+            let Some(external_id) = trello_card_short_link_from_url(&url) else {
+                warnings.push(format!("Could not recognize Trello ticket URL: {url}"));
+                continue;
+            };
+            if !seen.insert(external_id.clone()) {
+                continue;
             }
-            Err(error) => {
-                save_activity_sync_run_in_db(
-                    &db,
-                    &connection.id,
-                    &date,
-                    "failed",
-                    Some(&connection_test_error_message(&connection.provider, &error)),
-                    fetched_at,
-                )
-                .map_err(db_error)?;
+            let mut resolved = None;
+            for connection in &connections {
+                if let Ok(ticket) = fetch_resolved_trello_ticket(connection, &external_id) {
+                    resolved = Some(ticket);
+                    break;
+                }
+            }
+            if let Some(ticket) = resolved {
+                tickets.push(ticket);
+            } else {
+                warnings.push(format!(
+                    "Could not load Trello ticket {external_id} with the configured connections."
+                ));
             }
         }
-    }
 
-    let db = state.db.lock().map_err(db_error)?;
-    list_activities_in_db(&db, &date, start_at, end_at)
+        Ok(ResolveTrelloTicketsResult { tickets, warnings })
+    })
+    .await
+    .map_err(|error| format!("Trello ticket resolution task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -11248,6 +11803,7 @@ mod tests {
             target_url: Some("https://github.com/owner/repo/issues/1".to_string()),
             occurred_at: 1_000,
             raw_json: "{}".to_string(),
+            subject_json: Some("{\"title\":\"Issue subject\"}".to_string()),
         };
 
         upsert_activity_in_db(&db, &activity, 2_000).expect("insert activity");
@@ -11261,7 +11817,212 @@ mod tests {
         assert_eq!(result.activities.len(), 1);
         assert_eq!(result.activities[0].title, "Updated title");
         assert_eq!(result.activities[0].fetched_at, 3_000);
+        assert_eq!(
+            result.activities[0].subject_json.as_deref(),
+            Some("{\"title\":\"Issue subject\"}")
+        );
         assert_eq!(result.sync_runs.len(), 1);
+    }
+
+    #[test]
+    fn replaces_only_the_selected_gitlab_connection_day() {
+        let mut db = memory_db();
+        let gitlab = save_connection_in_db(
+            &db,
+            ConnectionInput {
+                id: Some("gitlab_1".to_string()),
+                provider: "gitlab".to_string(),
+                name: "GitLab".to_string(),
+                base_url: "https://gitlab.example.org".to_string(),
+                api_key: None,
+                token: "token".to_string(),
+            },
+        )
+        .expect("save GitLab connection");
+        let github = save_connection_in_db(
+            &db,
+            ConnectionInput {
+                id: Some("github_1".to_string()),
+                provider: "github".to_string(),
+                name: "GitHub".to_string(),
+                base_url: "https://github.com".to_string(),
+                api_key: None,
+                token: "token".to_string(),
+            },
+        )
+        .expect("save GitHub connection");
+        let activity = |provider: &str,
+                        connection_id: &str,
+                        external_id: &str,
+                        occurred_at: i64| ActivityInput {
+            provider: provider.to_string(),
+            connection_id: connection_id.to_string(),
+            external_id: external_id.to_string(),
+            event_type: "Project".to_string(),
+            action_label: "Pushed".to_string(),
+            actor: Some("alexander".to_string()),
+            title: external_id.to_string(),
+            target_url: None,
+            occurred_at,
+            raw_json: "{}".to_string(),
+            subject_json: None,
+        };
+        let stale = activity("gitlab", &gitlab.id, "stale", 1_100);
+        let outside_day = activity("gitlab", &gitlab.id, "outside", 2_100);
+        let other_connection = activity("github", &github.id, "other", 1_200);
+        for item in [&stale, &outside_day, &other_connection] {
+            upsert_activity_in_db(&db, item, 2_500).expect("seed activity");
+        }
+
+        let replacement = activity("gitlab", &gitlab.id, "replacement", 1_300);
+        replace_gitlab_activity_sync_in_db(
+            &mut db,
+            &gitlab.id,
+            "1970-01-01",
+            1_000,
+            2_000,
+            &[replacement],
+            3_000,
+        )
+        .expect("replace GitLab day");
+
+        let selected_day =
+            list_activities_in_db(&db, "1970-01-01", 1_000, 2_000).expect("list selected day");
+        assert_eq!(selected_day.activities.len(), 2);
+        assert!(selected_day
+            .activities
+            .iter()
+            .any(|item| item.external_id == "replacement"));
+        assert!(selected_day
+            .activities
+            .iter()
+            .any(|item| item.external_id == "other"));
+        assert!(!selected_day
+            .activities
+            .iter()
+            .any(|item| item.external_id == "stale"));
+        assert_eq!(selected_day.sync_runs[0].status, "success");
+
+        let all_days =
+            list_activities_in_db(&db, "1970-01-01", 1_000, 3_000).expect("list all days");
+        assert!(all_days
+            .activities
+            .iter()
+            .any(|item| item.external_id == "outside"));
+    }
+
+    #[test]
+    fn failed_activity_sync_status_preserves_cached_rows() {
+        let db = memory_db();
+        let connection = save_connection_in_db(
+            &db,
+            ConnectionInput {
+                id: Some("gitlab_1".to_string()),
+                provider: "gitlab".to_string(),
+                name: "GitLab".to_string(),
+                base_url: "https://gitlab.example.org".to_string(),
+                api_key: None,
+                token: "token".to_string(),
+            },
+        )
+        .expect("save GitLab connection");
+        let cached = ActivityInput {
+            provider: "gitlab".to_string(),
+            connection_id: connection.id.clone(),
+            external_id: "cached".to_string(),
+            event_type: "Project".to_string(),
+            action_label: "Pushed".to_string(),
+            actor: Some("alexander".to_string()),
+            title: "Cached activity".to_string(),
+            target_url: None,
+            occurred_at: 1_100,
+            raw_json: "{}".to_string(),
+            subject_json: None,
+        };
+        upsert_activity_in_db(&db, &cached, 2_000).expect("cache activity");
+
+        save_activity_sync_run_in_db(
+            &db,
+            &connection.id,
+            "1970-01-01",
+            "failed",
+            Some("provider unavailable"),
+            3_000,
+        )
+        .expect("save failed sync");
+
+        let result =
+            list_activities_in_db(&db, "1970-01-01", 1_000, 2_000).expect("list cached activities");
+        assert_eq!(result.activities.len(), 1);
+        assert_eq!(result.activities[0].external_id, "cached");
+        assert_eq!(result.sync_runs[0].status, "failed");
+    }
+
+    #[test]
+    fn replaces_unlinked_gitlab_note_events_with_hydrated_note_activities() {
+        let mut db = memory_db();
+        let connection = save_connection_in_db(
+            &db,
+            ConnectionInput {
+                id: Some("gitlab_1".to_string()),
+                provider: "gitlab".to_string(),
+                name: "GitLab".to_string(),
+                base_url: "https://gitlab.example.org".to_string(),
+                api_key: None,
+                token: "token".to_string(),
+            },
+        )
+        .expect("save GitLab connection");
+        let cached = ActivityInput {
+            provider: "gitlab".to_string(),
+            connection_id: connection.id.clone(),
+            external_id: "90678".to_string(),
+            event_type: "DiffNote".to_string(),
+            action_label: "Commented".to_string(),
+            actor: Some("alexander".to_string()),
+            title: "Edit Visit Form".to_string(),
+            target_url: None,
+            occurred_at: 1_100,
+            raw_json: "{}".to_string(),
+            subject_json: None,
+        };
+        upsert_activity_in_db(&db, &cached, 2_000).expect("cache unlinked activity");
+        let hydrated = ActivityInput {
+            external_id: "merge-request-note:97:2174:81299".to_string(),
+            target_url: Some(
+                "https://gitlab.example.org/group/app/-/merge_requests/2174#note_81299".to_string(),
+            ),
+            subject_json: Some(
+                serde_json::json!({
+                    "iid": 2174,
+                    "title": "Edit Visit Form",
+                    "web_url": "https://gitlab.example.org/group/app/-/merge_requests/2174"
+                })
+                .to_string(),
+            ),
+            ..cached.clone()
+        };
+
+        replace_gitlab_activity_sync_in_db(
+            &mut db,
+            &connection.id,
+            "1970-01-01",
+            1_000,
+            2_000,
+            &[hydrated],
+            3_000,
+        )
+        .expect("replace GitLab activities");
+
+        let result =
+            list_activities_in_db(&db, "1970-01-01", 1_000, 2_000).expect("list activities");
+        assert_eq!(result.activities.len(), 1);
+        assert_eq!(
+            result.activities[0].external_id,
+            "merge-request-note:97:2174:81299"
+        );
+        assert!(result.activities[0].target_url.is_some());
+        assert!(result.activities[0].subject_json.is_some());
     }
 
     #[test]
@@ -11290,6 +12051,30 @@ mod tests {
         assert_eq!(activity.action_label, "Created");
         assert_eq!(activity.title, "Fix auth");
         assert_eq!(activity.actor.as_deref(), Some("alex"));
+
+        let github_comment_event = serde_json::json!({
+            "id": "124",
+            "type": "IssueCommentEvent",
+            "created_at": "2026-07-09T08:45:00Z",
+            "actor": { "login": "alex" },
+            "repo": { "name": "sulu/skeleton" },
+            "payload": {
+                "action": "created",
+                "issue": {
+                    "title": "Update dependencies",
+                    "html_url": "https://github.com/sulu/skeleton/pull/325"
+                },
+                "comment": {
+                    "body": "Looks good",
+                    "html_url": "https://github.com/sulu/skeleton/pull/325#issuecomment-1"
+                }
+            }
+        });
+        let comment_activity =
+            github_activity_from_json(&github, &github_comment_event, start, end)
+                .expect("GitHub comment activity");
+
+        assert_eq!(comment_activity.action_label, "Commented");
 
         let trello = connection_record("trello", Some("key"), "token");
         let trello_action = serde_json::json!({
@@ -11328,6 +12113,510 @@ mod tests {
             .expect("trello attachment activity");
 
         assert_eq!(activity.action_label, "Changed");
+
+        let position_action = serde_json::json!({
+            "id": "action_3",
+            "type": "updateCard",
+            "date": "2026-07-09T11:00:00.000Z",
+            "memberCreator": { "username": "alex" },
+            "data": {
+                "card": { "name": "Review PR", "shortLink": "abc123" },
+                "list": { "name": "Waiting for Approval" },
+                "old": { "pos": 65535 }
+            }
+        });
+        assert!(trello_activity_from_json(&trello, &position_action, start, end).is_none());
+
+        let list_move_action = serde_json::json!({
+            "id": "action_4",
+            "type": "updateCard",
+            "date": "2026-07-09T12:00:00.000Z",
+            "memberCreator": { "username": "alex" },
+            "data": {
+                "card": { "name": "Review PR", "shortLink": "abc123" },
+                "listBefore": { "name": "Inbox" },
+                "listAfter": { "name": "Waiting for Approval" },
+                "old": { "idList": "list_before", "pos": 65535 }
+            }
+        });
+        let activity = trello_activity_from_json(&trello, &list_move_action, start, end)
+            .expect("Trello list move activity");
+        assert_eq!(activity.action_label, "Moved: Waiting for Approval");
+    }
+
+    #[test]
+    fn normalizes_only_gitlab_events_authored_by_the_current_user() {
+        let gitlab = connection_record("gitlab", None, "token");
+        let start = parse_rfc3339_millis("2026-07-17T00:00:00Z").unwrap();
+        let end = parse_rfc3339_millis("2026-07-18T00:00:00Z").unwrap();
+        let own_event = serde_json::json!({
+            "id": 90716,
+            "author_id": 3,
+            "action_name": "commented on",
+            "target_type": "Note",
+            "target_title": "Review activity filtering",
+            "created_at": "2026-07-17T11:42:25Z",
+            "author": { "id": 3, "username": "alexander" }
+        });
+
+        let activity = gitlab_activity_from_json(&gitlab, &own_event, 3, start, end)
+            .expect("own GitLab activity");
+        assert_eq!(activity.actor.as_deref(), Some("alexander"));
+        assert_eq!(activity.title, "Review activity filtering");
+
+        let mut other_event = own_event.clone();
+        other_event["author_id"] = Value::from(2);
+        assert!(gitlab_activity_from_json(&gitlab, &other_event, 3, start, end).is_none());
+
+        let mut missing_author = own_event.clone();
+        missing_author
+            .as_object_mut()
+            .expect("event object")
+            .remove("author_id");
+        assert!(gitlab_activity_from_json(&gitlab, &missing_author, 3, start, end).is_none());
+
+        let mut outside_day = own_event;
+        outside_day["created_at"] = Value::from("2026-07-18T00:00:00Z");
+        assert!(gitlab_activity_from_json(&gitlab, &outside_day, 3, start, end).is_none());
+    }
+
+    #[test]
+    fn normalizes_gitlab_merge_request_activity_for_the_current_user() {
+        let gitlab = connection_record("gitlab", None, "token");
+        let merge_request = serde_json::json!({
+            "id": 8738,
+            "iid": 2180,
+            "title": "Add migration",
+            "description": "Tracks https://trello.com/c/abc123",
+            "web_url": "https://gitlab.example.com/group/app/-/merge_requests/2180",
+            "created_at": "2026-07-17T08:55:09.439Z",
+            "merged_at": "2026-07-17T10:08:39.185Z",
+            "closed_at": "2026-07-17T11:08:39.185Z",
+            "author": { "id": 3, "username": "alexander" },
+            "merge_user": { "id": 3, "username": "alexander" },
+            "closed_by": { "id": 3, "username": "alexander" }
+        });
+        let start = parse_rfc3339_millis("2026-07-17T00:00:00Z").unwrap();
+        let end = parse_rfc3339_millis("2026-07-18T00:00:00Z").unwrap();
+
+        let activities =
+            gitlab_merge_request_activities_from_json(&gitlab, &merge_request, 3, start, end);
+
+        assert_eq!(activities.len(), 3);
+        assert_eq!(activities[0].external_id, "merge-request:8738:created");
+        assert_eq!(activities[0].action_label, "Created");
+        assert_eq!(activities[1].external_id, "merge-request:8738:merged");
+        assert_eq!(activities[1].action_label, "Merged");
+        assert_eq!(activities[1].actor.as_deref(), Some("alexander"));
+        assert_eq!(activities[1].event_type, "MergeRequest");
+        assert_eq!(activities[2].external_id, "merge-request:8738:closed");
+        assert_eq!(activities[2].action_label, "Closed");
+        assert_eq!(
+            activities[1]
+                .subject_json
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                .and_then(|value| json_string(&value, "description")),
+            Some("Tracks https://trello.com/c/abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn attaches_gitlab_branch_pushes_and_deletes_to_their_merge_request() {
+        let gitlab = connection_record("gitlab", None, "token");
+        let start = parse_rfc3339_millis("2026-07-17T00:00:00Z").unwrap();
+        let end = parse_rfc3339_millis("2026-07-18T00:00:00Z").unwrap();
+        let event = |id, action_name| {
+            serde_json::json!({
+                "id": id,
+                "author_id": 3,
+                "project_id": 55,
+                "action_name": action_name,
+                "created_at": "2026-07-17T10:00:00Z",
+                "push_data": { "ref": "feature/summary", "ref_type": "branch" }
+            })
+        };
+        let mut activities = [
+            gitlab_activity_from_json(&gitlab, &event(1, "pushed to"), 3, start, end).unwrap(),
+            gitlab_activity_from_json(&gitlab, &event(2, "deleted"), 3, start, end).unwrap(),
+        ];
+        let merge_requests = [serde_json::json!({
+            "id": 90,
+            "iid": 9,
+            "project_id": 55,
+            "source_project_id": 55,
+            "source_branch": "feature/summary",
+            "title": "Improve summary",
+            "description": "Tracks https://trello.com/c/summary-card",
+            "web_url": "https://gitlab.example.com/acme/app/-/merge_requests/9"
+        })];
+
+        attach_gitlab_branch_activities_to_merge_requests(&mut activities, &merge_requests);
+
+        for activity in activities {
+            assert_eq!(activity.title, "Improve summary");
+            assert_eq!(
+                activity.target_url.as_deref(),
+                Some("https://gitlab.example.com/acme/app/-/merge_requests/9")
+            );
+            assert!(activity
+                .subject_json
+                .as_deref()
+                .is_some_and(|subject| subject.contains("summary-card")));
+        }
+    }
+
+    #[test]
+    fn normalizes_current_user_gitlab_merge_request_discussion_notes() {
+        let gitlab = connection_record("gitlab", None, "token");
+        let merge_request = serde_json::json!({
+            "id": 8727,
+            "iid": 2175,
+            "project_id": 55,
+            "title": "Fix timeprofile validator",
+            "description": "Tracks https://trello.com/c/abc123",
+            "web_url": "https://gitlab.example.com/group/app/-/merge_requests/2175",
+            "author": { "id": 9, "username": "author" }
+        });
+        let discussions = vec![serde_json::json!({
+            "id": "discussion-1",
+            "notes": [
+                {
+                    "id": 103,
+                    "type": "DiscussionNote",
+                    "body": "Reply",
+                    "system": false,
+                    "created_at": "2026-07-17T10:00:00Z",
+                    "author": { "id": 3, "username": "alexander" }
+                },
+                {
+                    "id": 101,
+                    "body": "General comment",
+                    "system": false,
+                    "created_at": "2026-07-17T08:00:00Z",
+                    "author": { "id": 3, "username": "alexander" }
+                },
+                {
+                    "id": 102,
+                    "type": "DiffNote",
+                    "body": "Inline comment",
+                    "system": false,
+                    "created_at": "2026-07-17T09:00:00Z",
+                    "author": { "id": 3, "name": "Alexander" }
+                },
+                {
+                    "id": 107,
+                    "body": "approved this merge request",
+                    "system": true,
+                    "created_at": "2026-07-17T09:30:00Z",
+                    "author": { "id": 3, "username": "alexander" }
+                },
+                {
+                    "id": 104,
+                    "body": "Other user",
+                    "system": false,
+                    "created_at": "2026-07-17T11:00:00Z",
+                    "author": { "id": 4, "username": "other" }
+                },
+                {
+                    "id": 105,
+                    "body": "System note",
+                    "system": true,
+                    "created_at": "2026-07-17T12:00:00Z",
+                    "author": { "id": 3, "username": "alexander" }
+                },
+                {
+                    "id": 108,
+                    "body": "approved this merge request",
+                    "system": true,
+                    "created_at": "2026-07-17T13:00:00Z",
+                    "author": { "id": 4, "username": "other" }
+                },
+                {
+                    "id": 106,
+                    "body": "Outside the day",
+                    "system": false,
+                    "created_at": "2026-07-18T00:00:00Z",
+                    "author": { "id": 3, "username": "alexander" }
+                },
+                {
+                    "id": 109,
+                    "body": "approved this merge request",
+                    "system": true,
+                    "created_at": "2026-07-18T00:00:00Z",
+                    "author": { "id": 3, "username": "alexander" }
+                }
+            ]
+        })];
+        let start = parse_rfc3339_millis("2026-07-17T00:00:00Z").unwrap();
+        let end = parse_rfc3339_millis("2026-07-18T00:00:00Z").unwrap();
+
+        let activities = gitlab_merge_request_note_activities_from_json(
+            &gitlab,
+            &merge_request,
+            &discussions,
+            3,
+            start,
+            end,
+        );
+
+        assert_eq!(activities.len(), 4);
+        assert_eq!(activities[0].external_id, "merge-request-note:55:2175:101");
+        assert_eq!(activities[1].external_id, "merge-request-note:55:2175:102");
+        assert_eq!(activities[2].external_id, "merge-request-note:55:2175:107");
+        assert_eq!(activities[3].external_id, "merge-request-note:55:2175:103");
+        assert!(activities[..2]
+            .iter()
+            .chain(&activities[3..])
+            .all(|activity| {
+                activity.event_type == "Note" && activity.action_label == "Commented"
+            }));
+        assert_eq!(activities[2].event_type, "MergeRequestApproval");
+        assert_eq!(activities[2].action_label, "Approved");
+        assert_eq!(activities[2].actor.as_deref(), Some("alexander"));
+        assert_eq!(
+            activities[2].occurred_at,
+            parse_rfc3339_millis("2026-07-17T09:30:00Z").unwrap()
+        );
+        assert_eq!(
+            activities[2].target_url.as_deref(),
+            Some("https://gitlab.example.com/group/app/-/merge_requests/2175")
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&activities[2].raw_json)
+                .ok()
+                .and_then(|value| json_string(&value, "body")),
+            Some("approved this merge request".to_string())
+        );
+        assert_eq!(
+            activities[2].subject_json.as_deref(),
+            Some(merge_request.to_string().as_str())
+        );
+        assert_eq!(activities[0].actor.as_deref(), Some("alexander"));
+        assert_eq!(activities[1].actor.as_deref(), Some("Alexander"));
+        assert_eq!(
+            activities[1].target_url.as_deref(),
+            Some("https://gitlab.example.com/group/app/-/merge_requests/2175#note_102")
+        );
+        assert_eq!(
+            activities[0]
+                .subject_json
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                .and_then(|value| json_string(&value, "description")),
+            Some("Tracks https://trello.com/c/abc123".to_string())
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&activities[3].raw_json)
+                .ok()
+                .and_then(|value| json_string(&value, "body")),
+            Some("Reply".to_string())
+        );
+        assert_eq!(
+            canonical_activity_action("approve").as_deref(),
+            Some("Approved")
+        );
+        assert_eq!(
+            canonical_activity_action("approved").as_deref(),
+            Some("Approved")
+        );
+    }
+
+    #[test]
+    fn gitlab_merge_request_note_identity_deduplicates_event_and_discussion_activity() {
+        let gitlab = connection_record("gitlab", None, "token");
+        let event = serde_json::json!({
+            "project_id": 55,
+            "target_type": "Note",
+            "note": {
+                "id": 101,
+                "noteable_type": "MergeRequest",
+                "noteable_iid": 2175
+            }
+        });
+        assert_eq!(
+            gitlab_event_merge_request_note_id(&event).as_deref(),
+            Some("101")
+        );
+        let external_id = gitlab_merge_request_note_external_id("55", "2175", "101");
+        let event_activity = ActivityInput {
+            provider: "gitlab".to_string(),
+            connection_id: gitlab.id.clone(),
+            external_id: external_id.clone(),
+            event_type: "Note".to_string(),
+            action_label: "Commented".to_string(),
+            actor: Some("alexander".to_string()),
+            title: "MR".to_string(),
+            target_url: None,
+            occurred_at: 1,
+            raw_json: "event".to_string(),
+            subject_json: None,
+        };
+        let mut discussion_activity = event_activity.clone();
+        discussion_activity.raw_json = "discussion".to_string();
+        discussion_activity.target_url = Some("https://gitlab.example/mr#note_101".to_string());
+
+        let activities =
+            deduplicate_activities_prefer_latest(vec![event_activity, discussion_activity]);
+
+        assert_eq!(activities.len(), 1);
+        assert_eq!(activities[0].external_id, external_id);
+        assert_eq!(activities[0].raw_json, "discussion");
+        assert_eq!(
+            activities[0].target_url.as_deref(),
+            Some("https://gitlab.example/mr#note_101")
+        );
+    }
+
+    #[test]
+    fn locates_gitlab_merge_request_note_subjects() {
+        for target_type in ["Note", "DiffNote", "DiscussionNote"] {
+            let event = serde_json::json!({
+                "project_id": 55,
+                "target_type": target_type,
+                "note": {
+                    "id": 81299,
+                    "noteable_type": "MergeRequest",
+                    "noteable_iid": 2180
+                }
+            });
+            assert_eq!(
+                gitlab_event_merge_request_locator(&event),
+                Some(("55".to_string(), "2180".to_string()))
+            );
+            assert_eq!(
+                gitlab_event_merge_request_note_id(&event),
+                Some("81299".to_string())
+            );
+        }
+        assert_eq!(
+            gitlab_event_merge_request_locator(&serde_json::json!({
+                "project_id": 55,
+                "target_type": "Note",
+                "note": { "noteable_type": "Issue", "noteable_iid": 12 }
+            })),
+            None
+        );
+    }
+
+    #[test]
+    fn hydrates_gitlab_diff_and_discussion_note_events_with_merge_request_metadata() {
+        let gitlab = connection_record("gitlab", None, "token");
+        let merge_request = serde_json::json!({
+            "id": 8727,
+            "iid": 2175,
+            "project_id": 97,
+            "title": "Fix timeprofile validator",
+            "description": "Tracks https://trello.com/c/abc123",
+            "web_url": "https://gitlab.example.com/group/app/-/merge_requests/2175"
+        });
+        let start = parse_rfc3339_millis("2026-07-17T00:00:00Z").unwrap();
+        let end = parse_rfc3339_millis("2026-07-18T00:00:00Z").unwrap();
+
+        for (target_type, event_id, note_id) in
+            [("DiffNote", 90678, 81299), ("DiscussionNote", 90545, 81166)]
+        {
+            let event = serde_json::json!({
+                "id": event_id,
+                "project_id": 97,
+                "target_type": target_type,
+                "target_title": "Unhydrated title",
+                "action_name": "commented on",
+                "author_id": 3,
+                "author": { "id": 3, "username": "alexander" },
+                "created_at": "2026-07-17T10:08:02.444Z",
+                "note": {
+                    "id": note_id,
+                    "noteable_type": "MergeRequest",
+                    "noteable_iid": 2175,
+                    "project_id": 97,
+                    "system": false
+                }
+            });
+            let mut activity = gitlab_activity_from_json(&gitlab, &event, 3, start, end)
+                .expect("normalize GitLab note event");
+
+            hydrate_gitlab_merge_request_event_activity(
+                &mut activity,
+                &event,
+                "97",
+                "2175",
+                &merge_request,
+            );
+
+            assert_eq!(
+                activity.external_id,
+                format!("merge-request-note:97:2175:{note_id}")
+            );
+            assert_eq!(activity.title, "Fix timeprofile validator");
+            assert_eq!(
+                activity.target_url.as_deref(),
+                Some(
+                    format!(
+                        "https://gitlab.example.com/group/app/-/merge_requests/2175#note_{note_id}"
+                    )
+                    .as_str()
+                )
+            );
+            assert_eq!(
+                activity
+                    .subject_json
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                    .and_then(|value| json_string(&value, "description")),
+                Some("Tracks https://trello.com/c/abc123".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn parses_trello_card_short_links_for_ticket_resolution() {
+        assert_eq!(
+            trello_card_short_link_from_url("https://trello.com/c/abc123/a-slug?x=1#comments"),
+            Some("abc123".to_string())
+        );
+        assert_eq!(
+            trello_card_short_link_from_url("https://trello.com/b/board123"),
+            None
+        );
+
+        let response = ResolveTrelloTicketsResult {
+            tickets: vec![ResolvedTrelloTicket {
+                external_id: "abc123".to_string(),
+                title: "Ticket".to_string(),
+                url: "https://trello.com/c/abc123".to_string(),
+                board_external_id: Some("board123".to_string()),
+                board_name: Some("Board".to_string()),
+                connection_id: "trello_1".to_string(),
+            }],
+            warnings: vec![],
+        };
+        let json = serde_json::to_value(response).expect("serialize resolver response");
+        assert_eq!(json["tickets"][0]["boardExternalId"], "board123");
+        assert_eq!(json["tickets"][0]["connectionId"], "trello_1");
+    }
+
+    #[test]
+    fn ignores_gitlab_merge_request_actions_by_other_users_or_outside_the_day() {
+        let gitlab = connection_record("gitlab", None, "token");
+        let merge_request = serde_json::json!({
+            "id": 42,
+            "title": "Existing merge request",
+            "web_url": "https://gitlab.example.com/group/app/-/merge_requests/42",
+            "created_at": "2026-07-16T23:59:59.999Z",
+            "merged_at": "2026-07-17T10:00:00Z",
+            "closed_at": null,
+            "author": { "id": 3, "username": "alexander" },
+            "merge_user": { "id": 4, "username": "reviewer" },
+            "closed_by": null
+        });
+        let start = parse_rfc3339_millis("2026-07-17T00:00:00Z").unwrap();
+        let end = parse_rfc3339_millis("2026-07-18T00:00:00Z").unwrap();
+
+        let activities =
+            gitlab_merge_request_activities_from_json(&gitlab, &merge_request, 3, start, end);
+
+        assert!(activities.is_empty());
     }
 
     #[test]

@@ -529,6 +529,7 @@ function App() {
   function showActivityView() {
     setSelectedTask(null);
     setSelectedProjectId(null);
+    setActivityDate(formatLocalDate());
     setShowActivity(true);
   }
 
@@ -670,6 +671,7 @@ function App() {
       ) : showActivity ? (
         <ActivityView
           date={activityDate}
+          projects={projects}
           activities={activityData.activities}
           syncRuns={activityData.syncRuns}
           isSyncing={activityData.isSyncing}
@@ -677,6 +679,7 @@ function App() {
           calendarSyncRuns={activityCalendarData.syncRuns}
           isCalendarSyncing={activityCalendarData.isSyncing}
           onDateChange={setActivityDate}
+          onNotice={showNotice}
           onRefresh={() => Promise.all([activityData.refresh(), activityCalendarData.refresh()])}
         />
       ) : selectedProject ? (

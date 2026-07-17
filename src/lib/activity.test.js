@@ -4,15 +4,19 @@ import assert from "node:assert/strict";
 import {
   activityActionLabel,
   activityEventKindLabel,
+  activityOpenUrl,
   addDays,
   formatActivityLastSyncText,
   formatLocalDate,
   isTrelloAutomationActivity,
+  isTrelloListMoveActivity,
+  isTrelloPositionOnlyActivity,
   isPastLocalDate,
   localDayBounds,
   shouldAutoSyncActivity,
   sortActivities,
   syncWarningMessages,
+  timelineItemsToCsv,
 } from "./activity.js";
 import { api } from "./api.js";
 
@@ -86,6 +90,29 @@ test("sorts activities oldest first", () => {
   assert.deepEqual(sorted.map((activity) => activity.id), ["old", "middle", "new"]);
 });
 
+test("uses canonical GitHub and GitLab review request URLs for activities", () => {
+  assert.equal(
+    activityOpenUrl({
+      provider: "github",
+      targetUrl: "https://github.com/acme/app/pull/42#issuecomment-1",
+      subjectJson: JSON.stringify({ html_url: "https://github.com/acme/app/pull/42" }),
+    }),
+    "https://github.com/acme/app/pull/42",
+  );
+  assert.equal(
+    activityOpenUrl({
+      provider: "gitlab",
+      targetUrl: "https://gitlab.example.com/acme/app/-/merge_requests/7#note_1",
+      subjectJson: JSON.stringify({ web_url: "https://gitlab.example.com/acme/app/-/merge_requests/7" }),
+    }),
+    "https://gitlab.example.com/acme/app/-/merge_requests/7",
+  );
+  assert.equal(
+    activityOpenUrl({ provider: "trello", targetUrl: "https://trello.com/c/abc123" }),
+    "https://trello.com/c/abc123",
+  );
+});
+
 test("detects trello automation activities from app metadata", () => {
   assert.equal(
     isTrelloAutomationActivity({
@@ -128,6 +155,38 @@ test("detects trello automation activities from app metadata", () => {
   assert.equal(isTrelloAutomationActivity({ provider: "trello" }), false);
 });
 
+test("detects Trello position-only card updates without hiding list moves", () => {
+  assert.equal(
+    isTrelloPositionOnlyActivity({
+      provider: "trello",
+      eventType: "updateCard",
+      rawJson: JSON.stringify({ data: { old: { pos: 12345 }, list: { name: "Waiting" } } }),
+    }),
+    true,
+  );
+  assert.equal(
+    isTrelloPositionOnlyActivity({
+      provider: "trello",
+      eventType: "updateCard",
+      rawJson: JSON.stringify({
+        data: {
+          old: { idList: "list-a", pos: 12345 },
+          listBefore: { name: "Inbox" },
+          listAfter: { name: "Waiting" },
+        },
+      }),
+    }),
+    false,
+  );
+  assert.equal(isTrelloPositionOnlyActivity({ provider: "trello", eventType: "commentCard" }), false);
+});
+
+test("identifies normalized Trello list moves", () => {
+  assert.equal(isTrelloListMoveActivity({ provider: "trello", actionLabel: "Moved: Done" }), true);
+  assert.equal(isTrelloListMoveActivity({ provider: "trello", actionLabel: "Commented" }), false);
+  assert.equal(isTrelloListMoveActivity({ provider: "gitlab", actionLabel: "Moved" }), false);
+});
+
 test("formats provider sync warnings", () => {
   assert.deepEqual(
     syncWarningMessages([
@@ -161,6 +220,10 @@ test("derives compact activity badge labels", () => {
     "Commented",
   );
   assert.equal(
+    activityActionLabel({ actionLabel: "Created", eventType: "IssueCommentEvent" }),
+    "Commented",
+  );
+  assert.equal(
     activityActionLabel({ actionLabel: "Deleted", eventType: "deleteAttachmentFromCard" }),
     "Changed",
   );
@@ -169,7 +232,63 @@ test("derives compact activity badge labels", () => {
     "Changed",
   );
   assert.equal(activityEventKindLabel({ eventType: "PullRequestEvent" }), "Pull Request");
+  assert.equal(activityEventKindLabel({ eventType: "MergeRequest" }), "Pull Request");
   assert.equal(activityEventKindLabel({ eventType: "updateCard" }), "Card");
+});
+
+test("exports visible timeline items as CSV with external links", () => {
+  const csv = timelineItemsToCsv([
+    {
+      type: "activity",
+      value: {
+        provider: "github",
+        connectionName: "Work GitHub",
+        eventType: "PullRequestEvent",
+        actionLabel: "Opened",
+        actor: "alex",
+        title: 'Fix "login", finally',
+        targetUrl: "https://github.com/acme/app/pull/42",
+        occurredAt: Date.UTC(2026, 6, 17, 8, 30),
+      },
+    },
+    {
+      type: "calendar",
+      value: {
+        calendarName: "Team",
+        title: "Standup",
+        organizer: "lead@example.com",
+        joinUrl: "https://meet.google.com/abc-defg-hij",
+        startAt: Date.UTC(2026, 6, 17, 9, 0),
+      },
+    },
+    {
+      type: "activity",
+      value: {
+        provider: "gitlab",
+        eventType: "IssueEvent",
+        title: "Fix deployment",
+        targetUrl: "https://gitlab.com/acme/app/-/issues/7",
+      },
+    },
+    {
+      type: "activity",
+      value: {
+        provider: "trello",
+        eventType: "updateCard",
+        title: "Ship release",
+        targetUrl: "https://trello.com/c/abc123/ship-release",
+      },
+    },
+  ]);
+
+  assert.equal(
+    csv,
+    '"Timestamp","Provider","Connection","Action","Type","Actor","Title","Link"\r\n' +
+      '"2026-07-17T08:30:00.000Z","GitHub","Work GitHub","Created","Pull Request","alex","Fix ""login"", finally","https://github.com/acme/app/pull/42"\r\n' +
+      '"2026-07-17T09:00:00.000Z","Calendar","Team","Scheduled","Event","lead@example.com","Standup","https://meet.google.com/abc-defg-hij"\r\n' +
+      '"","GitLab","","IssueEvent","Issue","","Fix deployment","https://gitlab.com/acme/app/-/issues/7"\r\n' +
+      '"","Trello","","Changed","Card","","Ship release","https://trello.com/c/abc123/ship-release"',
+  );
 });
 
 test("local fallback reads cached activities for a selected day", async () => {

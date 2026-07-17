@@ -152,6 +152,8 @@ export const api = {
     const input = activityRequestPayload(payload);
     return call("sync_activities", input, () => local.syncActivities(input));
   },
+  resolveTrelloTickets: (payload) =>
+    call("resolve_trello_tickets", { input: payload }, () => local.resolveTrelloTickets(payload)),
   listCalendarAccounts: () => call("list_calendar_accounts", {}, local.listCalendarAccounts),
   connectGoogleAccount: ({ accountId = null } = {}) => call("connect_google_account", { accountId }, () => {
     throw new Error("Google sign-in requires the desktop app.");
@@ -1610,6 +1612,15 @@ const local = {
     ];
     writeState(state);
     return localActivityResult(state, payload);
+  },
+
+  resolveTrelloTickets({ urls = [] } = {}) {
+    return {
+      tickets: [],
+      warnings: urls.length > 0
+        ? ["Loading linked Trello ticket details requires the desktop app."]
+        : [],
+    };
   },
 
   listCalendarAccounts() {
