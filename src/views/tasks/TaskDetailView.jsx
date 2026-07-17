@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
+  Bot,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -14,31 +15,63 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  SquareKanban,
   Trash2,
   X,
 } from "lucide-react";
 
 import { EmptyState } from "@/components/common/EmptyState";
+import { ErrorBoundary } from "@/components/common/ErrorBoundary";
 import { Modal } from "@/components/common/Modal";
 import { Panel } from "@/components/common/Panel";
 import { SelectControl } from "@/components/common/SelectControl";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
+import { Textarea } from "@/components/ui/textarea";
+import { ReviewDiff } from "@/features/pull-requests/ReviewDiff";
 import { LocalResourceList } from "@/features/resources/LocalResourcesPanel";
 import { AttachmentLink, ResourceLink, taskLinkMeta } from "@/features/tasks/AttachmentLink";
 import { TaskDescriptionMarkdown } from "@/features/tasks/TaskDescriptionMarkdown";
+import { TaskCommentsPanel } from "@/features/tasks/TaskCommentsPanel";
 import { TaskEditDialog } from "@/features/tasks/TaskEditDialog";
+import { AiPromptWizard } from "@/features/tasks/AiPromptWizard";
+import { TrelloTicketWizard } from "@/features/tasks/TrelloTicketWizard";
 import { isPullRequestResource } from "@/lib/api";
+import { aiPromptIconFor } from "@/lib/aiPromptIcons";
+import { externalLabelStyle } from "@/lib/externalLabels";
 import { shortcutModifier } from "@/lib/keyboardShortcut";
 import { parseSmartInput } from "@/lib/smartInputParser";
+import {
+  createLatestRequestGuard,
+  isClosedReviewState,
+  normalizeReviewDiffFile,
+  normalizeReviewDiffResult,
+  normalizeReviewDrafts,
+} from "@/lib/reviewSession";
 import { taskStatusBadgeLabel } from "@/lib/taskStatus";
+import { canCreateTrelloTicket } from "@/lib/trelloTicket";
 
 const relationTypeOptions = [
   { value: "related", label: "Related" },
   { value: "sub_task", label: "Sub Task" },
 ];
+
+const aiAgentLabels = {
+  codex: "Codex",
+  claude: "Claude",
+};
 const EXTERNAL_REFRESH_STALE_MS = 60 * 1000;
+
+function waitForPaint() {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame !== "function") {
+      setTimeout(resolve, 0);
+      return;
+    }
+    requestAnimationFrame(() => setTimeout(resolve, 0));
+  });
+}
 
 function formatLastSyncedAt(value) {
   if (!value) return "Not synced yet";
@@ -110,9 +143,38 @@ function taskFileMeta(file) {
     .join(" · ");
 }
 
+function ExternalLabels({ labels }) {
+  if (!Array.isArray(labels) || labels.length === 0) return null;
+
+  return (
+    <div className="grid gap-1.5" aria-label="External labels">
+      <p className="text-xs font-medium text-muted-foreground">Labels</p>
+      <div className="flex flex-wrap gap-1.5">
+        {labels.map((label) => {
+          const style = externalLabelStyle(label.color);
+          return (
+            <Badge
+              key={label.name}
+              variant={style ? "outline" : "secondary"}
+              className={style ? "border-transparent" : undefined}
+              style={style}
+              title={label.name}
+            >
+              {label.name}
+            </Badge>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function TaskDetailView({
   task,
   project,
+  aiPrompts = [],
+  localResources = [],
+  onOpenAiPromptThread,
   onRefreshExternalDetails,
   onLoadLinks,
   onLoadRelations,
@@ -122,12 +184,19 @@ export function TaskDetailView({
   onCheckoutPullRequestForReview,
   onLoadReviewDiff,
   onLoadReviewDiffFile,
+  onListReviewCommentDrafts,
+  onSaveReviewCommentDraft,
+  onDeleteReviewCommentDraft,
+  onSubmitReviewComments,
   onSaveRelation,
   onDeleteRelation,
   onLoadProjectTasks,
   onOpenTask,
   onSave,
   onDeleteTask,
+  onLoadTrelloBoards,
+  onLoadTrelloTemplates,
+  onConvertToTrelloTicket,
 }) {
   const [links, setLinks] = useState([]);
   const [relations, setRelations] = useState([]);
@@ -138,6 +207,9 @@ export function TaskDetailView({
   const [showReview, setShowReview] = useState(false);
   const [showActions, setShowActions] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showTrelloWizard, setShowTrelloWizard] = useState(false);
+  const [activeAiPromptId, setActiveAiPromptId] = useState("");
+  const [trelloBoards, setTrelloBoards] = useState([]);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isExternalRefreshing, setIsExternalRefreshing] = useState(false);
   const shortcutKey = shortcutModifier();
@@ -316,6 +388,23 @@ export function TaskDetailView({
     };
   }, [task.id, task.projectId, onLoadProjectTasks]);
 
+  useEffect(() => {
+    let cancelled = false;
+    setTrelloBoards([]);
+    if (!task.projectId || !onLoadTrelloBoards) return () => {};
+
+    onLoadTrelloBoards(task.id)
+      .then((items) => {
+        if (!cancelled) setTrelloBoards(items || []);
+      })
+      .catch(() => {
+        if (!cancelled) setTrelloBoards([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [task.id, task.projectId]);
+
   function refreshRelations(cancelled = false) {
     if (!onLoadRelations) {
       setRelations([]);
@@ -391,24 +480,38 @@ export function TaskDetailView({
     }
     : null);
   const taskFiles = (links[0]?.files || []).filter((file) => file?.url);
+  const supportsComments = Boolean(
+    taskResource && (
+      (taskResource.provider === "trello" && taskResource.kind === "trello_card") ||
+      (taskResource.provider === "github" && taskResource.kind === "pull_request") ||
+      (taskResource.provider === "gitlab" && taskResource.kind === "merge_request")
+    ),
+  );
   const reviewParsed = isPullRequestResource(taskResource) ? parseSmartInput(taskResource.url || "") : null;
+  const isReviewRequestClosed = isClosedReviewState(taskResource?.externalState);
   const statusBadgeLabel = taskStatusBadgeLabel(task);
   const canReviewResource = Boolean(
     task.projectId &&
+    !isReviewRequestClosed &&
     reviewParsed?.repoUrl &&
     onLoadLocalResources &&
     onChooseLocalResourceDirectory &&
     onSaveLocalResource &&
     onCheckoutPullRequestForReview &&
     onLoadReviewDiff &&
-    onLoadReviewDiffFile,
+    onLoadReviewDiffFile &&
+    onListReviewCommentDrafts &&
+    onSaveReviewCommentDraft &&
+    onDeleteReviewCommentDraft &&
+    onSubmitReviewComments,
   );
   const lastSyncedLabel = taskResource ? formatLastSyncedAt(taskResource.fetchedAt) : "";
+  const canConvertToTrello = !taskResource && canCreateTrelloTicket(task, trelloBoards);
 
   return (
-    <div className="flex flex-1 flex-col gap-6 overflow-y-auto p-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div className="min-w-0">
+    <div className="flex flex-1 flex-col gap-6 overflow-y-auto p-6 [scrollbar-gutter:stable]">
+      <div className="flex items-start gap-4">
+        <div className="min-w-0 flex-1">
           <p className="text-xs font-medium uppercase text-muted-foreground">
             {project?.name || "Task"}
           </p>
@@ -418,7 +521,13 @@ export function TaskDetailView({
             {taskResource && <Badge variant="secondary">Has resource</Badge>}
           </div>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          {canConvertToTrello && (
+            <Button type="button" variant="outline" onClick={() => setShowTrelloWizard(true)}>
+              <SquareKanban className="size-4" />
+              Create Trello ticket
+            </Button>
+          )}
           <Button
             type="button"
             title={`Edit task with ${shortcutKey} E`}
@@ -475,6 +584,8 @@ export function TaskDetailView({
             )}
           </Panel>
 
+          {supportsComments && <TaskCommentsPanel comments={taskResource.comments || []} />}
+
           {taskFiles.length > 0 && (
             <Panel title="Files" icon={Paperclip}>
               <div className="grid gap-2">
@@ -503,6 +614,7 @@ export function TaskDetailView({
                     url={taskResource.url}
                     meta={taskLinkMeta(taskResource)}
                   />
+                  <ExternalLabels labels={taskResource.labels} />
                   {onRefreshExternalDetails && (
                     <Button
                       className="w-full"
@@ -540,6 +652,33 @@ export function TaskDetailView({
                     <p className="text-xs text-muted-foreground">{externalRefreshState.notice}</p>
                   )}
                 </>
+              )}
+            </div>
+          </Panel>
+
+          <Panel title="AI Prompts" icon={Bot}>
+            <div className="grid gap-2">
+              {aiPrompts.length === 0 ? (
+                <EmptyState text="No AI Prompts configured." />
+              ) : (
+                aiPrompts.map((prompt) => {
+                  const PromptIcon = aiPromptIconFor(prompt.icon);
+                  return (
+                    <Button
+                      key={prompt.id}
+                      className="w-full justify-start"
+                      type="button"
+                      variant="outline"
+                      onClick={() => setActiveAiPromptId(prompt.id)}
+                    >
+                      <PromptIcon className="size-4" />
+                      <span className="min-w-0 flex-1 truncate text-left">{prompt.name}</span>
+                      <span className="text-xs text-muted-foreground">
+                        {aiAgentLabels[prompt.agentType] || prompt.agentType}
+                      </span>
+                    </Button>
+                  );
+                })
               )}
             </div>
           </Panel>
@@ -598,6 +737,32 @@ export function TaskDetailView({
         />
       )}
 
+      {showTrelloWizard && canConvertToTrello && (
+        <TrelloTicketWizard
+          task={task}
+          boards={trelloBoards}
+          onClose={() => setShowTrelloWizard(false)}
+          onLoadTemplates={onLoadTrelloTemplates}
+          onConvert={async (payload) => {
+            const result = await onConvertToTrelloTicket(payload);
+            setLinks(result.link ? [result.link] : []);
+            setShowTrelloWizard(false);
+          }}
+        />
+      )}
+
+      {activeAiPromptId && (
+        <AiPromptWizard
+          key={activeAiPromptId}
+          task={task}
+          prompts={aiPrompts}
+          initialPromptId={activeAiPromptId}
+          localResources={localResources}
+          onClose={() => setActiveAiPromptId("")}
+          onStart={onOpenAiPromptThread}
+        />
+      )}
+
       {showReview && canReviewResource && (
         <ReviewCheckoutDialog
           task={task}
@@ -610,6 +775,11 @@ export function TaskDetailView({
           onCheckoutPullRequestForReview={onCheckoutPullRequestForReview}
           onLoadReviewDiff={onLoadReviewDiff}
           onLoadReviewDiffFile={onLoadReviewDiffFile}
+          onListReviewCommentDrafts={onListReviewCommentDrafts}
+          onSaveReviewCommentDraft={onSaveReviewCommentDraft}
+          onDeleteReviewCommentDraft={onDeleteReviewCommentDraft}
+          onSubmitReviewComments={onSubmitReviewComments}
+          onSubmitted={(link) => link && setLinks([link])}
         />
       )}
 
@@ -758,6 +928,11 @@ function ReviewCheckoutDialog({
   onCheckoutPullRequestForReview,
   onLoadReviewDiff,
   onLoadReviewDiffFile,
+  onListReviewCommentDrafts,
+  onSaveReviewCommentDraft,
+  onDeleteReviewCommentDraft,
+  onSubmitReviewComments,
+  onSubmitted,
 }) {
   const [localResources, setLocalResources] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -815,6 +990,7 @@ function ReviewCheckoutDialog({
     if (checkoutResourceId) return;
     setCheckoutResourceId(localResource.id);
     setNotice("");
+    await waitForPaint();
     try {
       const result = await onCheckoutPullRequestForReview({
         localResourceId: localResource.id,
@@ -836,64 +1012,167 @@ function ReviewCheckoutDialog({
 
   if (reviewSession) {
     return (
-      <ReviewDiffOverlay
-        session={reviewSession}
-        onClose={onClose}
-        onLoadReviewDiff={onLoadReviewDiff}
-        onLoadReviewDiffFile={onLoadReviewDiffFile}
-      />
+      <ErrorBoundary
+        resetKeys={[task.id, reviewSession.localResourceId, reviewSession.branch]}
+        fallback={({ error, reset }) => (
+          <Modal title="Review could not be displayed" onClose={onClose}>
+            <div className="grid gap-4">
+              <p className="text-sm text-muted-foreground">
+                The checked-out branch and saved review drafts are unchanged.
+              </p>
+              <p className="break-words rounded-md bg-muted p-3 font-mono text-xs text-muted-foreground">
+                {error?.message || String(error)}
+              </p>
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="outline" onClick={onClose}>Close</Button>
+                <Button type="button" onClick={reset}>Retry review</Button>
+              </div>
+            </div>
+          </Modal>
+        )}
+      >
+        <ReviewDiffOverlay
+          taskId={task.id}
+          session={reviewSession}
+          onClose={onClose}
+          onLoadReviewDiff={onLoadReviewDiff}
+          onLoadReviewDiffFile={onLoadReviewDiffFile}
+          onListReviewCommentDrafts={onListReviewCommentDrafts}
+          onSaveReviewCommentDraft={onSaveReviewCommentDraft}
+          onDeleteReviewCommentDraft={onDeleteReviewCommentDraft}
+          onSubmitReviewComments={onSubmitReviewComments}
+          onSubmitted={onSubmitted}
+        />
+      </ErrorBoundary>
     );
   }
+
+  const checkoutResource = localResources.find((item) => item.id === checkoutResourceId);
 
   return (
     <Modal title="Review pull request" onClose={onClose}>
       <div className="grid gap-4">
-        <div className="min-w-0 max-w-full overflow-hidden rounded-md border bg-muted/30 p-3">
-          <p className="min-w-0 truncate font-medium">{parsed.title}</p>
-          <p className="mt-1 min-w-0 truncate text-xs text-muted-foreground">{parsed.repoUrl}</p>
-        </div>
+        <ResourceLink
+          label={parsed.title}
+          url={resource.url}
+          meta={parsed.repoUrl}
+        />
 
-        <Button type="button" variant="outline" disabled={isChoosing} onClick={chooseDirectory}>
-          <FolderOpen className="size-4" />
-          {isChoosing ? "Choosing..." : "Choose another directory"}
-        </Button>
-
-        {isLoading ? (
-          <p className="text-sm text-muted-foreground">Loading local resources...</p>
-        ) : localResources.length === 0 ? (
-          <EmptyState text="No matching local repositories linked." />
+        {checkoutResourceId ? (
+          <div className="flex items-center gap-3 rounded-md border bg-muted/30 p-4" role="status" aria-live="polite">
+            <LoaderCircle className="size-5 shrink-0 animate-spin text-blue-600" />
+            <div className="min-w-0">
+              <p className="font-medium">Preparing review branch</p>
+              <p className="text-sm text-muted-foreground">
+                The branch is being checked out and updated{checkoutResource?.name ? ` in ${checkoutResource.name}` : ""}. This may take a moment.
+              </p>
+            </div>
+          </div>
         ) : (
-          <LocalResourceList
-            localResources={localResources}
-            editable={false}
-            onSelectLocalResource={checkout}
-          />
-        )}
+          <>
+            <Button type="button" variant="outline" disabled={isChoosing} onClick={chooseDirectory}>
+              <FolderOpen className="size-4" />
+              {isChoosing ? "Choosing..." : "Choose another directory"}
+            </Button>
 
-        {checkoutResourceId && (
-          <p className="text-sm text-muted-foreground">Checking out review branch...</p>
+            {isLoading ? (
+              <p className="text-sm text-muted-foreground">Loading local resources...</p>
+            ) : localResources.length === 0 ? (
+              <EmptyState text="No matching local repositories linked." />
+            ) : (
+              <LocalResourceList
+                localResources={localResources}
+                editable={false}
+                onSelectLocalResource={checkout}
+              />
+            )}
+          </>
         )}
-        {notice && <p className="break-words text-sm text-muted-foreground">{notice}</p>}
+        {notice && (
+          <div className="grid gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+            <p className="break-words text-sm text-destructive">{notice}</p>
+            <a className="break-all text-sm text-blue-700 underline" href={resource.url} target="_blank" rel="noreferrer">
+              Open {parsed.provider === "github" ? "pull request" : "merge request"}
+            </a>
+          </div>
+        )}
       </div>
     </Modal>
   );
 }
 
-function ReviewDiffOverlay({ session, onClose, onLoadReviewDiff, onLoadReviewDiffFile }) {
+function ReviewDiffOverlay({
+  taskId,
+  session,
+  onClose,
+  onLoadReviewDiff,
+  onLoadReviewDiffFile,
+  onListReviewCommentDrafts,
+  onSaveReviewCommentDraft,
+  onDeleteReviewCommentDraft,
+  onSubmitReviewComments,
+  onSubmitted,
+}) {
   const [isLoading, setIsLoading] = useState(true);
   const [isFileLoading, setIsFileLoading] = useState(false);
   const [reviewDiff, setReviewDiff] = useState(null);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [currentFile, setCurrentFile] = useState(null);
+  const [drafts, setDrafts] = useState([]);
+  const [overallBody, setOverallBody] = useState("");
+  const [isDraftsLoading, setIsDraftsLoading] = useState(true);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showSubmitConfirm, setShowSubmitConfirm] = useState(false);
   const [notice, setNotice] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const draftRequestGuardRef = useRef(null);
+  const diffRequestGuardRef = useRef(null);
+  const fileRequestGuardRef = useRef(null);
+  const loadedSessionKeyRef = useRef("");
+  if (!draftRequestGuardRef.current) draftRequestGuardRef.current = createLatestRequestGuard();
+  if (!diffRequestGuardRef.current) diffRequestGuardRef.current = createLatestRequestGuard();
+  if (!fileRequestGuardRef.current) fileRequestGuardRef.current = createLatestRequestGuard();
+
+  useEffect(() => () => {
+    fileRequestGuardRef.current.invalidate();
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
+    const guard = draftRequestGuardRef.current;
+    const request = guard.begin();
+    setIsDraftsLoading(true);
+    onListReviewCommentDrafts({ taskId })
+      .then((items) => {
+        if (!guard.isCurrent(request)) return;
+        const normalizedDrafts = normalizeReviewDrafts(items);
+        setDrafts(normalizedDrafts);
+        setOverallBody(normalizedDrafts.find((draft) => draft.kind === "overall")?.body || "");
+      })
+      .catch((error) => {
+        if (guard.isCurrent(request)) setNotice(error?.message || String(error));
+      })
+      .finally(() => {
+        if (guard.isCurrent(request)) setIsDraftsLoading(false);
+      });
+    return () => {
+      guard.invalidate();
+    };
+  }, [onListReviewCommentDrafts, taskId]);
+
+  useEffect(() => {
+    const guard = diffRequestGuardRef.current;
+    const request = guard.begin();
+    const sessionKey = [session.localResourceId, session.branch, session.baseRef || ""].join("\n");
+    if (loadedSessionKeyRef.current !== sessionKey) {
+      loadedSessionKeyRef.current = sessionKey;
+      setReviewDiff(null);
+      setCurrentFile(null);
+      setCurrentIndex(0);
+    }
     setIsLoading(true);
     setNotice("");
-    setReviewDiff(null);
-    setCurrentFile(null);
-    setCurrentIndex(0);
+    setLoadError("");
 
     onLoadReviewDiff({
       localResourceId: session.localResourceId,
@@ -901,110 +1180,268 @@ function ReviewDiffOverlay({ session, onClose, onLoadReviewDiff, onLoadReviewDif
       baseRef: session.baseRef,
     })
       .then((result) => {
-        if (cancelled) return;
-        setReviewDiff(result);
-        setCurrentFile(result.currentFile || null);
+        if (!guard.isCurrent(request)) return;
+        const normalizedResult = normalizeReviewDiffResult(result);
+        setReviewDiff(normalizedResult);
+        setCurrentFile(normalizedResult.currentFile);
+        setCurrentIndex(0);
       })
       .catch((error) => {
-        if (cancelled) return;
-        setNotice(error?.message || String(error));
+        if (!guard.isCurrent(request)) return;
+        const message = error?.message || String(error);
+        setLoadError(message);
+        setNotice(message);
       })
       .finally(() => {
-        if (!cancelled) {
+        if (guard.isCurrent(request)) {
           setIsLoading(false);
         }
       });
 
     return () => {
-      cancelled = true;
+      guard.invalidate();
     };
-  }, [session.localResourceId, session.branch, onLoadReviewDiff]);
+  }, [loadAttempt, onLoadReviewDiff, session.baseRef, session.branch, session.localResourceId]);
 
-  async function showFile(index) {
+  const showFile = useCallback(async (index) => {
     if (!reviewDiff || isFileLoading || index < 0 || index >= reviewDiff.files.length) return;
     const path = reviewDiff.files[index];
+    const guard = fileRequestGuardRef.current;
+    const request = guard.begin();
     setIsFileLoading(true);
     setNotice("");
     try {
-      const file = await onLoadReviewDiffFile({
+      const result = await onLoadReviewDiffFile({
         localResourceId: session.localResourceId,
         baseRef: reviewDiff.baseRef,
         branch: reviewDiff.branch,
         path,
       });
+      if (!guard.isCurrent(request)) return;
+      const file = normalizeReviewDiffFile(result, path);
       setCurrentIndex(index);
       setCurrentFile(file);
     } catch (error) {
-      setNotice(error?.message || String(error));
+      if (guard.isCurrent(request)) setNotice(error?.message || String(error));
     } finally {
-      setIsFileLoading(false);
+      if (guard.isCurrent(request)) setIsFileLoading(false);
     }
-  }
+  }, [isFileLoading, onLoadReviewDiffFile, reviewDiff, session.localResourceId]);
 
   const files = reviewDiff?.files || [];
   const hasFiles = files.length > 0;
   const currentPath = currentFile?.path || files[currentIndex] || "";
+  const baseRef = reviewDiff?.baseRef || session.baseRef;
+  const branch = reviewDiff?.branch || session.branch;
+  const inlineDrafts = drafts.filter((draft) => draft.kind === "inline");
+  const overallDraft = drafts.find((draft) => draft.kind === "overall");
+  const currentFileDraftCount = inlineDrafts.filter((draft) => draft.path === currentPath).length;
+  const staleDrafts = reviewDiff?.headSha ? inlineDrafts.filter(
+    (draft) => draft.headSha && draft.headSha !== reviewDiff.headSha,
+  ) : [];
+  const hasStaleDrafts = staleDrafts.length > 0;
+
+  async function saveDraft(input) {
+    setNotice("");
+    try {
+      const saved = await onSaveReviewCommentDraft({ ...input, taskId });
+      setDrafts((current) => [saved, ...current.filter((draft) => draft.id !== saved.id)]);
+      return saved;
+    } catch (error) {
+      setNotice(error?.message || String(error));
+      throw error;
+    }
+  }
+
+  async function deleteDraft(id) {
+    setNotice("");
+    try {
+      await onDeleteReviewCommentDraft({ id });
+      setDrafts((current) => current.filter((draft) => draft.id !== id));
+    } catch (error) {
+      setNotice(error?.message || String(error));
+    }
+  }
+
+  async function submitReview() {
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    setNotice("");
+    try {
+      const result = await onSubmitReviewComments({ taskId, overallBody });
+      setDrafts(result.remainingDrafts || []);
+      setNotice(result.notice || "Review comments published.");
+      onSubmitted?.(result.link);
+      if ((result.failures || []).length === 0) {
+        setOverallBody("");
+        setShowSubmitConfirm(false);
+      }
+    } catch (error) {
+      setNotice(error?.message || String(error));
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  useEffect(() => {
+    function handleKeyDown(event) {
+      if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
+        return;
+      }
+
+      if (event.key === "ArrowLeft" && currentIndex > 0) {
+        event.preventDefault();
+        showFile(currentIndex - 1);
+      } else if (event.key === "ArrowRight" && currentIndex < files.length - 1) {
+        event.preventDefault();
+        showFile(currentIndex + 1);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [currentIndex, files.length, showFile]);
 
   return (
     <Modal
-      title="Review diff"
-      onClose={onClose}
-      contentClassName="h-[calc(100vh-3rem)] max-h-[calc(100vh-3rem)] w-[calc(100vw-3rem)] max-w-[calc(100vw-3rem)] sm:max-w-[calc(100vw-3rem)]"
-    >
-      <div className="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)_auto] gap-4 overflow-hidden">
-        <div className="grid gap-4">
-          <div className="min-w-0 max-w-full overflow-hidden rounded-md border bg-muted/30 p-3">
-            <p className="min-w-0 truncate font-medium">{currentPath || session.branch}</p>
-            <p className="mt-1 min-w-0 truncate text-xs text-muted-foreground">
-              {reviewDiff ? `${reviewDiff.baseRef} -> ${reviewDiff.branch}` : session.path}
-            </p>
-          </div>
-
-          {hasFiles && (
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className="text-sm text-muted-foreground">
-                {currentIndex + 1} / {files.length}
-              </p>
-              <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={currentIndex === 0 || isFileLoading}
-                  onClick={() => showFile(currentIndex - 1)}
-                >
-                  <ChevronLeft className="size-4" />
-                  Prev
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={currentIndex >= files.length - 1 || isFileLoading}
-                  onClick={() => showFile(currentIndex + 1)}
-                >
-                  Next
-                  <ChevronRight className="size-4" />
-                </Button>
-              </div>
-            </div>
+      title={(
+        <span className="flex min-w-0 items-baseline gap-2 pr-8">
+          <span className="shrink-0">Review diff</span>
+          {(baseRef || branch) && (
+            <span className="truncate text-xs font-normal text-muted-foreground">
+              {baseRef && branch ? `${baseRef} → ${branch}` : branch || baseRef}
+            </span>
           )}
-        </div>
+        </span>
+      )}
+      onClose={onClose}
+      contentClassName="h-[calc(100dvh-3rem)] w-[calc(100vw-3rem)] max-w-[calc(100vw-3rem)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden sm:max-w-[calc(100vw-3rem)]"
+    >
+      <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto] gap-4 overflow-hidden">
+        {hasFiles ? (
+          <div className="flex min-w-0 items-center justify-between gap-3">
+            <p className="flex min-w-0 items-baseline gap-2 text-sm">
+              <span className="shrink-0 text-muted-foreground">
+                {currentIndex + 1} / {files.length}
+              </span>
+              <span className="truncate font-medium" title={currentPath}>{currentPath}</span>
+              {currentFileDraftCount > 0 && <Badge variant="outline">{currentFileDraftCount} draft{currentFileDraftCount === 1 ? "" : "s"}</Badge>}
+            </p>
+            <div className="flex shrink-0 items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={currentIndex === 0 || isFileLoading}
+                onClick={() => showFile(currentIndex - 1)}
+              >
+                <ChevronLeft className="size-4" />
+                Prev
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={currentIndex >= files.length - 1 || isFileLoading}
+                onClick={() => showFile(currentIndex + 1)}
+              >
+                Next
+                <ChevronRight className="size-4" />
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <span />
+        )}
 
         <div className="min-h-0 overflow-hidden">
-          {isLoading ? (
+          {isLoading && !reviewDiff ? (
             <p className="text-sm text-muted-foreground">Loading diff...</p>
+          ) : loadError && !reviewDiff ? (
+            <div className="grid place-items-center gap-3 rounded-md border border-destructive/30 bg-destructive/5 p-6 text-center">
+              <p className="max-w-xl break-words text-sm text-destructive">{loadError}</p>
+              <Button type="button" variant="outline" onClick={() => setLoadAttempt((attempt) => attempt + 1)}>
+                <RefreshCw className="size-4" />
+                Retry loading review
+              </Button>
+            </div>
           ) : !hasFiles ? (
             <EmptyState text="No changed files found." />
+          ) : isFileLoading ? (
+            <pre className="max-h-full overflow-auto rounded-md border bg-muted/30 p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap">
+              Loading file diff...
+            </pre>
+          ) : currentFile?.diff ? (
+            <ReviewDiff
+              key={currentPath}
+              path={currentPath}
+              oldPath={currentFile.oldPath}
+              newPath={currentFile.newPath}
+              diff={currentFile.diff}
+              drafts={inlineDrafts}
+              headSha={reviewDiff.headSha}
+              disabled={isSubmitting}
+              onSaveDraft={saveDraft}
+              onDeleteDraft={deleteDraft}
+            />
           ) : (
-            <pre className="h-full overflow-auto rounded-md border bg-muted/30 p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap">
-              {isFileLoading ? "Loading file diff..." : currentFile?.diff || "No diff for this file."}
+            <pre className="max-h-full overflow-auto rounded-md border bg-muted/30 p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap">
+              No diff for this file.
             </pre>
           )}
         </div>
 
-        {notice && <p className="break-words text-sm text-muted-foreground">{notice}</p>}
+        <div className="grid gap-3 border-t pt-3">
+          {hasStaleDrafts && (
+            <div className="grid gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-sm text-amber-950">
+              <p>Some inline drafts belong to an older revision. Re-anchor or delete them before submitting.</p>
+              {staleDrafts.map((draft) => (
+                <div key={draft.id} className="flex items-start gap-2 rounded border border-amber-300/70 bg-white/60 p-2">
+                  <p className="min-w-0 flex-1">
+                    <span className="font-mono text-xs">{draft.path}:{draft.side === "LEFT" ? draft.oldLine : draft.newLine}</span>
+                    <span className="ml-2 break-words">{draft.body}</span>
+                  </p>
+                  <Button type="button" variant="ghost" size="sm" disabled={isSubmitting} onClick={() => deleteDraft(draft.id)}>Delete</Button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-sm text-muted-foreground">
+              {inlineDrafts.length} inline draft{inlineDrafts.length === 1 ? "" : "s"}
+            </p>
+            <Button type="button" disabled={hasStaleDrafts || isSubmitting || isDraftsLoading} onClick={() => setShowSubmitConfirm(true)}>
+              Submit review
+            </Button>
+          </div>
+          {overallDraft?.lastError && <p className="text-xs text-destructive">{overallDraft.lastError}</p>}
+          {notice && <p className="break-words text-sm text-muted-foreground">{notice}</p>}
+        </div>
       </div>
+      {showSubmitConfirm && (
+        <Modal title="Submit review" onClose={() => !isSubmitting && setShowSubmitConfirm(false)} contentClassName="sm:max-w-xl">
+          <div className="grid gap-4">
+            <p className="text-sm text-muted-foreground">
+              {inlineDrafts.length} inline comment{inlineDrafts.length === 1 ? "" : "s"} will be published.
+            </p>
+            <Textarea
+              autoFocus
+              className="min-h-28"
+              value={overallBody}
+              placeholder="Overall comment (optional)"
+              disabled={isSubmitting}
+              onChange={(event) => setOverallBody(event.target.value)}
+            />
+            {notice && <p className="break-words text-sm text-destructive">{notice}</p>}
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="ghost" disabled={isSubmitting} onClick={() => setShowSubmitConfirm(false)}>Cancel</Button>
+              <Button type="button" disabled={isSubmitting || (inlineDrafts.length === 0 && !overallBody.trim())} onClick={submitReview}>
+                {isSubmitting ? "Publishing…" : "Publish review"}
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </Modal>
   );
 }

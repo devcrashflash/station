@@ -1,19 +1,46 @@
-import { useEffect, useState } from "react";
-import { FolderOpen, LoaderCircle, Monitor, Pencil, PlugZap, RotateCcw, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { AtSign, Bot, CalendarDays, FolderOpen, GitMerge, GitPullRequest, LoaderCircle, Monitor, Pencil, PlugZap, RefreshCw, RotateCcw, SquareKanban, Trash2, UserRound } from "lucide-react";
 
 import { EmptyState } from "@/components/common/EmptyState";
 import { Modal } from "@/components/common/Modal";
 import { SelectControl } from "@/components/common/SelectControl";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { aiPromptIconFor, aiPromptIconOptions } from "@/lib/aiPromptIcons";
 import { cn } from "@/lib/utils";
 
 const providerOptions = [
   { value: "gitlab", label: "GitLab" },
   { value: "github", label: "GitHub" },
   { value: "trello", label: "Trello" },
+];
+
+const accountAddOptions = [
+  { value: "google", label: "Google", icon: AtSign },
+  { value: "github", label: "GitHub", icon: GitPullRequest },
+  { value: "gitlab", label: "GitLab", icon: GitMerge },
+  { value: "trello", label: "Trello", icon: SquareKanban },
+  { value: "calendar", label: "Calendar", icon: CalendarDays },
+];
+
+const calendarKindOptions = [
+  { value: "caldav", label: "CalDAV account" },
+  { value: "ical", label: "iCal URL" },
+];
+
+const calendarTypeLabels = {
+  google: "Google Calendar",
+  caldav: "CalDAV",
+  ical: "iCal URL",
+};
+
+const aiAgentTypeOptions = [
+  { value: "codex", label: "Codex" },
+  { value: "claude", label: "Claude" },
 ];
 
 const permissionHints = {
@@ -24,7 +51,8 @@ const permissionHints = {
 
 const TRELLO_BASE_URL = "https://api.trello.com";
 const settingsSections = [
-  { id: "endpoints", label: "Endpoints", description: "Global endpoint settings", icon: PlugZap },
+  { id: "accounts", label: "Accounts", description: "Connected services", icon: UserRound },
+  { id: "ai-prompts", label: "AI Prompts", description: "Reusable AI instructions", icon: Bot },
   { id: "directories", label: "Directories", description: "Local source folders", icon: FolderOpen },
   { id: "browser", label: "Browser", description: "New tab behavior", icon: Monitor },
 ];
@@ -53,26 +81,37 @@ function credentialUrl(provider, baseUrl, apiKey) {
 
 export function SettingsDialog({
   connections,
+  aiPrompts,
   directories,
   browserSettings,
+  calendarAccounts = [],
+  initialSection = "accounts",
   onClose,
   onSave,
   onDelete,
   onTest,
+  onSaveAiPrompt,
+  onDeleteAiPrompt,
   onChooseDirectory,
   onSaveDirectory,
   onDeleteDirectory,
   onSaveBrowserSettings,
+  onSaveCalendarSubscription,
+  onSaveCalDavAccount,
+  onConnectGoogleAccount,
+  onCancelGoogleAccount,
+  onUpdateCalendarService,
+  onRefreshCalendarCollections,
+  onUpdateCalendarCollections,
+  onTestCalendarAccount,
+  onDeleteCalendarAccount,
 }) {
-  const [activeTab, setActiveTab] = useState("endpoints");
-  const [provider, setProvider] = useState("gitlab");
-  const [name, setName] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
-  const [apiKey, setApiKey] = useState("");
-  const [token, setToken] = useState("");
-  const [editingConnectionId, setEditingConnectionId] = useState(null);
-  const [testingConnectionId, setTestingConnectionId] = useState(null);
-  const [testResults, setTestResults] = useState({});
+  const [activeTab, setActiveTab] = useState(initialSection);
+  const [aiPromptAgentType, setAiPromptAgentType] = useState("codex");
+  const [aiPromptName, setAiPromptName] = useState("");
+  const [aiPromptIcon, setAiPromptIcon] = useState("sparkles");
+  const [aiPromptText, setAiPromptText] = useState("");
+  const [editingAiPromptId, setEditingAiPromptId] = useState(null);
   const [isChoosingDirectory, setIsChoosingDirectory] = useState(false);
   const [directoryNotice, setDirectoryNotice] = useState("");
   const [browserBundleId, setBrowserBundleId] = useState(browserSettings?.browserBundleId || "");
@@ -82,63 +121,37 @@ export function SettingsDialog({
     setBrowserBundleId(browserSettings?.browserBundleId || "");
   }, [browserSettings?.browserBundleId]);
 
-  function resetForm() {
-    setProvider("gitlab");
-    setName("");
-    setBaseUrl("");
-    setApiKey("");
-    setToken("");
-    setEditingConnectionId(null);
+  function resetAiPromptForm() {
+    setAiPromptAgentType("codex");
+    setAiPromptName("");
+    setAiPromptIcon("sparkles");
+    setAiPromptText("");
+    setEditingAiPromptId(null);
   }
 
-  function editConnection(connection) {
-    setEditingConnectionId(connection.id);
-    setProvider(connection.provider);
-    setName(connection.name);
-    setBaseUrl(connection.provider === "trello" ? "" : connection.baseUrl);
-    setApiKey(connection.apiKey || "");
-    setToken(connection.token || "");
+  function editAiPrompt(prompt) {
+    setAiPromptAgentType(prompt.agentType);
+    setAiPromptName(prompt.name);
+    setAiPromptIcon(prompt.icon || "sparkles");
+    setAiPromptText(prompt.promptText || "");
+    setEditingAiPromptId(prompt.id);
   }
 
-  async function submit(event) {
+  async function submitAiPrompt(event) {
     event.preventDefault();
-    const savedConnectionId = editingConnectionId;
-    await onSave({
-      id: editingConnectionId,
-      provider,
-      name,
-      baseUrl: provider === "trello" ? TRELLO_BASE_URL : baseUrl,
-      apiKey: provider === "trello" ? apiKey : null,
-      token,
-    });
-    resetForm();
-    if (savedConnectionId) {
-      setTestResults((current) => {
-        const next = { ...current };
-        delete next[savedConnectionId];
-        return next;
-      });
-    }
-  }
-
-  async function testConnection(connectionId) {
-    setTestingConnectionId(connectionId);
-    setTestResults((current) => ({
-      ...current,
-      [connectionId]: { ok: null, message: "Testing connection..." },
-    }));
     try {
-      const result = await onTest(connectionId);
-      setTestResults((current) => ({
-        ...current,
-        [connectionId]: result,
-      }));
-    } finally {
-      setTestingConnectionId(null);
+      await onSaveAiPrompt({
+        id: editingAiPromptId,
+        agentType: aiPromptAgentType,
+        name: aiPromptName,
+        icon: aiPromptIcon,
+        promptText: aiPromptText,
+      });
+      resetAiPromptForm();
+    } catch {
+      // The app-level handler presents the error notice and keeps the form intact.
     }
   }
-
-  const tokenUrl = credentialUrl(provider, baseUrl, apiKey);
 
   return (
     <Modal
@@ -163,57 +176,68 @@ export function SettingsDialog({
 
         <main className="min-h-0 overflow-y-auto px-4 py-5 sm:px-8 sm:py-6">
           <div className="mx-auto grid w-full max-w-3xl gap-6">
-            {activeTab === "endpoints" && (
-              <>
-                <form className="grid gap-3" onSubmit={submit}>
+            {activeTab === "accounts" && (
+              <AccountsSettingsTab
+                connections={connections}
+                calendarAccounts={calendarAccounts}
+                onSaveConnection={onSave}
+                onDeleteConnection={onDelete}
+                onTestConnection={onTest}
+                onSaveSubscription={onSaveCalendarSubscription}
+                onSaveCalDav={onSaveCalDavAccount}
+                onConnectGoogle={onConnectGoogleAccount}
+                onCancelGoogle={onCancelGoogleAccount}
+                onUpdateService={onUpdateCalendarService}
+                onRefreshCalendars={onRefreshCalendarCollections}
+                onUpdateCollections={onUpdateCalendarCollections}
+                onTestCalendar={onTestCalendarAccount}
+                onDeleteCalendar={onDeleteCalendarAccount}
+              />
+            )}
+
+            {activeTab === "ai-prompts" && (
+              <div className="grid gap-6">
+                <form className="grid gap-3" onSubmit={submitAiPrompt}>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <Field>
+                      <FieldLabel>AI Agent</FieldLabel>
+                      <SelectControl
+                        value={aiPromptAgentType}
+                        onValueChange={setAiPromptAgentType}
+                        options={aiAgentTypeOptions}
+                      />
+                    </Field>
+                    <Field>
+                      <FieldLabel>Workflow icon</FieldLabel>
+                      <SelectControl
+                        value={aiPromptIcon}
+                        onValueChange={setAiPromptIcon}
+                        options={aiPromptIconOptions}
+                      />
+                    </Field>
+                  </div>
                   <Field>
-                    <FieldLabel>Provider</FieldLabel>
-                    <SelectControl value={provider} onValueChange={setProvider} options={providerOptions} />
+                    <FieldLabel>Name</FieldLabel>
+                    <Input
+                      value={aiPromptName}
+                      onChange={(event) => setAiPromptName(event.target.value)}
+                      placeholder="e.g. Implement ticket"
+                      required
+                    />
                   </Field>
                   <Field>
-                    <FieldLabel>Connection name</FieldLabel>
-                    <Input value={name} onChange={(event) => setName(event.target.value)} required />
-                  </Field>
-                  {provider === "trello" ? (
-                    <p className="rounded-md border bg-muted p-3 text-sm text-muted-foreground">
-                      Trello uses the fixed cloud API. Enter the API key and token from your Trello developer app.
-                    </p>
-                  ) : (
-                    <Field>
-                      <FieldLabel>Base URL</FieldLabel>
-                      <Input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} required />
-                    </Field>
-                  )}
-                  {provider === "trello" && (
-                    <Field>
-                      <FieldLabel>API key</FieldLabel>
-                      <Input value={apiKey} type="password" onChange={(event) => setApiKey(event.target.value)} required />
-                    </Field>
-                  )}
-                  <Field>
-                    <FieldLabel>{provider === "trello" ? "API token" : "Token"}</FieldLabel>
-                    <Input value={token} type="password" onChange={(event) => setToken(event.target.value)} required />
-                    <div className="grid gap-1 text-xs text-muted-foreground">
-                      <p>{permissionHints[provider]}</p>
-                      {tokenUrl && (
-                        <a
-                          className="font-medium text-blue-700 underline-offset-2 hover:underline"
-                          href={tokenUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          Generate token
-                        </a>
-                      )}
-                      {provider === "trello" && !tokenUrl && (
-                        <span className="font-medium text-muted-foreground">Enter an API key to generate a token.</span>
-                      )}
-                    </div>
+                    <FieldLabel>Prompt text</FieldLabel>
+                    <Textarea
+                      value={aiPromptText}
+                      onChange={(event) => setAiPromptText(event.target.value)}
+                      placeholder="Optional instructions added before the ticket details"
+                      rows={8}
+                    />
                   </Field>
                   <div className="flex flex-wrap gap-2">
-                    <Button type="submit">{editingConnectionId ? "Update connection" : "Save connection"}</Button>
-                    {editingConnectionId && (
-                      <Button type="button" variant="outline" onClick={resetForm}>
+                    <Button type="submit">{editingAiPromptId ? "Update AI Prompt" : "Save AI Prompt"}</Button>
+                    {editingAiPromptId && (
+                      <Button type="button" variant="outline" onClick={resetAiPromptForm}>
                         Cancel edit
                       </Button>
                     )}
@@ -221,33 +245,27 @@ export function SettingsDialog({
                 </form>
 
                 <div className="grid gap-2">
-                  {connections.map((connection) => {
-                    const testResult = testResults[connection.id];
-                    return (
-                      <div key={connection.id} className="flex items-start gap-2 rounded-md border p-3">
+                  {aiPrompts.length === 0 ? (
+                    <EmptyState text="No AI Prompts configured yet." />
+                  ) : (
+                    aiPrompts.map((prompt) => (
+                      <div key={prompt.id} className="flex items-center gap-2 rounded-md border p-3">
+                        <AiPromptIcon name={prompt.icon} />
                         <div className="min-w-0 flex-1">
-                          <p className="font-medium">{connection.name}</p>
-                          <p className="truncate text-xs text-muted-foreground">
-                            {connection.provider} · {connection.provider === "trello" ? "Cloud API" : connection.baseUrl}
+                          <p className="truncate font-medium">{prompt.name}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {aiAgentTypeOptions.find((option) => option.value === prompt.agentType)?.label || prompt.agentType}
                           </p>
-                          {testResult && (
-                            <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2">
-                              <Badge
-                                variant={testResult.ok === false ? "destructive" : "secondary"}
-                                className={cn(testResult.ok === true && "bg-green-100 text-green-800")}
-                              >
-                                {testResult.ok === null ? "Testing" : testResult.ok ? "Connected" : "Failed"}
-                              </Badge>
-                              <p className="min-w-0 flex-1 text-xs text-muted-foreground">{testResult.message}</p>
-                            </div>
+                          {prompt.promptText && (
+                            <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{prompt.promptText}</p>
                           )}
                         </div>
                         <Button
                           size="icon-sm"
                           variant="ghost"
                           type="button"
-                          title="Edit connection"
-                          onClick={() => editConnection(connection)}
+                          title="Edit AI Prompt"
+                          onClick={() => editAiPrompt(prompt)}
                         >
                           <Pencil />
                         </Button>
@@ -255,36 +273,19 @@ export function SettingsDialog({
                           size="icon-sm"
                           variant="ghost"
                           type="button"
-                          title="Test connection"
-                          disabled={testingConnectionId === connection.id}
-                          onClick={() => testConnection(connection.id)}
-                        >
-                          {testingConnectionId === connection.id ? <LoaderCircle className="animate-spin" /> : <PlugZap />}
-                        </Button>
-                        <Button
-                          size="icon-sm"
-                          variant="ghost"
-                          type="button"
-                          title="Delete connection"
+                          title="Delete AI Prompt"
                           onClick={() => {
-                            if (editingConnectionId === connection.id) {
-                              resetForm();
-                            }
-                            onDelete(connection.id);
-                            setTestResults((current) => {
-                              const next = { ...current };
-                              delete next[connection.id];
-                              return next;
-                            });
+                            if (editingAiPromptId === prompt.id) resetAiPromptForm();
+                            onDeleteAiPrompt(prompt.id).catch(() => {});
                           }}
                         >
                           <Trash2 />
                         </Button>
                       </div>
-                    );
-                  })}
+                    ))
+                  )}
                 </div>
-              </>
+              </div>
             )}
 
             {activeTab === "directories" && (
@@ -350,6 +351,269 @@ export function SettingsDialog({
       </div>
     </Modal>
   );
+}
+
+function AccountsSettingsTab({ connections, calendarAccounts, onSaveConnection, onDeleteConnection, onTestConnection, onSaveSubscription, onSaveCalDav, onConnectGoogle, onCancelGoogle, onUpdateService, onRefreshCalendars, onUpdateCollections, onTestCalendar, onDeleteCalendar }) {
+  const [editor, setEditor] = useState(null);
+  const [fields, setFields] = useState({});
+  const [calendarKind, setCalendarKind] = useState("caldav");
+  const [busyKey, setBusyKey] = useState("");
+  const [editorError, setEditorError] = useState("");
+  const [actionNotice, setActionNotice] = useState("");
+  const [testResults, setTestResults] = useState({});
+  const googleConnectRunRef = useRef(0);
+
+  function resetEditor(nextEditor = null, nextFields = {}, nextCalendarKind = "caldav") {
+    setEditor(nextEditor);
+    setFields(nextFields);
+    setCalendarKind(nextCalendarKind);
+    setEditorError("");
+    setBusyKey("");
+  }
+
+  function openCreate(type) {
+    resetEditor(
+      { mode: "create", type },
+      type === "github" ? { baseUrl: "https://github.com" } : type === "gitlab" ? { baseUrl: "https://gitlab.com" } : {},
+    );
+  }
+
+  function editConnection(connection) {
+    resetEditor({ mode: "edit", type: connection.provider, id: connection.id }, {
+      name: connection.name,
+      baseUrl: connection.provider === "trello" ? "" : connection.baseUrl,
+      apiKey: connection.apiKey || "",
+      token: connection.token || "",
+    });
+  }
+
+  function editCalendar(account) {
+    if (account.provider === "google") {
+      resetEditor({ mode: "edit", type: "google", id: account.id }, { name: account.name });
+      return;
+    }
+    const kind = account.provider === "ical" ? "ical" : "caldav";
+    resetEditor({ mode: "edit", type: "calendar", id: account.id }, kind === "ical" ? {
+      name: account.name,
+      url: "",
+      color: account.calendars?.[0]?.color || "#64748b",
+    } : {
+      name: account.name,
+      serverUrl: account.serverUrl,
+      username: account.username || "",
+      password: "",
+    }, kind);
+  }
+
+  function setField(name, value) {
+    setFields((current) => ({ ...current, [name]: value }));
+  }
+
+  async function submitDeveloper(event) {
+    event.preventDefault();
+    setBusyKey("editor");
+    setEditorError("");
+    try {
+      await onSaveConnection({
+        id: editor.mode === "edit" ? editor.id : null,
+        provider: editor.type,
+        name: fields.name || "",
+        baseUrl: editor.type === "trello" ? TRELLO_BASE_URL : fields.baseUrl || "",
+        apiKey: editor.type === "trello" ? fields.apiKey || "" : null,
+        token: fields.token || "",
+      });
+      if (editor.id) setTestResults((current) => ({ ...current, [editor.id]: undefined }));
+      resetEditor();
+    } catch (error) {
+      setEditorError(error?.message || String(error));
+      setBusyKey("");
+    }
+  }
+
+  async function submitCalendar(event) {
+    event.preventDefault();
+    setBusyKey("editor");
+    setEditorError("");
+    try {
+      if (calendarKind === "caldav") {
+        await onSaveCalDav({ id: editor.mode === "edit" ? editor.id : null, name: fields.name || "", serverUrl: fields.serverUrl || "", username: fields.username || "", password: fields.password || "" });
+      } else {
+        await onSaveSubscription({ id: editor.mode === "edit" ? editor.id : null, name: fields.name || "", url: fields.url || "", color: fields.color || "#64748b" });
+      }
+      resetEditor();
+    } catch (error) {
+      setEditorError(error?.message || String(error));
+      setBusyKey("");
+    }
+  }
+
+  async function connectGoogle() {
+    const run = googleConnectRunRef.current + 1;
+    googleConnectRunRef.current = run;
+    setBusyKey("google-connect");
+    setEditorError("");
+    try {
+      await onConnectGoogle(editor.mode === "edit" ? editor.id : null);
+      if (googleConnectRunRef.current !== run) return;
+      resetEditor();
+    } catch (error) {
+      if (googleConnectRunRef.current !== run) return;
+      setEditorError(error?.message || String(error));
+      setBusyKey("");
+    }
+  }
+
+  async function cancelGoogle() {
+    googleConnectRunRef.current += 1;
+    setBusyKey("google-cancel");
+    setEditorError("");
+    try {
+      await onCancelGoogle();
+      resetEditor();
+    } catch (error) {
+      setEditorError(error?.message || String(error));
+      setBusyKey("");
+    }
+  }
+
+  async function runAction(key, action, success) {
+    setBusyKey(key);
+    setActionNotice("");
+    try {
+      const result = await action();
+      setActionNotice(typeof success === "function" ? success(result) : success);
+      return result;
+    } catch (error) {
+      setActionNotice(error?.message || String(error));
+      throw error;
+    } finally {
+      setBusyKey("");
+    }
+  }
+
+  async function testDeveloper(id) {
+    setTestResults((current) => ({ ...current, [id]: { ok: null, message: "Testing connection..." } }));
+    const result = await runAction(`test:${id}`, () => onTestConnection(id), "Connection tested.").catch((error) => ({ ok: false, message: error?.message || String(error) }));
+    setTestResults((current) => ({ ...current, [id]: result }));
+  }
+
+  const tokenUrl = editor && ["github", "gitlab", "trello"].includes(editor.type)
+    ? credentialUrl(editor.type, fields.baseUrl || "", fields.apiKey || "")
+    : "";
+  const savedCount = connections.length + calendarAccounts.length;
+  const groups = [
+    { id: "google", label: "Google", icon: AtSign, items: calendarAccounts.filter((item) => item.provider === "google"), kind: "calendar" },
+    { id: "github", label: "GitHub", icon: GitPullRequest, items: connections.filter((item) => item.provider === "github"), kind: "developer" },
+    { id: "gitlab", label: "GitLab", icon: GitMerge, items: connections.filter((item) => item.provider === "gitlab"), kind: "developer" },
+    { id: "trello", label: "Trello", icon: SquareKanban, items: connections.filter((item) => item.provider === "trello"), kind: "developer" },
+    { id: "caldav", label: "CalDAV", icon: CalendarDays, items: calendarAccounts.filter((item) => item.provider === "caldav"), kind: "calendar" },
+    { id: "ical", label: "Calendar URLs", icon: CalendarDays, items: calendarAccounts.filter((item) => item.provider === "ical"), kind: "calendar" },
+  ];
+
+  return (
+    <div className="grid gap-6">
+      <div>
+        <h2 className="text-xl font-semibold">Accounts</h2>
+        <p className="mt-1 text-sm text-muted-foreground">Connect the services and calendars you use. You can add more than one account for each provider.</p>
+      </div>
+
+      <div className="grid gap-4 rounded-md border bg-muted/20 p-4">
+        <div>
+          <p className="font-medium">Add account</p>
+          <p className="mt-1 text-sm text-muted-foreground">Choose a provider to configure it here.</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {accountAddOptions.map((option) => {
+            const Icon = option.icon;
+            return <Button key={option.value} type="button" disabled={busyKey === "google-connect" || busyKey === "google-cancel"} variant={editor?.type === option.value && editor?.mode === "create" ? "secondary" : "outline"} onClick={() => openCreate(option.value)}>
+              <Icon />{option.label}
+            </Button>;
+          })}
+        </div>
+
+        {editor && editor.type !== "calendar" && (
+          <div className="grid gap-4 border-t pt-4">
+            {["github", "gitlab", "trello"].includes(editor.type) && (
+              <form className="grid gap-3" onSubmit={submitDeveloper}>
+                <EditorHeading editor={editor} label={providerOptions.find((item) => item.value === editor.type)?.label} onCancel={() => resetEditor()} />
+                <Field><FieldLabel>Connection name</FieldLabel><Input value={fields.name || ""} onChange={(event) => setField("name", event.target.value)} required /></Field>
+                {editor.type === "trello" ? <p className="rounded-md border bg-background p-3 text-sm text-muted-foreground">Trello uses the fixed cloud API. Enter the API key and token from your Trello developer app.</p> : (
+                  <Field><FieldLabel>{editor.type === "github" ? "GitHub server" : "GitLab server"}</FieldLabel><Input value={fields.baseUrl || ""} onChange={(event) => setField("baseUrl", event.target.value)} required /></Field>
+                )}
+                {editor.type === "trello" && <Field><FieldLabel>API key</FieldLabel><Input type="password" value={fields.apiKey || ""} onChange={(event) => setField("apiKey", event.target.value)} required /></Field>}
+                <Field>
+                  <FieldLabel>{editor.type === "trello" ? "API token" : "Token"}</FieldLabel>
+                  <Input type="password" value={fields.token || ""} onChange={(event) => setField("token", event.target.value)} required />
+                  <div className="grid gap-1 text-xs text-muted-foreground"><p>{permissionHints[editor.type]}</p>{tokenUrl ? <a className="font-medium text-blue-700 underline-offset-2 hover:underline" href={tokenUrl} target="_blank" rel="noreferrer">Generate token</a> : editor.type === "trello" ? <span>Enter an API key to generate a token.</span> : null}</div>
+                </Field>
+                <EditorFooter busy={busyKey === "editor"} submitLabel={editor.mode === "edit" ? "Update connection" : `Add ${providerOptions.find((item) => item.value === editor.type)?.label}`} error={editorError} onCancel={() => resetEditor()} />
+              </form>
+            )}
+
+            {editor.type === "google" && (
+              <div className="grid gap-3">
+                <EditorHeading editor={editor} label="Google" onCancel={() => resetEditor()} />
+                <p className="text-sm text-muted-foreground">{editor.mode === "edit" ? `Reconnect ${fields.name} to refresh its Google authorization.` : "Sign in with Google to discover calendars. Calendar access is read-only."}</p>
+                {editorError && <p className="rounded-md border bg-background p-3 text-sm text-destructive">{editorError}</p>}
+                <div className="flex gap-2"><Button type="button" disabled={busyKey === "google-connect" || busyKey === "google-cancel"} onClick={connectGoogle}>{busyKey === "google-connect" && <LoaderCircle className="animate-spin" />}{busyKey === "google-connect" ? "Connecting Google…" : editor.mode === "edit" ? "Reconnect Google" : "Connect Google"}</Button><Button type="button" variant="outline" disabled={busyKey === "google-cancel"} onClick={busyKey === "google-connect" ? cancelGoogle : () => resetEditor()}>{busyKey === "google-cancel" && <LoaderCircle className="animate-spin" />}{busyKey === "google-connect" || busyKey === "google-cancel" ? "Cancel connection" : "Cancel"}</Button></div>
+              </div>
+            )}
+
+          </div>
+        )}
+      </div>
+
+      {editor?.type === "calendar" && <Modal title={editor.mode === "edit" ? "Edit calendar" : "Add calendar"} onClose={() => resetEditor()} contentClassName="sm:max-w-xl">
+        <form className="grid max-h-[75vh] gap-3 overflow-y-auto pr-1" onSubmit={submitCalendar}>
+          <Field><FieldLabel>Calendar type</FieldLabel><SelectControl value={calendarKind} disabled={editor.mode === "edit"} onValueChange={(value) => { setCalendarKind(value); setFields(value === "ical" ? { color: "#64748b" } : {}); setEditorError(""); }} options={calendarKindOptions} /></Field>
+          <Field><FieldLabel>{calendarKind === "ical" ? "Calendar name" : "Account name"}</FieldLabel><Input value={fields.name || ""} onChange={(event) => setField("name", event.target.value)} required /></Field>
+          {calendarKind === "caldav" ? <>
+            <Field><FieldLabel>Server URL</FieldLabel><Input value={fields.serverUrl || ""} onChange={(event) => setField("serverUrl", event.target.value)} placeholder="https://calendar.example.com" required /></Field>
+            <Field><FieldLabel>Username</FieldLabel><Input value={fields.username || ""} onChange={(event) => setField("username", event.target.value)} required /></Field>
+            <Field><FieldLabel>App password</FieldLabel><Input type="password" value={fields.password || ""} onChange={(event) => setField("password", event.target.value)} required /></Field>
+            {editor.mode === "edit" && <CalendarColorFields account={calendarAccounts.find((account) => account.id === editor.id)} onUpdateCollections={onUpdateCollections} setActionNotice={setActionNotice} />}
+          </> : <>
+            <Field><FieldLabel>Secret iCal URL</FieldLabel><Input type="password" value={fields.url || ""} onChange={(event) => setField("url", event.target.value)} placeholder={editor.mode === "edit" ? "Leave blank to keep the saved URL" : "https://calendar.example.com/private.ics"} required={editor.mode !== "edit"} /></Field>
+            <Field><FieldLabel>Color</FieldLabel><input className="h-9 w-14 cursor-pointer rounded-md border bg-background p-1" type="color" value={fields.color || "#64748b"} onChange={(event) => setField("color", event.target.value)} /></Field>
+            <p className="rounded-md border bg-background p-3 text-sm text-muted-foreground">Treat this URL like a password. It is stored in the app’s local database and never displayed again.</p>
+          </>}
+          <EditorFooter busy={busyKey === "editor"} submitLabel={editor.mode === "edit" ? (calendarKind === "caldav" ? "Reconnect account" : "Update subscription") : (calendarKind === "caldav" ? "Connect CalDAV" : "Add calendar")} error={editorError} onCancel={() => resetEditor()} />
+        </form>
+      </Modal>}
+
+      {actionNotice && <p className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">{actionNotice}</p>}
+      {savedCount === 0 ? <EmptyState text="No accounts configured." /> : <div className="grid gap-5">
+        {groups.map((group) => group.items.length > 0 && <AccountGroup key={group.id} group={group} busyKey={busyKey} testResults={testResults} onEdit={group.kind === "developer" ? editConnection : editCalendar} onTest={(item) => group.kind === "developer" ? testDeveloper(item.id) : runAction(`test:${item.id}`, () => onTestCalendar(item.id), (message) => message).catch(() => {})} onRefresh={(item) => runAction(`refresh:${item.id}`, () => onRefreshCalendars(item.id), "Calendars refreshed.").catch(() => {})} onDelete={(item) => runAction(`delete:${item.id}`, () => group.kind === "developer" ? onDeleteConnection(item.id) : onDeleteCalendar(item.id), "Account removed.").then(() => { if (editor?.id === item.id) resetEditor(); }).catch(() => {})} onUpdateService={(item, enabled) => runAction(`service:${item.id}`, () => onUpdateService(item.id, enabled), enabled ? "Google Calendar enabled." : "Google Calendar paused.").catch(() => {})} onUpdateCollections={onUpdateCollections} setActionNotice={setActionNotice} />)}
+      </div>}
+    </div>
+  );
+}
+
+function EditorHeading({ editor, label }) {
+  return <div><p className="font-medium">{editor.mode === "edit" ? `Edit ${label}` : `Add ${label}`}</p><p className="mt-1 text-sm text-muted-foreground">{editor.mode === "edit" ? "Update this saved account." : `Configure a new ${label} account.`}</p></div>;
+}
+
+function EditorFooter({ busy, submitLabel, error, onCancel }) {
+  return <><>{error && <p className="rounded-md border bg-background p-3 text-sm text-destructive">{error}</p>}</><div className="flex gap-2"><Button type="submit" disabled={busy}>{busy && <LoaderCircle className="animate-spin" />}{submitLabel}</Button><Button type="button" variant="outline" disabled={busy} onClick={onCancel}>Cancel</Button></div></>;
+}
+
+function AccountGroup({ group, busyKey, testResults, onEdit, onTest, onRefresh, onDelete, onUpdateService, onUpdateCollections, setActionNotice }) {
+  const Icon = group.icon;
+  return <section className="grid gap-2"><div className="flex items-center gap-2"><Icon className="size-4 text-muted-foreground" /><h3 className="font-semibold">{group.label}</h3><Badge variant="secondary">{group.items.length}</Badge></div>{group.items.map((item) => {
+    const isDeveloper = group.kind === "developer";
+    const result = testResults[item.id];
+    return <div key={item.id} className="grid gap-3 rounded-md border p-4"><div className="flex min-w-0 items-start gap-2"><div className="min-w-0 flex-1"><p className="font-medium">{item.name}</p><p className="truncate text-xs text-muted-foreground">{isDeveloper ? (item.provider === "trello" ? "Cloud API" : item.baseUrl) : calendarTypeLabels[item.provider] || "Calendar"}</p>{result && <div className="mt-2 flex items-center gap-2"><Badge variant={result.ok === false ? "destructive" : "secondary"} className={cn(result.ok === true && "bg-green-100 text-green-800")}>{result.ok === null ? "Testing" : result.ok ? "Connected" : "Failed"}</Badge><span className="text-xs text-muted-foreground">{result.message}</span></div>}</div><Button size="icon-sm" variant="ghost" title={item.provider === "google" ? "Reconnect account" : "Edit account"} onClick={() => onEdit(item)}><Pencil /></Button><Button size="icon-sm" variant="ghost" title="Test account" disabled={Boolean(busyKey)} onClick={() => onTest(item)}>{busyKey === `test:${item.id}` ? <LoaderCircle className="animate-spin" /> : <PlugZap />}</Button>{!isDeveloper && <Button size="icon-sm" variant="ghost" title="Refresh calendars" disabled={Boolean(busyKey)} onClick={() => onRefresh(item)}><RefreshCw className={busyKey === `refresh:${item.id}` ? "animate-spin" : ""} /></Button>}<Button size="icon-sm" variant="ghost" title="Delete account" disabled={Boolean(busyKey)} onClick={() => onDelete(item)}><Trash2 /></Button></div>{item.provider === "google" && <label className="flex items-center gap-3 rounded-md border bg-muted/20 p-3"><Checkbox checked={item.calendarEnabled !== false} disabled={Boolean(busyKey)} onCheckedChange={(checked) => onUpdateService(item, checked === true)} /><div><p className="text-sm font-medium">Calendar</p><p className="text-xs text-muted-foreground">Show and sync calendars from this Google account.</p></div></label>}{!isDeveloper && item.provider === "google" && item.calendarEnabled !== false && <div className="grid gap-2">{(item.calendars || []).map((calendar) => <label key={calendar.id} className="flex items-center gap-3 rounded-md border bg-muted/20 p-3"><Checkbox checked={calendar.enabled} onCheckedChange={(checked) => onUpdateCollections([{ id: calendar.id, enabled: checked === true, color: calendar.color }]).catch((error) => setActionNotice(error?.message || String(error)))} /><input className="size-7 cursor-pointer rounded border bg-transparent p-0.5" type="color" value={calendar.color || "#64748b"} onChange={(event) => onUpdateCollections([{ id: calendar.id, enabled: calendar.enabled, color: event.target.value }]).catch((error) => setActionNotice(error?.message || String(error)))} /><span className="min-w-0 flex-1 truncate text-sm font-medium">{calendar.name}</span></label>)}{(item.calendars || []).length === 0 && <EmptyState text="No event calendars discovered." />}</div>}</div>;
+  })}</section>;
+}
+
+function CalendarColorFields({ account, onUpdateCollections, setActionNotice }) {
+  if (!account?.calendars?.length) return null;
+  return <div className="grid gap-2"><FieldLabel>Calendar colors</FieldLabel>{account.calendars.map((calendar) => <label key={calendar.id} className="flex items-center gap-3 rounded-md border bg-muted/20 p-3"><input className="size-7 cursor-pointer rounded border bg-transparent p-0.5" type="color" value={calendar.color || "#64748b"} onChange={(event) => onUpdateCollections([{ id: calendar.id, enabled: true, color: event.target.value }]).catch((error) => setActionNotice(error?.message || String(error)))} /><span className="min-w-0 flex-1 truncate text-sm font-medium">{calendar.name}</span></label>)}</div>;
+}
+
+function AiPromptIcon({ name }) {
+  const Icon = aiPromptIconFor(name);
+  return <Icon className="size-5 shrink-0 text-muted-foreground" />;
 }
 
 function SettingsMenuButton({ section, active, onClick }) {

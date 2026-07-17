@@ -11,7 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ProjectDialog } from "@/features/projects/ProjectDialog";
 import { ProjectPickerDialog } from "@/features/projects/ProjectPickerDialog";
 import { SettingsDialog } from "@/features/settings/SettingsDialog";
-import { SmartInput } from "@/features/smart-input/SmartInput";
+import { useCalendarData } from "@/features/calendar/useCalendarData";
 import { TodoEditDialog } from "@/features/smart-input/TodoEditDialog";
 import { api, toParsedPayload } from "@/lib/api";
 import { formatLocalDate } from "@/lib/activity";
@@ -27,7 +27,7 @@ import {
 } from "@/lib/ocr";
 import { DEFAULT_PROJECT_COLOR } from "@/lib/projectAvatar";
 import { parseSmartInput } from "@/lib/smartInputParser";
-import { InboxView, RecentDirectoryFilesList } from "@/views/inbox/InboxView";
+import { InboxView } from "@/views/inbox/InboxView";
 import { ActivityView, useActivityData } from "@/views/activity/ActivityView";
 import { ProjectWorkspaceView } from "@/views/projects/ProjectWorkspaceView";
 import { TaskDetailView } from "@/views/tasks/TaskDetailView";
@@ -125,6 +125,8 @@ function App() {
   const [resources, setResources] = useState([]);
   const [localResources, setLocalResources] = useState([]);
   const [connections, setConnections] = useState([]);
+  const [calendarAccounts, setCalendarAccounts] = useState([]);
+  const [aiPrompts, setAiPrompts] = useState([]);
   const [directories, setDirectories] = useState([]);
   const [browserSettings, setBrowserSettings] = useState({
     detectedBrowserBundleId: null,
@@ -141,8 +143,9 @@ function App() {
   const [pendingTaskReview, setPendingTaskReview] = useState(null);
   const [isEmailReading, setIsEmailReading] = useState(false);
   const [showProjectForm, setShowProjectForm] = useState(false);
-  const [showSmartInboxOverlay, setShowSmartInboxOverlay] = useState(false);
+  const [smartInboxFocusRequestKey, setSmartInboxFocusRequestKey] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsInitialSection, setSettingsInitialSection] = useState("accounts");
   const [showActivity, setShowActivity] = useState(false);
   const [activityDate, setActivityDate] = useState(() => formatLocalDate());
   const [notice, setNotice] = useState("");
@@ -174,6 +177,20 @@ function App() {
     enabled: showActivity,
     onError: reportError,
   });
+  const hasCalendarAccounts = calendarAccounts.some((account) => account.calendarEnabled !== false && (account.calendars || []).some((calendar) => account.provider !== "google" || calendar.enabled));
+  const isInboxVisible = !selectedTask && !showActivity && !selectedProject;
+  const todayCalendarData = useCalendarData({
+    date: formatLocalDate(),
+    enabled: isInboxVisible,
+    hasAccounts: hasCalendarAccounts,
+    onError: reportError,
+  });
+  const activityCalendarData = useCalendarData({
+    date: activityDate,
+    enabled: showActivity,
+    hasAccounts: hasCalendarAccounts,
+    onError: reportError,
+  });
 
   useEffect(() => {
     refreshShell().catch(reportError);
@@ -183,7 +200,10 @@ function App() {
     function handleKeyDown(event) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        setShowSmartInboxOverlay(true);
+        setShowActivity(false);
+        setSelectedTask(null);
+        setSelectedProjectId(null);
+        setSmartInboxFocusRequestKey((current) => current + 1);
       }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "t") {
         event.preventDefault();
@@ -209,9 +229,11 @@ function App() {
   }, [selectedProjectId]);
 
   async function refreshShell() {
-    const [projectList, connectionList, directoryList, browserSettingsResult, recentFileList, todoList] = await Promise.all([
+    const [projectList, connectionList, calendarAccountList, aiPromptList, directoryList, browserSettingsResult, recentFileList, todoList] = await Promise.all([
       api.listProjects(),
       api.listConnections(),
+      api.listCalendarAccounts(),
+      api.listAiPrompts(),
       api.listDirectories(),
       api.listBrowserSettings(),
       api.listRecentDirectoryFiles(),
@@ -219,6 +241,8 @@ function App() {
     ]);
     setProjects(dedupeProjects(projectList));
     setConnections(connectionList);
+    setCalendarAccounts(calendarAccountList);
+    setAiPrompts(aiPromptList);
     setDirectories(directoryList);
     setBrowserSettings(browserSettingsResult);
     setRecentDirectoryFiles(recentFileList);
@@ -273,8 +297,13 @@ function App() {
 
     const resultProjectId = result.task?.projectId || result.resource?.projectId || targetProjectId;
     showNotice(result.notice || (result.created ? "Task created." : "Existing task opened."));
+    if (result.task) {
+      openTask(result.task);
+    }
     if (resultProjectId) {
-      setSelectedProjectId(resultProjectId);
+      if (!result.task) {
+        setSelectedProjectId(resultProjectId);
+      }
       await refreshProject(resultProjectId);
     } else {
       setTasks(await api.listTasks({ projectId: null }));
@@ -469,7 +498,6 @@ function App() {
     if (!description) return;
     const todoId = pendingTaskReview.todoId || null;
     setPendingTaskReview(null);
-    setShowSmartInboxOverlay(false);
     setPendingInput({ input: description, parsed: textParsedPayload(title), todoId });
   }
 
@@ -493,6 +521,11 @@ function App() {
     setSelectedProjectId(null);
   }
 
+  function showSmartInbox() {
+    showDashboard();
+    setSmartInboxFocusRequestKey((current) => current + 1);
+  }
+
   function showActivityView() {
     setSelectedTask(null);
     setSelectedProjectId(null);
@@ -509,6 +542,12 @@ function App() {
   function reportError(error) {
     showNotice(error?.message || String(error));
   }
+
+  const checkoutPullRequestForReview = useCallback(async (payload) => {
+    const result = await api.checkoutPullRequestForReview(payload);
+    showNotice(result.message);
+    return result;
+  }, [showNotice]);
 
   return (
     <AppShell
@@ -528,13 +567,36 @@ function App() {
       onShowProject={showProjectFromBreadcrumb}
       onAddProject={() => setShowProjectForm(true)}
       onShowActivity={showActivityView}
-      onShowSettings={() => setShowSettings(true)}
-      onShowSmartInbox={() => setShowSmartInboxOverlay(true)}
+      onShowSettings={() => {
+        setSettingsInitialSection("accounts");
+        setShowSettings(true);
+      }}
+      onShowSmartInbox={showSmartInbox}
     >
       {selectedTask ? (
         <TaskDetailView
           task={selectedTask}
           project={selectedTaskProject}
+          aiPrompts={aiPrompts}
+          localResources={localResources}
+          onOpenAiPromptThread={async (payload) => {
+            const taskToKeep = selectedTask;
+            try {
+              const deepLink = await api.openAiPromptThread(payload);
+              const prompt = aiPrompts.find((item) => item.id === payload.aiPromptId);
+              setSelectedTask((current) => current || taskToKeep);
+              setTasks((current) => (
+                taskToKeep && !current.some((item) => item.id === taskToKeep.id)
+                  ? [taskToKeep, ...current]
+                  : current
+              ));
+              showNotice(`Opening ${prompt?.name || "AI Prompt"}. This task remains open here.`);
+              return deepLink;
+            } catch (error) {
+              reportError(error);
+              throw error;
+            }
+          }}
           onRefreshExternalDetails={async (taskId) => {
             const result = await api.refreshTaskExternalDetails({ taskId });
             setSelectedTask((current) => (current?.id === result.task.id ? result.task : current));
@@ -546,6 +608,20 @@ function App() {
           }}
           onLoadLinks={(taskId) => api.listTaskLinks({ taskId })}
           onLoadRelations={(taskId) => api.listTaskRelations({ taskId })}
+          onLoadTrelloBoards={(taskId) => api.listTaskTrelloBoards({ taskId })}
+          onLoadTrelloTemplates={(payload) => api.listTrelloBoardTemplates(payload)}
+          onConvertToTrelloTicket={async (payload) => {
+            const result = await api.convertTaskToTrelloTicket(payload);
+            setSelectedTask(result.task);
+            setTasks((current) => current.map((task) => (
+              task.id === result.task.id ? result.task : task
+            )));
+            if (result.task.projectId) {
+              await refreshProject(result.task.projectId);
+            }
+            showNotice("Trello ticket created.");
+            return result;
+          }}
           onLoadLocalResources={(payload) => api.listLocalResources(payload)}
           onChooseLocalResourceDirectory={() => api.chooseLocalResourceDirectory()}
           onSaveLocalResource={async (payload) => {
@@ -555,13 +631,13 @@ function App() {
             }
             return resource;
           }}
-          onCheckoutPullRequestForReview={async (payload) => {
-            const result = await api.checkoutPullRequestForReview(payload);
-            showNotice(result.message);
-            return result;
-          }}
-          onLoadReviewDiff={(payload) => api.loadReviewDiff(payload)}
-          onLoadReviewDiffFile={(payload) => api.loadReviewDiffFile(payload)}
+          onCheckoutPullRequestForReview={checkoutPullRequestForReview}
+          onLoadReviewDiff={api.loadReviewDiff}
+          onLoadReviewDiffFile={api.loadReviewDiffFile}
+          onListReviewCommentDrafts={api.listReviewCommentDrafts}
+          onSaveReviewCommentDraft={api.saveReviewCommentDraft}
+          onDeleteReviewCommentDraft={api.deleteReviewCommentDraft}
+          onSubmitReviewComments={api.submitReviewComments}
           onSaveRelation={async (payload) => api.saveTaskRelation(payload)}
           onDeleteRelation={async (id) => api.deleteTaskRelation({ id })}
           onLoadProjectTasks={(projectId) => api.listTasks({ projectId })}
@@ -597,8 +673,11 @@ function App() {
           activities={activityData.activities}
           syncRuns={activityData.syncRuns}
           isSyncing={activityData.isSyncing}
+          calendarEvents={activityCalendarData.events}
+          calendarSyncRuns={activityCalendarData.syncRuns}
+          isCalendarSyncing={activityCalendarData.isSyncing}
           onDateChange={setActivityDate}
-          onRefresh={activityData.refresh}
+          onRefresh={() => Promise.all([activityData.refresh(), activityCalendarData.refresh()])}
         />
       ) : selectedProject ? (
         <ProjectWorkspaceView
@@ -651,9 +730,10 @@ function App() {
           projects={projects}
           smartInboxTodos={smartInboxTodos}
           recentDirectoryFiles={recentDirectoryFiles}
+          smartInputFocusRequestKey={smartInboxFocusRequestKey}
           onSubmit={(input) => captureSmartInboxText(input).catch(reportError)}
           onFileDrop={
-            showSmartInboxOverlay || pendingOcrDrop || pendingTaskReview || isEmailReading
+            pendingOcrDrop || pendingTaskReview || isEmailReading
               ? undefined
               : (fileDrop) => captureSmartInboxFile(fileDrop).catch(reportError)
           }
@@ -661,7 +741,7 @@ function App() {
           onOpenTodo={(todo) => promoteSmartInboxTodo(todo).catch(reportError)}
           onDeleteTodo={(todo) => deleteSmartInboxTodo(todo).catch(reportError)}
           onOpenRecentFile={
-            showSmartInboxOverlay || pendingOcrDrop || pendingTaskReview || isEmailReading
+            pendingOcrDrop || pendingTaskReview || isEmailReading
               ? undefined
               : openRecentDirectoryFile
           }
@@ -672,6 +752,15 @@ function App() {
           onUpdateProviderSources={(provider, changes) => api.updateSmartInboxProviderSources({ provider, changes })}
           onOpenReviewRequest={(input) => submitSmartInput(input).catch(reportError)}
           onOpenTask={openTask}
+          calendarEvents={todayCalendarData.events}
+          calendarSyncRuns={todayCalendarData.syncRuns}
+          isCalendarSyncing={todayCalendarData.isSyncing}
+          hasCalendarAccounts={hasCalendarAccounts}
+          onRefreshCalendar={todayCalendarData.refresh}
+          onShowCalendarSettings={() => {
+            setSettingsInitialSection("accounts");
+            setShowSettings(true);
+          }}
         />
       )}
 
@@ -701,36 +790,6 @@ function App() {
             await routePendingInput(project.id);
           }}
         />
-      )}
-
-      {showSmartInboxOverlay && (
-        <Modal title="Smart inbox" onClose={() => setShowSmartInboxOverlay(false)}>
-          <SmartInput
-            large
-            onFileDrop={
-              pendingOcrDrop || pendingTaskReview || isEmailReading
-                ? undefined
-                : async (fileDrop) => {
-                    await captureSmartInboxFile(fileDrop);
-                    setShowSmartInboxOverlay(false);
-                    return null;
-                  }
-            }
-            onSubmit={async (input) => {
-              await captureSmartInboxText(input);
-              setShowSmartInboxOverlay(false);
-            }}
-          />
-          <RecentDirectoryFilesList
-            files={recentDirectoryFiles}
-            onOpenFile={
-              pendingOcrDrop || pendingTaskReview || isEmailReading
-                ? undefined
-                : openRecentDirectoryFile
-            }
-            onRefresh={() => refreshRecentDirectoryFiles().catch(reportError)}
-          />
-        </Modal>
       )}
 
       {pendingOcrDrop && (
@@ -820,8 +879,11 @@ function App() {
       {showSettings && (
         <SettingsDialog
           connections={connections}
+          aiPrompts={aiPrompts}
           directories={directories}
           browserSettings={browserSettings}
+          calendarAccounts={calendarAccounts}
+          initialSection={settingsInitialSection}
           onClose={() => setShowSettings(false)}
           onSave={async (payload) => {
             await api.saveConnection(payload);
@@ -852,6 +914,26 @@ function App() {
               };
             }
           }}
+          onSaveAiPrompt={async (payload) => {
+            try {
+              await api.saveAiPrompt(payload);
+              setAiPrompts(await api.listAiPrompts());
+              showNotice(payload.id ? "AI Prompt updated." : "AI Prompt saved.");
+            } catch (error) {
+              reportError(error);
+              throw error;
+            }
+          }}
+          onDeleteAiPrompt={async (id) => {
+            try {
+              await api.deleteAiPrompt({ id });
+              setAiPrompts(await api.listAiPrompts());
+              showNotice("AI Prompt removed.");
+            } catch (error) {
+              reportError(error);
+              throw error;
+            }
+          }}
           onChooseDirectory={() => api.chooseDirectory()}
           onSaveDirectory={async (payload) => {
             await api.saveDirectory(payload);
@@ -869,6 +951,50 @@ function App() {
             const nextBrowserSettings = await api.saveBrowserSettings(payload);
             setBrowserSettings(nextBrowserSettings);
             showNotice("Browser settings saved.");
+          }}
+          onSaveCalendarSubscription={async (payload) => {
+            const account = await api.saveCalendarSubscription(payload);
+            setCalendarAccounts(await api.listCalendarAccounts());
+            showNotice(payload.id ? "Calendar subscription updated." : "Calendar subscription added.");
+            return account;
+          }}
+          onConnectGoogleAccount={async (accountId) => {
+            const account = await api.connectGoogleAccount({ accountId });
+            setCalendarAccounts(await api.listCalendarAccounts());
+            showNotice(`${account.name} connected.`);
+            return account;
+          }}
+          onCancelGoogleAccount={() => api.cancelGoogleAccountConnection()}
+          onUpdateCalendarService={async (accountId, enabled) => {
+            const account = await api.updateCalendarService({ accountId, enabled });
+            setCalendarAccounts(await api.listCalendarAccounts());
+            await todayCalendarData.reload();
+            if (showActivity) await activityCalendarData.reload();
+            return account;
+          }}
+          onSaveCalDavAccount={async (payload) => {
+            const account = await api.saveCalDavAccount(payload);
+            setCalendarAccounts(await api.listCalendarAccounts());
+            showNotice(payload.id ? "CalDAV account reconnected." : "CalDAV account connected.");
+            return account;
+          }}
+          onRefreshCalendarCollections={async (accountId) => {
+            const account = await api.refreshCalendarCollections({ accountId });
+            setCalendarAccounts(await api.listCalendarAccounts());
+            return account;
+          }}
+          onUpdateCalendarCollections={async (selections) => {
+            const accounts = await api.updateCalendarCollections({ selections });
+            setCalendarAccounts(accounts);
+            if (isInboxVisible) await todayCalendarData.reload();
+            if (showActivity) await activityCalendarData.reload();
+            return accounts;
+          }}
+          onTestCalendarAccount={(accountId) => api.testCalendarAccount({ accountId })}
+          onDeleteCalendarAccount={async (accountId) => {
+            await api.deleteCalendarAccount({ accountId });
+            setCalendarAccounts(await api.listCalendarAccounts());
+            showNotice("Calendar account removed.");
           }}
         />
       )}

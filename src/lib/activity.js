@@ -118,6 +118,7 @@ export function activityProviderLabel(provider) {
     github: "GitHub",
     gitlab: "GitLab",
     trello: "Trello",
+    calendar: "Calendar",
   }[provider] || provider || "Provider";
 }
 

@@ -35,7 +35,7 @@ export function ProjectWorkspaceView({
 
   return (
     <>
-      <div className="grid flex-1 gap-6 overflow-y-auto p-6 xl:grid-cols-[minmax(0,1fr)_360px]">
+      <div className="grid flex-1 gap-6 overflow-y-auto p-6 [scrollbar-gutter:stable] xl:grid-cols-[minmax(0,1fr)_360px]">
         <div className="flex min-w-0 flex-col gap-6">
           <Panel title="Tasks" icon={ClipboardList}>
             <TaskList tasks={tasks} onOpenTask={onOpenTask} onUpdateTask={onUpdateTask} />

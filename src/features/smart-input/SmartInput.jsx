@@ -12,14 +12,21 @@ import { cn } from "@/lib/utils";
 const NON_FILE_DROP_MESSAGE = "The dropped data was not a file. Only local files are supported.";
 const DUPLICATE_DROP_WINDOW_MS = 1500;
 
-export function SmartInput({ onSubmit, onFileDrop, large = false }) {
+export function SmartInput({ onSubmit, onFileDrop, large = false, focusRequestKey = 0 }) {
   const [value, setValue] = useState("");
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [dropError, setDropError] = useState(null);
+  const inputRef = useRef(null);
   const desktopDragPathsRef = useRef([]);
   const lastFileDropRef = useRef({ key: "", at: 0 });
   const parsed = parseSmartInput(value);
   const canSubmit = value.trim().length > 0;
+
+  useEffect(() => {
+    if (focusRequestKey > 0) {
+      inputRef.current?.focus();
+    }
+  }, [focusRequestKey]);
 
   useEffect(() => {
     if (!isDesktopApp() || !onFileDrop) return undefined;
@@ -195,6 +202,7 @@ export function SmartInput({ onSubmit, onFileDrop, large = false }) {
       onDrop={handleDrop}
     >
       <Textarea
+        ref={inputRef}
         className={cn(
           "min-h-28 resize-none rounded-lg bg-card px-4 py-3 text-base shadow-sm",
           large && "min-h-40 text-lg",

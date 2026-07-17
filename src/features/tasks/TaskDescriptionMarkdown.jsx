@@ -1,6 +1,7 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { remarkHideHtmlComments } from "@/lib/remarkHideHtmlComments";
 import { cn } from "@/lib/utils";
 
 const markdownComponents = {
@@ -100,7 +101,10 @@ const markdownComponents = {
 export function TaskDescriptionMarkdown({ children }) {
   return (
     <div className="grid min-w-0 max-w-full gap-4 overflow-hidden text-sm">
-      <ReactMarkdown components={markdownComponents} remarkPlugins={[remarkGfm]}>
+      <ReactMarkdown
+        components={markdownComponents}
+        remarkPlugins={[remarkGfm, remarkHideHtmlComments]}
+      >
         {children}
       </ReactMarkdown>
     </div>

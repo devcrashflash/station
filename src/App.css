@@ -78,6 +78,13 @@
     --sidebar-accent-foreground: oklch(0.22 0.04 160);
     --sidebar-border: oklch(0.88 0.008 250);
     --sidebar-ring: oklch(0.55 0.09 245);
+    --syntax-comment: oklch(0.48 0.03 250);
+    --syntax-keyword: oklch(0.48 0.16 300);
+    --syntax-function: oklch(0.43 0.15 250);
+    --syntax-string: oklch(0.42 0.12 155);
+    --syntax-number: oklch(0.5 0.15 55);
+    --syntax-property: oklch(0.45 0.14 20);
+    --syntax-operator: oklch(0.4 0.06 235);
 }
 
 .dark {
@@ -112,6 +119,13 @@
     --sidebar-accent-foreground: oklch(0.985 0 0);
     --sidebar-border: oklch(1 0 0 / 10%);
     --sidebar-ring: oklch(0.556 0 0);
+    --syntax-comment: oklch(0.7 0.03 250);
+    --syntax-keyword: oklch(0.75 0.15 300);
+    --syntax-function: oklch(0.75 0.13 250);
+    --syntax-string: oklch(0.77 0.12 155);
+    --syntax-number: oklch(0.78 0.14 65);
+    --syntax-property: oklch(0.76 0.13 25);
+    --syntax-operator: oklch(0.78 0.06 235);
 }
 
 @layer base {
@@ -121,4 +135,108 @@
   body {
     @apply m-0 bg-background text-foreground;
     }
+}
+
+@layer components {
+  .review-diff {
+    padding-block: 0.75rem;
+    tab-size: 2;
+  }
+
+  .review-diff-line {
+    display: flex;
+    min-width: 100%;
+    padding-right: 0.75rem;
+  }
+
+  .review-diff-line-selected {
+    position: relative;
+  }
+
+  .review-diff-line-selected::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    border-inline: 2px solid var(--color-blue-500);
+  }
+
+  .review-diff-line-selection-start::after {
+    border-top: 2px solid var(--color-blue-500);
+  }
+
+  .review-diff-line-selection-end::after {
+    border-bottom: 2px solid var(--color-blue-500);
+  }
+
+  .review-diff-marker {
+    width: 1.75rem;
+    flex: none;
+    text-align: center;
+    font-weight: 600;
+    user-select: none;
+  }
+
+  .review-diff-line-number {
+    width: 3rem;
+    flex: none;
+    padding-inline: 0.5rem;
+    text-align: right;
+    color: var(--muted-foreground);
+    user-select: none;
+  }
+
+  .review-diff-content {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .review-diff .token.comment,
+  .review-diff .token.prolog,
+  .review-diff .token.doctype,
+  .review-diff .token.cdata {
+    color: var(--syntax-comment);
+    font-style: italic;
+  }
+
+  .review-diff .token.keyword,
+  .review-diff .token.atrule,
+  .review-diff .token.important {
+    color: var(--syntax-keyword);
+  }
+
+  .review-diff .token.function,
+  .review-diff .token.class-name {
+    color: var(--syntax-function);
+  }
+
+  .review-diff .token.string,
+  .review-diff .token.char,
+  .review-diff .token.attr-value,
+  .review-diff .token.regex,
+  .review-diff .token.inserted {
+    color: var(--syntax-string);
+  }
+
+  .review-diff .token.boolean,
+  .review-diff .token.number {
+    color: var(--syntax-number);
+  }
+
+  .review-diff .token.property,
+  .review-diff .token.tag,
+  .review-diff .token.constant,
+  .review-diff .token.symbol,
+  .review-diff .token.deleted,
+  .review-diff .token.selector,
+  .review-diff .token.attr-name {
+    color: var(--syntax-property);
+  }
+
+  .review-diff .token.operator,
+  .review-diff .token.entity,
+  .review-diff .token.url,
+  .review-diff .token.punctuation {
+    color: var(--syntax-operator);
+  }
 }

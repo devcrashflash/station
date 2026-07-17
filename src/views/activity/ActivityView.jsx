@@ -7,7 +7,9 @@ import {
   ExternalLink,
   ListFilter,
   LoaderCircle,
+  MapPin,
   RefreshCw,
+  Video,
 } from "lucide-react";
 
 import { EmptyState } from "@/components/common/EmptyState";
@@ -33,6 +35,7 @@ import {
   syncWarningMessages,
 } from "@/lib/activity";
 import { cn } from "@/lib/utils";
+import { calendarEventOpenUrl, calendarEventTimeLabel, calendarWarningMessages } from "@/lib/calendar";
 
 function waitForNextPaint() {
   return new Promise((resolve) => {
@@ -47,13 +50,16 @@ export function ActivityView({
   activities,
   syncRuns,
   isSyncing,
+  calendarEvents = [],
+  calendarSyncRuns = [],
+  isCalendarSyncing = false,
   onDateChange,
   onRefresh,
 }) {
   const today = formatLocalDate();
   const connectionFilters = useMemo(
-    () => activityConnectionFilters(activities, syncRuns),
-    [activities, syncRuns],
+    () => activityConnectionFilters(activities, syncRuns, calendarEvents, calendarSyncRuns),
+    [activities, syncRuns, calendarEvents, calendarSyncRuns],
   );
   const [disabledConnectionKeys, setDisabledConnectionKeys] = useState(() => new Set());
   const manualActivities = useMemo(
@@ -64,16 +70,25 @@ export function ActivityView({
   const filteredActivities = sortedActivities.filter(
     (activity) => !disabledConnectionKeys.has(activityConnectionKey(activity)),
   );
+  const filteredCalendarEvents = calendarEvents.filter(
+    (event) => !disabledConnectionKeys.has(calendarConnectionKey(event)),
+  );
+  const timelineItems = [
+    ...filteredActivities.map((activity) => ({ type: "activity", value: activity, time: activity.occurredAt || 0, allDay: false })),
+    ...filteredCalendarEvents.map((event) => ({ type: "calendar", value: event, time: event.startAt || 0, allDay: Boolean(event.allDay) })),
+  ].sort((left, right) => Number(right.allDay) - Number(left.allDay) || left.time - right.time || String(left.value.id).localeCompare(String(right.value.id)));
   const selectedWeekdayLabel = useMemo(
     () => new Intl.DateTimeFormat(undefined, {
       weekday: "long",
     }).format(parseLocalDate(date)),
     [date],
   );
-  const warnings = syncWarningMessages(syncRuns);
-  const activityCountText = filteredActivities.length === sortedActivities.length
-    ? `${sortedActivities.length} activities`
-    : `${filteredActivities.length} of ${sortedActivities.length} activities`;
+  const warnings = [...syncWarningMessages(syncRuns), ...calendarWarningMessages(calendarSyncRuns)];
+  const totalItems = sortedActivities.length + calendarEvents.length;
+  const activityCountText = timelineItems.length === totalItems
+    ? `${totalItems} timeline items`
+    : `${timelineItems.length} of ${totalItems} timeline items`;
+  const syncing = isSyncing || isCalendarSyncing;
 
   useEffect(() => {
     const knownKeys = new Set(connectionFilters.map((connection) => connection.key));
@@ -96,7 +111,7 @@ export function ActivityView({
   }, []);
 
   return (
-    <div className="grid flex-1 gap-6 overflow-y-auto p-6 lg:grid-cols-[minmax(0,1fr)_320px]">
+    <div className="grid flex-1 gap-6 overflow-y-auto p-6 [scrollbar-gutter:stable] lg:grid-cols-[minmax(0,1fr)_320px]">
       <section className="flex min-w-0 flex-col gap-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="min-w-0">
@@ -137,16 +152,16 @@ export function ActivityView({
             <Button
               type="button"
               variant="outline"
-              aria-busy={isSyncing}
-              disabled={isSyncing}
+              aria-busy={syncing}
+              disabled={syncing}
               onClick={onRefresh}
             >
-              {isSyncing ? (
+              {syncing ? (
                 <LoaderCircle className="size-4 animate-spin" />
               ) : (
                 <RefreshCw className="size-4" />
               )}
-              {isSyncing ? "Syncing..." : "Sync"}
+              {syncing ? "Syncing..." : "Sync"}
             </Button>
           </div>
         </div>
@@ -165,25 +180,27 @@ export function ActivityView({
           <div className="grid gap-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <p className="text-sm font-medium">{activityCountText}</p>
-              <SyncSummary syncRuns={syncRuns} isSyncing={isSyncing} />
+              <SyncSummary syncRuns={[...syncRuns, ...calendarSyncRuns]} isSyncing={syncing} />
             </div>
 
-            {filteredActivities.length === 0 ? (
+            {timelineItems.length === 0 ? (
               <EmptyState
                 text={
                   sortedActivities.length > 0
                     ? "No activity matches the selected filters."
-                    : (activities || []).length > 0
+                    : totalItems > 0
                       ? "No manual activity cached for this day."
                     : isSyncing
                       ? "Syncing activity..."
-                      : "No activity cached for this day."
+                      : "No timeline items cached for this day."
                 }
               />
             ) : (
               <div className="flex flex-col gap-2">
-                {filteredActivities.map((activity) => (
-                  <ActivityItem key={activity.id} activity={activity} />
+                {timelineItems.map((item) => item.type === "calendar" ? (
+                  <CalendarEventItem key={`calendar:${item.value.id}`} event={item.value} />
+                ) : (
+                  <ActivityItem key={`activity:${item.value.id}`} activity={item.value} />
                 ))}
               </div>
             )}
@@ -323,7 +340,7 @@ function ActivityFilters({ connections, disabledConnectionKeys, onReset, onToggl
   const disabledCount = disabledConnectionKeys.size;
 
   if (!connections.length) {
-    return <EmptyState text="No synced activity connections yet." />;
+    return <EmptyState text="No synced timeline sources yet." />;
   }
 
   return (
@@ -433,7 +450,41 @@ function ActivityItem({ activity }) {
   );
 }
 
-function activityConnectionFilters(activities, syncRuns) {
+function CalendarEventItem({ event }) {
+  const openUrl = calendarEventOpenUrl(event);
+  return (
+    <div
+      className="grid min-w-0 grid-cols-[4rem_minmax(0,1fr)_auto] gap-3 overflow-hidden rounded-md border bg-card p-3 text-card-foreground"
+      style={{ borderLeftColor: event.calendarColor || "#64748b", borderLeftWidth: 4 }}
+    >
+      <div className="w-16 shrink-0 text-xs text-muted-foreground">{calendarEventTimeLabel(event)}</div>
+      <div className="min-w-0 overflow-hidden">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <Badge variant="secondary">Calendar</Badge>
+          <Badge variant="outline">{event.calendarName}</Badge>
+          {event.attendeeStatus && <Badge variant="outline">{event.attendeeStatus}</Badge>}
+        </div>
+        <p className="mt-1 min-w-0 break-words text-sm font-medium leading-5 [overflow-wrap:anywhere]">{event.title}</p>
+        {event.location && (
+          <p className="mt-1 flex min-w-0 items-center gap-1 truncate text-xs text-muted-foreground">
+            <MapPin className="size-3 shrink-0" />
+            <span className="truncate">{event.location}</span>
+          </p>
+        )}
+      </div>
+      {openUrl && (
+        <Button size="sm" variant="outline" asChild>
+          <a href={openUrl} target="_blank" rel="noreferrer" title={event.joinUrl ? "Join meeting" : "Open event"}>
+            {event.joinUrl ? <Video /> : <ExternalLink />}
+            {event.joinUrl ? "Join" : "Open"}
+          </a>
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function activityConnectionFilters(activities, syncRuns, calendarEvents, calendarSyncRuns) {
   const connections = new Map();
 
   for (const activity of activities || []) {
@@ -444,10 +495,27 @@ function activityConnectionFilters(activities, syncRuns) {
     addActivityConnection(connections, syncRun);
   }
 
+  for (const event of calendarEvents || []) {
+    connections.set(calendarConnectionKey(event), {
+      key: calendarConnectionKey(event),
+      provider: "calendar",
+      label: event.calendarName || "Calendar",
+    });
+  }
+
+  for (const run of calendarSyncRuns || []) {
+    const key = `calendar:${run.collectionId}`;
+    if (!connections.has(key)) connections.set(key, { key, provider: "calendar", label: run.calendarName || "Calendar" });
+  }
+
   return [...connections.values()].sort((left, right) => (
     activityProviderLabel(left.provider).localeCompare(activityProviderLabel(right.provider))
     || left.label.localeCompare(right.label)
   ));
+}
+
+function calendarConnectionKey(event) {
+  return `calendar:${event.collectionId}`;
 }
 
 function addActivityConnection(connections, source) {

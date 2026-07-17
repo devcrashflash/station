@@ -1,22 +1,26 @@
 use rusqlite::{params, Connection as SqliteConnection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha1::{Digest as Sha1Digest, Sha1};
 use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Mutex,
     },
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::Manager;
-#[cfg(not(target_os = "macos"))]
 use tauri_plugin_opener::OpenerExt;
 
+mod calendar;
+
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+static GOOGLE_OAUTH_ACTIVE: AtomicBool = AtomicBool::new(false);
+static GOOGLE_OAUTH_CANCELLED: AtomicBool = AtomicBool::new(false);
 const DEFAULT_PROJECT_COLOR: &str = "#2563eb";
 const BROWSER_BUNDLE_ID_SETTING_KEY: &str = "browser_bundle_id";
 #[cfg(not(target_os = "macos"))]
@@ -132,6 +136,7 @@ fn open_blank_browser_tab(
 
 struct AppState {
     db: Mutex<SqliteConnection>,
+    db_path: PathBuf,
     ocr_engine: Mutex<Option<ocrs::OcrEngine>>,
 }
 
@@ -161,6 +166,18 @@ struct ConnectionRecord {
     base_url: String,
     api_key: Option<String>,
     token: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct AiPromptRecord {
+    id: String,
+    agent_type: String,
+    name: String,
+    icon: String,
+    prompt_text: String,
     created_at: i64,
     updated_at: i64,
 }
@@ -309,6 +326,45 @@ struct TaskLink {
     target_branch: Option<String>,
     fetched_at: Option<i64>,
     files: Vec<TaskFile>,
+    comments: Vec<TaskComment>,
+    labels: Vec<ExternalLabel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct ExternalLabel {
+    name: String,
+    color: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct TrelloTicketTemplate {
+    id: String,
+    name: String,
+    description: String,
+    list_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct TrelloBoardList {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrelloBoardTemplates {
+    templates: Vec<TrelloTicketTemplate>,
+    lists: Vec<TrelloBoardList>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrelloTicketConversionResult {
+    task: Task,
+    link: TaskLink,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -321,6 +377,43 @@ struct TaskFile {
     content_type: Option<String>,
     bytes: Option<i64>,
     created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct TaskComment {
+    id: String,
+    kind: String,
+    author: String,
+    body: String,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+    url: Option<String>,
+    discussion_id: Option<String>,
+    reply_to_id: Option<String>,
+    code_context: Option<TaskCommentCodeContext>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct TaskCommentCodeContext {
+    path: String,
+    old_start_line: Option<i64>,
+    old_line: Option<i64>,
+    new_start_line: Option<i64>,
+    new_line: Option<i64>,
+    outdated: bool,
+    lines: Vec<TaskCommentDiffLine>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct TaskCommentDiffLine {
+    kind: String,
+    old_line: Option<i64>,
+    new_line: Option<i64>,
+    content: String,
+    highlighted: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -399,6 +492,7 @@ struct SmartInboxReviewRequest {
     sort_at: Option<i64>,
     sort_source: String,
     state: String,
+    linked_task: Option<Task>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -481,6 +575,8 @@ struct PullRequestCheckoutResult {
 #[serde(rename_all = "camelCase")]
 struct ReviewDiffFile {
     path: String,
+    old_path: String,
+    new_path: String,
     diff: String,
 }
 
@@ -490,8 +586,68 @@ struct ReviewDiffResult {
     path: String,
     branch: String,
     base_ref: String,
+    head_sha: String,
     files: Vec<String>,
     current_file: Option<ReviewDiffFile>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewCommentDraft {
+    id: String,
+    task_id: String,
+    kind: String,
+    body: String,
+    path: Option<String>,
+    old_path: Option<String>,
+    new_path: Option<String>,
+    start_old_line: Option<i64>,
+    start_new_line: Option<i64>,
+    start_side: Option<String>,
+    old_line: Option<i64>,
+    new_line: Option<i64>,
+    side: Option<String>,
+    head_sha: Option<String>,
+    last_error: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewCommentDraftInput {
+    id: Option<String>,
+    task_id: String,
+    kind: String,
+    body: String,
+    path: Option<String>,
+    old_path: Option<String>,
+    new_path: Option<String>,
+    start_old_line: Option<i64>,
+    start_new_line: Option<i64>,
+    start_side: Option<String>,
+    old_line: Option<i64>,
+    new_line: Option<i64>,
+    side: Option<String>,
+    head_sha: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewCommentFailure {
+    draft_id: String,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewCommentSubmissionResult {
+    published_draft_ids: Vec<String>,
+    published_count: usize,
+    remaining_drafts: Vec<ReviewCommentDraft>,
+    failures: Vec<ReviewCommentFailure>,
+    link: Option<TaskLink>,
+    notice: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -586,6 +742,24 @@ struct ConnectionInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AiPromptInput {
+    id: Option<String>,
+    agent_type: String,
+    name: String,
+    icon: String,
+    prompt_text: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenAiPromptThreadInput {
+    ai_prompt_id: String,
+    task_id: String,
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PullRequestInput {
     id: Option<String>,
     project_id: String,
@@ -653,6 +827,8 @@ struct ProviderMetadata {
     url: Option<String>,
     fetched_at: Option<i64>,
     files: Vec<TaskFile>,
+    comments: Vec<TaskComment>,
+    labels: Vec<ExternalLabel>,
     parent_resource: Option<ProviderResourceMetadata>,
     notice: Option<String>,
 }
@@ -675,10 +851,12 @@ pub fn run() {
         .setup(|app| {
             let app_dir = app.path().app_data_dir()?;
             fs::create_dir_all(&app_dir)?;
-            let db = SqliteConnection::open(app_dir.join("studio.sqlite"))?;
+            let db_path = app_dir.join("studio.sqlite");
+            let db = SqliteConnection::open(&db_path)?;
             init_database(&db)?;
             app.manage(AppState {
                 db: Mutex::new(db),
+                db_path,
                 ocr_engine: Mutex::new(None),
             });
             #[cfg(not(target_os = "macos"))]
@@ -707,6 +885,10 @@ pub fn run() {
             checkout_pull_request_for_review,
             load_review_diff,
             load_review_diff_file,
+            list_review_comment_drafts,
+            save_review_comment_draft,
+            delete_review_comment_draft,
+            submit_review_comments,
             create_task_from_input,
             list_smart_inbox_provider_items,
             sync_smart_inbox_provider_items,
@@ -724,6 +906,9 @@ pub fn run() {
             list_tasks,
             update_task,
             delete_task,
+            list_task_trello_boards,
+            list_trello_board_templates,
+            convert_task_to_trello_ticket,
             link_task_resource,
             list_task_links,
             refresh_task_external_details,
@@ -733,6 +918,10 @@ pub fn run() {
             list_connections,
             save_connection,
             delete_connection,
+            list_ai_prompts,
+            save_ai_prompt,
+            delete_ai_prompt,
+            open_ai_prompt_thread,
             list_browser_settings,
             save_browser_settings,
             test_connection,
@@ -742,6 +931,18 @@ pub fn run() {
             list_recent_directory_files,
             list_project_connections,
             set_project_connections,
+            list_calendar_accounts,
+            connect_google_account,
+            cancel_google_account_connection,
+            update_calendar_service,
+            save_calendar_subscription,
+            save_caldav_account,
+            refresh_calendar_collections,
+            update_calendar_collections,
+            test_calendar_account,
+            delete_calendar_account,
+            list_calendar_events,
+            sync_calendar_events,
             list_activities,
             sync_activities,
             list_pull_requests,
@@ -812,6 +1013,16 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
             base_url TEXT NOT NULL,
             api_key TEXT,
             token TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS ai_prompts (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+            agent_type TEXT NOT NULL,
+            icon TEXT NOT NULL DEFAULT 'sparkles',
+            prompt_text TEXT NOT NULL DEFAULT '',
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
         );
@@ -959,6 +1170,8 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
             target_branch TEXT,
             fetched_at INTEGER,
             files_json TEXT NOT NULL DEFAULT '[]',
+            comments_json TEXT NOT NULL DEFAULT '[]',
+            labels_json TEXT NOT NULL DEFAULT '[]',
             PRIMARY KEY(task_id, provider, kind, external_id)
         );
 
@@ -970,6 +1183,29 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
             created_at INTEGER NOT NULL,
             UNIQUE(source_task_id, target_task_id, relation_type)
         );
+
+        CREATE TABLE IF NOT EXISTS review_comment_drafts (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL CHECK(kind IN ('overall', 'inline')),
+            body TEXT NOT NULL,
+            path TEXT,
+            old_path TEXT,
+            new_path TEXT,
+            start_old_line INTEGER,
+            start_new_line INTEGER,
+            start_side TEXT CHECK(start_side IS NULL OR start_side IN ('LEFT', 'RIGHT')),
+            old_line INTEGER,
+            new_line INTEGER,
+            side TEXT CHECK(side IS NULL OR side IN ('LEFT', 'RIGHT')),
+            head_sha TEXT,
+            last_error TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_review_comment_drafts_overall
+        ON review_comment_drafts(task_id, kind) WHERE kind = 'overall';
 
         CREATE TABLE IF NOT EXISTS pull_requests (
             id TEXT PRIMARY KEY,
@@ -992,6 +1228,9 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
         );
         ",
     )?;
+    calendar::init_database(db)?;
+    migrate_ai_agents_to_prompts(db)?;
+    add_column_if_missing(db, "ai_prompts", "icon", "TEXT NOT NULL DEFAULT 'sparkles'")?;
     add_column_if_missing(db, "projects", "color", "TEXT NOT NULL DEFAULT '#2563eb'")?;
     add_column_if_missing(db, "connections", "api_key", "TEXT")?;
     add_column_if_missing(db, "smart_inbox_provider_items", "source_id", "TEXT")?;
@@ -1036,6 +1275,18 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
     add_column_if_missing(db, "task_links", "target_branch", "TEXT")?;
     add_column_if_missing(db, "task_links", "fetched_at", "INTEGER")?;
     add_column_if_missing(db, "task_links", "files_json", "TEXT NOT NULL DEFAULT '[]'")?;
+    add_column_if_missing(
+        db,
+        "task_links",
+        "comments_json",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    add_column_if_missing(
+        db,
+        "task_links",
+        "labels_json",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )?;
     keep_one_file_smart_inbox_todo_per_path(db)?;
     db.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_smart_inbox_file_path
@@ -1059,7 +1310,39 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
     add_column_if_missing(db, "pull_requests", "external_state", "TEXT")?;
     add_column_if_missing(db, "pull_requests", "target_branch", "TEXT")?;
     add_column_if_missing(db, "pull_requests", "fetched_at", "INTEGER")?;
+    add_column_if_missing(db, "review_comment_drafts", "start_old_line", "INTEGER")?;
+    add_column_if_missing(db, "review_comment_drafts", "start_new_line", "INTEGER")?;
+    add_column_if_missing(
+        db,
+        "review_comment_drafts",
+        "start_side",
+        "TEXT CHECK(start_side IS NULL OR start_side IN ('LEFT', 'RIGHT'))",
+    )?;
     migrate_pull_requests_into_tasks(db)?;
+    Ok(())
+}
+
+fn migrate_ai_agents_to_prompts(db: &SqliteConnection) -> rusqlite::Result<()> {
+    let legacy_table_exists: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ai_agents')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !legacy_table_exists {
+        return Ok(());
+    }
+
+    db.execute_batch(
+        "
+        BEGIN IMMEDIATE;
+        INSERT OR IGNORE INTO ai_prompts
+            (id, name, agent_type, prompt_text, created_at, updated_at)
+        SELECT id, name, type, '', created_at, updated_at
+        FROM ai_agents;
+        DROP TABLE ai_agents;
+        COMMIT;
+        ",
+    )?;
     Ok(())
 }
 
@@ -1237,6 +1520,18 @@ fn row_to_connection(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionReco
     })
 }
 
+fn row_to_ai_prompt(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiPromptRecord> {
+    Ok(AiPromptRecord {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        icon: row.get(2)?,
+        agent_type: row.get(3)?,
+        prompt_text: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
+    })
+}
+
 fn row_to_activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<ActivityRecord> {
     Ok(ActivityRecord {
         id: row.get(0)?,
@@ -1336,6 +1631,8 @@ fn row_to_smart_inbox_todo(row: &rusqlite::Row<'_>) -> rusqlite::Result<SmartInb
 
 fn row_to_task_link(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskLink> {
     let files_json = row.get::<_, Option<String>>(11)?;
+    let comments_json = row.get::<_, Option<String>>(12)?;
+    let labels_json = row.get::<_, Option<String>>(13)?;
     Ok(TaskLink {
         task_id: row.get(0)?,
         provider: row.get(1)?,
@@ -1349,6 +1646,8 @@ fn row_to_task_link(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskLink> {
         target_branch: row.get(9)?,
         fetched_at: row.get(10)?,
         files: task_files_from_json(files_json.as_deref()),
+        comments: task_comments_from_json(comments_json.as_deref()),
+        labels: external_labels_from_json(labels_json.as_deref()),
     })
 }
 
@@ -1360,6 +1659,27 @@ fn task_files_from_json(value: Option<&str>) -> Vec<TaskFile> {
 
 fn task_files_to_json(files: &[TaskFile]) -> String {
     serde_json::to_string(files).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn task_comments_from_json(value: Option<&str>) -> Vec<TaskComment> {
+    value
+        .and_then(|json| serde_json::from_str::<Vec<TaskComment>>(json).ok())
+        .unwrap_or_default()
+}
+
+fn task_comments_to_json(comments: &[TaskComment]) -> String {
+    serde_json::to_string(comments).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn external_labels_from_json(value: Option<&str>) -> Vec<ExternalLabel> {
+    value
+        .and_then(|json| serde_json::from_str::<Vec<ExternalLabel>>(json).ok())
+        .map(normalize_external_labels)
+        .unwrap_or_default()
+}
+
+fn external_labels_to_json(labels: &[ExternalLabel]) -> String {
+    serde_json::to_string(labels).unwrap_or_else(|_| "[]".to_string())
 }
 
 fn row_to_pull_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<PullRequestRecord> {
@@ -1869,6 +2189,42 @@ fn review_target_branch_for_url(
     .map_err(db_error)
 }
 
+fn review_request_state_for_url(
+    db: &SqliteConnection,
+    pr_url: &str,
+) -> Result<Option<String>, String> {
+    let task_link_state = db
+        .query_row(
+            "SELECT external_state FROM task_links
+             WHERE url = ?1 AND external_state IS NOT NULL AND TRIM(external_state) != ''
+             LIMIT 1",
+            params![pr_url],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(db_error)?;
+    if task_link_state.is_some() {
+        return Ok(task_link_state);
+    }
+
+    db.query_row(
+        "SELECT external_state FROM pull_requests
+         WHERE pr_url = ?1 AND external_state IS NOT NULL AND TRIM(external_state) != ''
+         LIMIT 1",
+        params![pr_url],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(db_error)
+}
+
+fn review_request_is_closed(state: Option<&str>) -> bool {
+    matches!(
+        state.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("closed" | "merged")
+    )
+}
+
 fn fetch_review_base_ref(
     path: &Path,
     remote: &str,
@@ -1898,6 +2254,21 @@ fn checkout_pull_request_for_review_in_db(
         return Err("Selected local resource does not match this PR/MR provider.".to_string());
     }
 
+    let review_state = review_request_state_for_url(db, &pr_url)?;
+    if review_request_is_closed(review_state.as_deref()) {
+        let request_name = if provider == "github" {
+            "pull request"
+        } else {
+            "merge request"
+        };
+        return Err(format!(
+            "This {request_name} is {} and can no longer be reviewed.",
+            review_state
+                .unwrap_or_else(|| "closed".to_string())
+                .to_ascii_lowercase()
+        ));
+    }
+
     let path = PathBuf::from(&resource.path);
     let normalized_resource = normalize_repository_url(&resource.repo_url)
         .ok_or_else(|| "Could not normalize the saved local resource URL.".to_string())?;
@@ -1915,7 +2286,17 @@ fn checkout_pull_request_for_review_in_db(
     let remote_ref = format!("refs/remotes/{}/{}", remote.name, remote_review_branch);
     let target_branch = review_target_branch_for_url(db, &pr_url)?;
     let base_ref = fetch_review_base_ref(&path, &remote.name, target_branch.as_deref())?;
-    let fetch_refspec = format!("{remote_head}:{remote_ref}");
+    let remote_head_ref = format!("refs/{remote_head}");
+    let remote_head_sha = run_git(&path, &["ls-remote", &remote.name, &remote_head_ref])
+        .map_err(|error| format!("Could not check the remote review branch: {error}"))?;
+    if remote_head_sha.trim().is_empty() {
+        return Err(
+            "Remote review branch not found. The pull or merge request may be closed, merged, or removed."
+                .to_string(),
+        );
+    }
+
+    let fetch_refspec = format!("+{remote_head}:{remote_ref}");
     run_git(&path, &["fetch", &remote.name, &fetch_refspec]).map_err(|error| {
         format!(
             "Could not fetch review branch from {}: {error}",
@@ -1928,7 +2309,10 @@ fn checkout_pull_request_for_review_in_db(
         run_git(&path, &["switch", &branch])
             .map_err(|error| format!("Could not switch to existing review branch: {error}"))?;
         run_git(&path, &["merge", "--ff-only", &remote_ref])
-            .map_err(|error| format!("Existing review branch cannot be fast-forwarded: {error}"))?;
+            .map_err(|_| {
+                "The pull or merge request changed since it was last reviewed here, and the saved local review copy cannot be updated safely. Your local files were left unchanged. Choose another repository directory or remove the old review branch, then try again."
+                    .to_string()
+            })?;
     } else {
         run_git(&path, &["switch", "-c", &branch, &remote_ref])
             .map_err(|error| format!("Could not create review branch: {error}"))?;
@@ -1992,7 +2376,8 @@ fn review_diff_base_ref(
 }
 
 fn review_diff_files(path: &Path, base_ref: &str, branch: &str) -> Result<Vec<String>, String> {
-    let output = run_git(path, &["diff", "--name-only", base_ref, branch])?;
+    let range = format!("{base_ref}...{branch}");
+    let output = run_git(path, &["diff", "--name-only", &range])?;
     Ok(output
         .lines()
         .map(str::trim)
@@ -2007,11 +2392,40 @@ fn review_diff_file(
     branch: &str,
     file_path: &str,
 ) -> Result<ReviewDiffFile, String> {
-    let diff = run_git(path, &["diff", base_ref, branch, "--", file_path])?;
+    let range = format!("{base_ref}...{branch}");
+    let diff = run_git(path, &["diff", &range, "--", file_path])?;
+    let (old_path, new_path) = review_diff_paths(&diff, file_path);
     Ok(ReviewDiffFile {
         path: file_path.to_string(),
+        old_path,
+        new_path,
         diff,
     })
+}
+
+fn review_diff_paths(diff: &str, fallback: &str) -> (String, String) {
+    fn header_path(line: &str, prefix: &str) -> Option<String> {
+        let value = line.strip_prefix(prefix)?.split('\t').next()?.trim();
+        if value.is_empty() || value == "/dev/null" {
+            return None;
+        }
+        Some(
+            value
+                .strip_prefix("a/")
+                .or_else(|| value.strip_prefix("b/"))
+                .unwrap_or(value)
+                .to_string(),
+        )
+    }
+
+    let old = diff.lines().find_map(|line| header_path(line, "--- "));
+    let new = diff.lines().find_map(|line| header_path(line, "+++ "));
+    (
+        old.clone()
+            .or_else(|| new.clone())
+            .unwrap_or_else(|| fallback.to_string()),
+        new.or(old).unwrap_or_else(|| fallback.to_string()),
+    )
 }
 
 fn load_review_diff_in_db(
@@ -2035,6 +2449,7 @@ fn load_review_diff_in_db(
     }
 
     let base_ref = review_diff_base_ref(&path, &remote.name, base_ref.as_deref())?;
+    let head_sha = run_git(&path, &["rev-parse", &branch])?;
     let files = review_diff_files(&path, &base_ref, &branch)?;
     let current_file = files
         .first()
@@ -2045,6 +2460,7 @@ fn load_review_diff_in_db(
         path: resource.path,
         branch,
         base_ref,
+        head_sha,
         files,
         current_file,
     })
@@ -2070,6 +2486,586 @@ fn load_review_diff_file_in_db(
     }
 
     review_diff_file(&resource_path, &base_ref, &branch, &path)
+}
+
+fn row_to_review_comment_draft(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewCommentDraft> {
+    Ok(ReviewCommentDraft {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        kind: row.get(2)?,
+        body: row.get(3)?,
+        path: row.get(4)?,
+        old_path: row.get(5)?,
+        new_path: row.get(6)?,
+        start_old_line: row.get(7)?,
+        start_new_line: row.get(8)?,
+        start_side: row.get(9)?,
+        old_line: row.get(10)?,
+        new_line: row.get(11)?,
+        side: row.get(12)?,
+        head_sha: row.get(13)?,
+        last_error: row.get(14)?,
+        created_at: row.get(15)?,
+        updated_at: row.get(16)?,
+    })
+}
+
+const REVIEW_DRAFT_SELECT: &str = "SELECT id, task_id, kind, body, path, old_path, new_path, start_old_line, start_new_line, start_side, old_line, new_line, side, head_sha, last_error, created_at, updated_at FROM review_comment_drafts";
+
+fn list_review_comment_drafts_in_db(
+    db: &SqliteConnection,
+    task_id: &str,
+) -> Result<Vec<ReviewCommentDraft>, String> {
+    let mut statement = db
+        .prepare(&format!(
+            "{REVIEW_DRAFT_SELECT} WHERE task_id = ?1 ORDER BY created_at ASC"
+        ))
+        .map_err(db_error)?;
+    let drafts = statement
+        .query_map(params![task_id], row_to_review_comment_draft)
+        .map_err(db_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_error)?;
+    Ok(drafts)
+}
+
+fn validate_review_comment_draft(input: &ReviewCommentDraftInput) -> Result<(), String> {
+    if input.task_id.trim().is_empty() {
+        return Err("Task is required.".to_string());
+    }
+    if input.body.trim().is_empty() {
+        return Err("Review comment cannot be blank.".to_string());
+    }
+    if !matches!(input.kind.as_str(), "overall" | "inline") {
+        return Err("Review draft kind is invalid.".to_string());
+    }
+    if input.kind == "inline" {
+        if input
+            .path
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+            || !matches!(input.side.as_deref(), Some("LEFT" | "RIGHT"))
+            || input
+                .head_sha
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err("Inline review draft position is invalid.".to_string());
+        }
+        match input.side.as_deref() {
+            Some("LEFT") if input.old_line.is_none() => {
+                return Err("A left-side review comment requires an old line.".to_string())
+            }
+            Some("RIGHT") if input.new_line.is_none() => {
+                return Err("A right-side review comment requires a new line.".to_string())
+            }
+            _ => {}
+        }
+        let start_side = input.start_side.as_deref().or(input.side.as_deref());
+        let start_old_line = input.start_old_line.or(input.old_line);
+        let start_new_line = input.start_new_line.or(input.new_line);
+        match start_side {
+            Some("LEFT") if start_old_line.is_none() => {
+                return Err("A left-side review range requires an old start line.".to_string())
+            }
+            Some("RIGHT") if start_new_line.is_none() => {
+                return Err("A right-side review range requires a new start line.".to_string())
+            }
+            Some("LEFT" | "RIGHT") => {}
+            _ => return Err("Inline review draft start side is invalid.".to_string()),
+        }
+    }
+    Ok(())
+}
+
+fn save_review_comment_draft_in_db(
+    db: &SqliteConnection,
+    input: ReviewCommentDraftInput,
+) -> Result<ReviewCommentDraft, String> {
+    validate_review_comment_draft(&input)?;
+    if get_task(db, &input.task_id).map_err(db_error)?.is_none() {
+        return Err("Task not found.".to_string());
+    }
+    let timestamp = now_millis();
+    let id = if let Some(id) = input.id.clone() {
+        id
+    } else if input.kind == "overall" {
+        db.query_row(
+            "SELECT id FROM review_comment_drafts WHERE task_id = ?1 AND kind = 'overall'",
+            params![&input.task_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db_error)?
+        .unwrap_or_else(|| new_id("review_draft"))
+    } else {
+        new_id("review_draft")
+    };
+    let created_at = db
+        .query_row(
+            "SELECT created_at FROM review_comment_drafts WHERE id = ?1",
+            params![&id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(db_error)?
+        .unwrap_or(timestamp);
+    let inline = input.kind == "inline";
+    db.execute(
+        "INSERT INTO review_comment_drafts
+         (id, task_id, kind, body, path, old_path, new_path, start_old_line, start_new_line, start_side, old_line, new_line, side, head_sha, last_error, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, NULL, ?15, ?16)
+         ON CONFLICT(id) DO UPDATE SET task_id = excluded.task_id, kind = excluded.kind,
+         body = excluded.body, path = excluded.path, old_path = excluded.old_path,
+         new_path = excluded.new_path, start_old_line = excluded.start_old_line,
+         start_new_line = excluded.start_new_line, start_side = excluded.start_side,
+         old_line = excluded.old_line, new_line = excluded.new_line,
+         side = excluded.side, head_sha = excluded.head_sha, last_error = NULL,
+         updated_at = excluded.updated_at",
+        params![
+            &id,
+            &input.task_id,
+            &input.kind,
+            input.body.trim(),
+            if inline { input.path.as_deref() } else { None },
+            if inline { input.old_path.as_deref().or(input.path.as_deref()) } else { None },
+            if inline { input.new_path.as_deref().or(input.path.as_deref()) } else { None },
+            if inline { input.start_old_line.or(input.old_line) } else { None },
+            if inline { input.start_new_line.or(input.new_line) } else { None },
+            if inline { input.start_side.as_deref().or(input.side.as_deref()) } else { None },
+            if inline { input.old_line } else { None },
+            if inline { input.new_line } else { None },
+            if inline { input.side.as_deref() } else { None },
+            if inline { input.head_sha.as_deref() } else { None },
+            created_at,
+            timestamp,
+        ],
+    )
+    .map_err(db_error)?;
+    db.query_row(
+        &format!("{REVIEW_DRAFT_SELECT} WHERE id = ?1"),
+        params![id],
+        row_to_review_comment_draft,
+    )
+    .map_err(db_error)
+}
+
+fn set_review_draft_error(
+    db: &SqliteConnection,
+    draft_id: &str,
+    message: &str,
+) -> Result<(), String> {
+    db.execute(
+        "UPDATE review_comment_drafts SET last_error = ?1, updated_at = ?2 WHERE id = ?3",
+        params![message, now_millis(), draft_id],
+    )
+    .map_err(db_error)?;
+    Ok(())
+}
+
+fn delete_review_draft_in_db(db: &SqliteConnection, draft_id: &str) -> Result<(), String> {
+    db.execute(
+        "DELETE FROM review_comment_drafts WHERE id = ?1",
+        params![draft_id],
+    )
+    .map_err(db_error)?;
+    Ok(())
+}
+
+fn github_review_headers(connection: &ConnectionRecord) -> Vec<(&'static str, String)> {
+    vec![
+        ("Accept", "application/vnd.github+json".to_string()),
+        ("Authorization", format!("Bearer {}", connection.token)),
+        ("X-GitHub-Api-Version", "2022-11-28".to_string()),
+        ("User-Agent", "dev-crash-flash-ai-studio".to_string()),
+    ]
+}
+
+fn refresh_published_review_comments(
+    db: &SqliteConnection,
+    link: &TaskLink,
+    connection: &ConnectionRecord,
+    repo_path: &str,
+    number: &str,
+) -> Result<TaskLink, String> {
+    let comments = match link.provider.as_str() {
+        "github" => fetch_github_pull_request_comments(connection, repo_path, number)?,
+        "gitlab" => {
+            fetch_gitlab_merge_request_comments(connection, repo_path, number, Some(&link.url))?
+        }
+        _ => return Err("Unsupported review provider.".to_string()),
+    };
+    let comments_json = serde_json::to_string(&comments).map_err(db_error)?;
+    db.execute(
+        "UPDATE task_links SET comments_json = ?1, fetched_at = ?2 WHERE task_id = ?3",
+        params![comments_json, now_millis(), &link.task_id],
+    )
+    .map_err(db_error)?;
+    list_task_links_in_db(db, &link.task_id)
+        .map_err(db_error)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "Task link not found after publishing review comments.".to_string())
+}
+
+fn gitlab_line_code(path: &str, old_line: Option<i64>, new_line: Option<i64>) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(path.as_bytes());
+    format!(
+        "{:x}_{}_{}",
+        hasher.finalize(),
+        old_line.unwrap_or(0),
+        new_line.unwrap_or(0)
+    )
+}
+
+fn gitlab_range_point(path: &str, old_line: Option<i64>, new_line: Option<i64>) -> Value {
+    serde_json::json!({
+        "line_code": gitlab_line_code(path, old_line, new_line),
+        "type": if old_line.is_none() { "new" } else { "old" },
+        "old_line": old_line,
+        "new_line": new_line,
+    })
+}
+
+fn github_review_comment_payload(draft: &ReviewCommentDraft) -> Value {
+    let mut comment = serde_json::json!({
+        "path": draft.path,
+        "line": if draft.side.as_deref() == Some("LEFT") { draft.old_line } else { draft.new_line },
+        "side": draft.side,
+        "body": draft.body,
+    });
+    let start_side = draft.start_side.as_deref().or(draft.side.as_deref());
+    let start_line = if start_side == Some("LEFT") {
+        draft.start_old_line.or(draft.old_line)
+    } else {
+        draft.start_new_line.or(draft.new_line)
+    };
+    let end_line = if draft.side.as_deref() == Some("LEFT") {
+        draft.old_line
+    } else {
+        draft.new_line
+    };
+    if start_side != draft.side.as_deref() || start_line != end_line {
+        comment["start_line"] = serde_json::json!(start_line);
+        comment["start_side"] = serde_json::json!(start_side);
+    }
+    comment
+}
+
+fn gitlab_review_position(
+    draft: &ReviewCommentDraft,
+    base_sha: &str,
+    start_sha: &str,
+    head_sha: &str,
+) -> Value {
+    let mut position = serde_json::json!({
+        "position_type": "text",
+        "base_sha": base_sha,
+        "start_sha": start_sha,
+        "head_sha": head_sha,
+        "old_path": draft.old_path.as_ref().or(draft.path.as_ref()),
+        "new_path": draft.new_path.as_ref().or(draft.path.as_ref()),
+    });
+    if draft.side.as_deref() == Some("LEFT") {
+        position["old_line"] = serde_json::json!(draft.old_line);
+    } else {
+        position["new_line"] = serde_json::json!(draft.new_line);
+    }
+    let start_old_line = draft.start_old_line.or(draft.old_line);
+    let start_new_line = draft.start_new_line.or(draft.new_line);
+    if start_old_line != draft.old_line || start_new_line != draft.new_line {
+        let line_code_path = draft
+            .new_path
+            .as_deref()
+            .or(draft.old_path.as_deref())
+            .or(draft.path.as_deref())
+            .unwrap_or_default();
+        position["line_range"] = serde_json::json!({
+            "start": gitlab_range_point(line_code_path, start_old_line, start_new_line),
+            "end": gitlab_range_point(line_code_path, draft.old_line, draft.new_line),
+        });
+    }
+    position
+}
+
+fn submit_review_comments_in_db(
+    db: &SqliteConnection,
+    task_id: &str,
+    overall_body: Option<String>,
+) -> Result<ReviewCommentSubmissionResult, String> {
+    let task = get_task(db, task_id)
+        .map_err(db_error)?
+        .ok_or_else(|| "Task not found.".to_string())?;
+    let link = list_task_links_in_db(db, task_id)
+        .map_err(db_error)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "This task has no pull or merge request.".to_string())?;
+    if !matches!(
+        (link.provider.as_str(), link.kind.as_str()),
+        ("github", "pull_request") | ("gitlab", "merge_request")
+    ) {
+        return Err("Review comments are only supported for GitHub pull requests and GitLab merge requests.".to_string());
+    }
+    let connection_id = link.connection_id.as_deref().ok_or_else(|| {
+        "Connect this pull or merge request before publishing comments.".to_string()
+    })?;
+    let connection = get_connection(db, connection_id)
+        .map_err(db_error)?
+        .ok_or_else(|| {
+            "The connection used by this pull or merge request no longer exists.".to_string()
+        })?;
+    let drafts = list_review_comment_drafts_in_db(db, task_id)?;
+    if drafts.is_empty() {
+        if overall_body
+            .as_deref()
+            .is_none_or(|body| body.trim().is_empty())
+        {
+            return Err("Add an inline or overall review comment before submitting.".to_string());
+        }
+    }
+    let legacy_summary = drafts.iter().find(|draft| draft.kind == "overall");
+    let summary_was_cleared = overall_body
+        .as_deref()
+        .is_some_and(|body| body.trim().is_empty());
+    let summary_body = match overall_body {
+        Some(body) => (!body.trim().is_empty()).then(|| body.trim().to_string()),
+        None => legacy_summary.map(|draft| draft.body.trim().to_string()),
+    };
+    let inline = drafts
+        .iter()
+        .filter(|draft| draft.kind == "inline")
+        .collect::<Vec<_>>();
+    if inline.is_empty() && summary_body.is_none() {
+        return Err("Add an inline or overall review comment before submitting.".to_string());
+    }
+    let parsed = parsed_payload_from_task_link(&task, &link);
+    let (repo_path, number) = if link.provider == "github" {
+        split_github_external_id(&parsed)?
+    } else {
+        split_gitlab_external_id(&parsed)?
+    };
+
+    let (head_sha, base_sha, start_sha) = if link.provider == "github" {
+        let json = fetch_json(
+            &format!("https://api.github.com/repos/{repo_path}/pulls/{number}"),
+            github_review_headers(&connection),
+        )?;
+        if json_string(&json, "state").as_deref() != Some("open")
+            || json_bool(&json, "merged") == Some(true)
+        {
+            return Err("This GitHub pull request is no longer open.".to_string());
+        }
+        (
+            json_path_string(&json, &["head", "sha"])
+                .ok_or_else(|| "GitHub did not return the pull request head SHA.".to_string())?,
+            None,
+            None,
+        )
+    } else {
+        let base_url = normalize_base_url(&connection.base_url);
+        let json = fetch_json(
+            &format!(
+                "{base_url}/api/v4/projects/{}/merge_requests/{}",
+                percent_encode(&repo_path),
+                percent_encode(&number)
+            ),
+            vec![("PRIVATE-TOKEN", connection.token.clone())],
+        )?;
+        if json_string(&json, "state").as_deref() != Some("opened") {
+            return Err("This GitLab merge request is no longer open.".to_string());
+        }
+        (
+            json_path_string(&json, &["diff_refs", "head_sha"])
+                .ok_or_else(|| "GitLab did not return the merge request head SHA.".to_string())?,
+            Some(
+                json_path_string(&json, &["diff_refs", "base_sha"]).ok_or_else(|| {
+                    "GitLab did not return the merge request base SHA.".to_string()
+                })?,
+            ),
+            Some(
+                json_path_string(&json, &["diff_refs", "start_sha"]).ok_or_else(|| {
+                    "GitLab did not return the merge request start SHA.".to_string()
+                })?,
+            ),
+        )
+    };
+
+    if inline
+        .iter()
+        .any(|draft| draft.head_sha.as_deref() != Some(head_sha.as_str()))
+    {
+        return Err("The pull or merge request changed after these comments were drafted. Refresh the review branch and re-anchor the inline drafts before submitting.".to_string());
+    }
+
+    let mut published_draft_ids = Vec::new();
+    let mut failures = Vec::new();
+    let mut published_any = false;
+    let mut published_transient_overall = false;
+    if link.provider == "github" {
+        let comments = inline
+            .iter()
+            .map(|draft| github_review_comment_payload(draft))
+            .collect::<Vec<_>>();
+        let mut payload = serde_json::json!({
+            "commit_id": head_sha,
+            "comments": comments,
+        });
+        let url = format!("https://api.github.com/repos/{repo_path}/pulls/{number}/reviews");
+        let publish_result = if let Some(body) = summary_body.as_deref() {
+            payload["body"] = serde_json::json!(body);
+            payload["event"] = serde_json::json!("COMMENT");
+            post_json(&url, github_review_headers(&connection), &payload).map(|_| ())
+        } else {
+            post_json(&url, github_review_headers(&connection), &payload).and_then(|pending| {
+                let review_id = json_id_string(&pending, "id")
+                    .ok_or_else(|| "GitHub did not return the pending review ID.".to_string())?;
+                let submit_url = format!("{url}/{review_id}/events");
+                post_json(
+                    &submit_url,
+                    github_review_headers(&connection),
+                    &serde_json::json!({ "event": "COMMENT" }),
+                )
+                .map(|_| ())
+                .map_err(|message| {
+                    let delete_url = format!("{url}/{review_id}");
+                    match delete_json(&delete_url, github_review_headers(&connection)) {
+                        Ok(_) => message,
+                        Err(cleanup) => format!(
+                            "{message} The pending GitHub review also could not be removed: {cleanup}"
+                        ),
+                    }
+                })
+            })
+        };
+        match publish_result {
+            Ok(_) => {
+                published_any = true;
+                published_transient_overall = summary_body.is_some() && legacy_summary.is_none();
+                for draft in &drafts {
+                    delete_review_draft_in_db(db, &draft.id)?;
+                    published_draft_ids.push(draft.id.clone());
+                }
+            }
+            Err(message) => {
+                for draft in &drafts {
+                    set_review_draft_error(db, &draft.id, &message)?;
+                    failures.push(ReviewCommentFailure {
+                        draft_id: draft.id.clone(),
+                        message: message.clone(),
+                    });
+                }
+                if drafts.is_empty() {
+                    failures.push(ReviewCommentFailure {
+                        draft_id: "overall".to_string(),
+                        message,
+                    });
+                }
+            }
+        }
+    } else {
+        let base_url = normalize_base_url(&connection.base_url);
+        let url = format!(
+            "{base_url}/api/v4/projects/{}/merge_requests/{}/discussions",
+            percent_encode(&repo_path),
+            percent_encode(&number)
+        );
+        for draft in &inline {
+            let position = gitlab_review_position(
+                draft,
+                base_sha.as_deref().unwrap_or_default(),
+                start_sha.as_deref().unwrap_or_default(),
+                &head_sha,
+            );
+            let payload = serde_json::json!({ "body": draft.body, "position": position });
+            match post_json(
+                &url,
+                vec![("PRIVATE-TOKEN", connection.token.clone())],
+                &payload,
+            ) {
+                Ok(_) => {
+                    published_any = true;
+                    delete_review_draft_in_db(db, &draft.id)?;
+                    published_draft_ids.push(draft.id.clone());
+                }
+                Err(message) => {
+                    set_review_draft_error(db, &draft.id, &message)?;
+                    failures.push(ReviewCommentFailure {
+                        draft_id: draft.id.clone(),
+                        message,
+                    });
+                }
+            }
+        }
+        if failures.is_empty() {
+            if let Some(body) = summary_body.as_deref() {
+                let payload = serde_json::json!({ "body": body });
+                match post_json(
+                    &url,
+                    vec![("PRIVATE-TOKEN", connection.token.clone())],
+                    &payload,
+                ) {
+                    Ok(_) => {
+                        published_any = true;
+                        if let Some(summary) = legacy_summary {
+                            delete_review_draft_in_db(db, &summary.id)?;
+                            published_draft_ids.push(summary.id.clone());
+                        } else {
+                            published_transient_overall = true;
+                        }
+                    }
+                    Err(message) => {
+                        if let Some(summary) = legacy_summary {
+                            set_review_draft_error(db, &summary.id, &message)?;
+                            failures.push(ReviewCommentFailure {
+                                draft_id: summary.id.clone(),
+                                message,
+                            });
+                        } else {
+                            failures.push(ReviewCommentFailure {
+                                draft_id: "overall".to_string(),
+                                message,
+                            });
+                        }
+                    }
+                }
+            }
+            if summary_was_cleared {
+                if let Some(summary) = legacy_summary {
+                    delete_review_draft_in_db(db, &summary.id)?;
+                }
+            }
+        }
+    }
+
+    let mut notice = if failures.is_empty() {
+        "Review comments published.".to_string()
+    } else if published_draft_ids.is_empty() {
+        "Review comments could not be published. The drafts were kept for retry.".to_string()
+    } else {
+        "Some review comments were published. Failed drafts were kept for retry.".to_string()
+    };
+    let refreshed_link = if !published_any {
+        Some(link)
+    } else {
+        match refresh_published_review_comments(db, &link, &connection, &repo_path, &number) {
+            Ok(link) => Some(link),
+            Err(_) => {
+                notice.push_str(" Published comments could not be refreshed locally yet.");
+                Some(link)
+            }
+        }
+    };
+    let remaining_drafts = list_review_comment_drafts_in_db(db, task_id)?;
+    Ok(ReviewCommentSubmissionResult {
+        published_count: published_draft_ids.len() + usize::from(published_transient_overall),
+        published_draft_ids,
+        remaining_drafts,
+        failures,
+        link: refreshed_link,
+        notice,
+    })
 }
 
 fn is_supported_ocr_mime_type(mime_type: &str) -> bool {
@@ -2850,6 +3846,204 @@ fn save_connection_in_db(
     )
 }
 
+fn list_ai_prompts_in_db(db: &SqliteConnection) -> Result<Vec<AiPromptRecord>, String> {
+    let mut statement = db
+        .prepare(
+            "SELECT id, name, icon, agent_type, prompt_text, created_at, updated_at
+             FROM ai_prompts ORDER BY name COLLATE NOCASE ASC, id ASC",
+        )
+        .map_err(db_error)?;
+    let prompts = statement
+        .query_map([], row_to_ai_prompt)
+        .map_err(db_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_error)?;
+    Ok(prompts)
+}
+
+fn get_ai_prompt_in_db(db: &SqliteConnection, id: &str) -> Result<Option<AiPromptRecord>, String> {
+    db.query_row(
+        "SELECT id, name, icon, agent_type, prompt_text, created_at, updated_at FROM ai_prompts WHERE id = ?1",
+        params![id],
+        row_to_ai_prompt,
+    )
+    .optional()
+    .map_err(db_error)
+}
+
+fn save_ai_prompt_in_db(
+    db: &SqliteConnection,
+    input: AiPromptInput,
+) -> Result<AiPromptRecord, String> {
+    let agent_type = input.agent_type.trim().to_string();
+    if !matches!(agent_type.as_str(), "codex" | "claude") {
+        return Err("AI Prompt agent must be Codex or Claude.".to_string());
+    }
+    let icon = input.icon.trim().to_string();
+    if !matches!(
+        icon.as_str(),
+        "target"
+            | "clock"
+            | "hammer"
+            | "review"
+            | "testing"
+            | "bug"
+            | "planning"
+            | "documentation"
+            | "research"
+            | "sparkles"
+    ) {
+        return Err("AI Prompt icon is not supported.".to_string());
+    }
+
+    let name = input.name.trim().to_string();
+    if name.is_empty() {
+        return Err("AI Prompt name is required.".to_string());
+    }
+    let prompt_text = input.prompt_text.trim().to_string();
+
+    let id = input.id.unwrap_or_else(|| new_id("ai_prompt"));
+    let duplicate_exists: bool = db
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM ai_prompts
+                WHERE name = ?1 COLLATE NOCASE AND id != ?2
+             )",
+            params![name, id],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    if duplicate_exists {
+        return Err("An AI Prompt with this name already exists.".to_string());
+    }
+
+    let timestamp = now_millis();
+    let exists: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ai_prompts WHERE id = ?1)",
+            params![id],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+
+    if exists {
+        db.execute(
+            "UPDATE ai_prompts SET name = ?1, icon = ?2, agent_type = ?3, prompt_text = ?4, updated_at = ?5 WHERE id = ?6",
+            params![name, icon, agent_type, prompt_text, timestamp, id],
+        )
+        .map_err(db_error)?;
+    } else {
+        db.execute(
+            "INSERT INTO ai_prompts (id, name, icon, agent_type, prompt_text, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, name, icon, agent_type, prompt_text, timestamp, timestamp],
+        )
+        .map_err(db_error)?;
+    }
+
+    db.query_row(
+        "SELECT id, name, icon, agent_type, prompt_text, created_at, updated_at FROM ai_prompts WHERE id = ?1",
+        params![id],
+        row_to_ai_prompt,
+    )
+    .map_err(db_error)
+}
+
+fn delete_ai_prompt_in_db(db: &SqliteConnection, id: &str) -> Result<(), String> {
+    db.execute("DELETE FROM ai_prompts WHERE id = ?1", params![id])
+        .map_err(db_error)?;
+    Ok(())
+}
+
+fn ai_prompt_with_task_context(prompt_text: &str, task: &Task) -> String {
+    let title = task.title.trim();
+    let body = task.body.trim();
+    let body_duplicates_title = title.split_whitespace().eq(body.split_whitespace());
+
+    let mut context = vec![
+        prompt_text,
+        task.source_url.as_deref().unwrap_or_default(),
+        title,
+    ];
+    if !body_duplicates_title {
+        context.push(body);
+    }
+
+    context
+        .into_iter()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn ai_prompt_deep_link(agent_type: &str, prompt: &str, path: &str) -> Result<String, String> {
+    let base_url = match agent_type {
+        "codex" => "codex://threads/new",
+        "claude" => "claude://code/new",
+        _ => return Err("Unsupported AI Agent type.".to_string()),
+    };
+    let mut url = reqwest::Url::parse(base_url).map_err(db_error)?;
+    {
+        let mut query = url.query_pairs_mut();
+        match agent_type {
+            "codex" => {
+                query.append_pair("prompt", prompt);
+                query.append_pair("path", path);
+            }
+            "claude" => {
+                query.append_pair("q", prompt);
+                query.append_pair("folder", path);
+            }
+            _ => unreachable!(),
+        }
+    }
+    Ok(url.to_string())
+}
+
+fn prepare_ai_prompt_thread_in_db(
+    db: &SqliteConnection,
+    input: &OpenAiPromptThreadInput,
+) -> Result<String, String> {
+    let prompt = get_ai_prompt_in_db(db, &input.ai_prompt_id)?
+        .ok_or_else(|| "AI Prompt not found.".to_string())?;
+    let task = get_task(db, &input.task_id)
+        .map_err(db_error)?
+        .ok_or_else(|| "Task not found.".to_string())?;
+
+    let trimmed_path = input.path.trim();
+    if trimmed_path.is_empty() {
+        return Err("Repository or directory is required.".to_string());
+    }
+    let canonical_path = fs::canonicalize(trimmed_path)
+        .map_err(|_| "The selected repository or directory no longer exists.".to_string())?;
+    if !canonical_path.is_dir() {
+        return Err("The selected workspace must be a directory.".to_string());
+    }
+    let canonical_path = canonical_path.to_string_lossy().to_string();
+    let path_is_available: bool = db
+        .query_row(
+            "SELECT
+                EXISTS(SELECT 1 FROM directories WHERE path = ?1)
+                OR EXISTS(
+                    SELECT 1 FROM local_resources
+                    WHERE path = ?1 AND project_id = ?2
+                )",
+            params![canonical_path, task.project_id],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    if !path_is_available {
+        return Err("The selected workspace is not configured for this task.".to_string());
+    }
+
+    ai_prompt_deep_link(
+        &prompt.agent_type,
+        &ai_prompt_with_task_context(&prompt.prompt_text, &task),
+        &canonical_path,
+    )
+}
+
 fn directory_name_from_path(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -3449,6 +4643,27 @@ fn get_task_by_link(
     .optional()
 }
 
+fn get_latest_project_task_by_link(
+    db: &SqliteConnection,
+    provider: &str,
+    kind: &str,
+    external_id: &str,
+) -> rusqlite::Result<Option<Task>> {
+    db.query_row(
+        "SELECT t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
+                l.provider, l.kind
+         FROM tasks t
+         INNER JOIN task_links l ON l.task_id = t.id
+         WHERE l.provider = ?1 AND l.kind = ?2 AND l.external_id = ?3
+           AND t.project_id IS NOT NULL
+         ORDER BY t.updated_at DESC, t.id ASC
+         LIMIT 1",
+        params![provider, kind, external_id],
+        row_to_task_with_source,
+    )
+    .optional()
+}
+
 fn delete_task_in_db(db: &SqliteConnection, id: &str) -> Result<(), String> {
     let deleted = db
         .execute("DELETE FROM tasks WHERE id = ?1", params![id])
@@ -3613,10 +4828,12 @@ fn link_task_resource_in_db(
     metadata: &ProviderMetadata,
 ) -> rusqlite::Result<()> {
     let files_json = task_files_to_json(&metadata.files);
+    let comments_json = task_comments_to_json(&metadata.comments);
+    let labels_json = external_labels_to_json(&metadata.labels);
     db.execute(
         "INSERT INTO task_links
-            (task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, target_branch, fetched_at, files_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            (task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, target_branch, fetched_at, files_json, comments_json, labels_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(task_id) DO UPDATE SET
             provider = excluded.provider,
             kind = excluded.kind,
@@ -3628,7 +4845,9 @@ fn link_task_resource_in_db(
             external_state = excluded.external_state,
             target_branch = excluded.target_branch,
             fetched_at = excluded.fetched_at,
-            files_json = excluded.files_json",
+            files_json = excluded.files_json,
+            comments_json = excluded.comments_json,
+            labels_json = excluded.labels_json",
         params![
             &task_id,
             &provider,
@@ -3641,7 +4860,9 @@ fn link_task_resource_in_db(
             &metadata.state,
             &metadata.target_branch,
             &metadata.fetched_at,
-            &files_json
+            &files_json,
+            &comments_json,
+            &labels_json
         ],
     )?;
     db.execute(
@@ -3653,7 +4874,7 @@ fn link_task_resource_in_db(
 
 fn list_task_links_in_db(db: &SqliteConnection, task_id: &str) -> rusqlite::Result<Vec<TaskLink>> {
     let mut statement = db.prepare(
-        "SELECT task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, target_branch, fetched_at, files_json
+        "SELECT task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, target_branch, fetched_at, files_json, comments_json, labels_json
          FROM task_links WHERE task_id = ?1 ORDER BY provider ASC, kind ASC",
     )?;
     let links = statement
@@ -3861,6 +5082,25 @@ fn complete_task_external_refresh(
         Ok(mut metadata) => {
             metadata.connection_id = Some(connection.id);
             metadata.fetched_at = Some(now_millis());
+            let cached = link
+                .comments
+                .iter()
+                .map(|comment| (comment.id.as_str(), comment))
+                .collect::<HashMap<_, _>>();
+            for comment in &mut metadata.comments {
+                let needs_context = comment
+                    .code_context
+                    .as_ref()
+                    .is_none_or(|context| context.lines.is_empty());
+                if needs_context {
+                    if let Some(context) = cached
+                        .get(comment.id.as_str())
+                        .and_then(|old| old.code_context.clone())
+                    {
+                        comment.code_context = Some(context);
+                    }
+                }
+            }
             apply_refreshed_task_external_metadata(db, task, link, &metadata)
         }
         Err(_) => Ok(RefreshTaskExternalDetailsResult {
@@ -3933,6 +5173,8 @@ fn migrate_pull_requests_into_tasks(db: &SqliteConnection) -> rusqlite::Result<(
             url: Some(pull_request.pr_url.clone()),
             fetched_at: pull_request.fetched_at,
             files: Vec::new(),
+            comments: Vec::new(),
+            labels: Vec::new(),
             parent_resource: None,
             notice: None,
         };
@@ -4412,6 +5654,8 @@ impl ProviderMetadata {
             url: None,
             fetched_at: None,
             files: Vec::new(),
+            comments: Vec::new(),
+            labels: Vec::new(),
             parent_resource: None,
             notice: None,
         }
@@ -4462,6 +5706,676 @@ fn fetch_json(url: &str, headers: Vec<(&str, String)>) -> Result<Value, String> 
     response.json::<Value>().map_err(db_error)
 }
 
+fn post_json(url: &str, headers: Vec<(&str, String)>, payload: &Value) -> Result<Value, String> {
+    let client = reqwest::blocking::Client::new();
+    let mut request = client
+        .post(url)
+        .header("Accept", "application/json")
+        .json(payload);
+    for (key, value) in headers {
+        if !value.trim().is_empty() {
+            request = request.header(key, value);
+        }
+    }
+    let response = request.send().map_err(db_error)?;
+    let status = response.status();
+    let body = response.text().unwrap_or_default();
+    if !status.is_success() {
+        let detail = body.trim();
+        return Err(if detail.is_empty() {
+            format!("provider returned {status}")
+        } else {
+            format!("provider returned {status}: {detail}")
+        });
+    }
+    if body.trim().is_empty() {
+        Ok(Value::Null)
+    } else {
+        serde_json::from_str(&body).map_err(db_error)
+    }
+}
+
+fn delete_json(url: &str, headers: Vec<(&str, String)>) -> Result<(), String> {
+    let client = reqwest::blocking::Client::new();
+    let mut request = client.delete(url).header("Accept", "application/json");
+    for (key, value) in headers {
+        if !value.trim().is_empty() {
+            request = request.header(key, value);
+        }
+    }
+    let response = request.send().map_err(db_error)?;
+    let status = response.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        let body = response.text().unwrap_or_default();
+        Err(if body.trim().is_empty() {
+            format!("provider returned {status}")
+        } else {
+            format!("provider returned {status}: {}", body.trim())
+        })
+    }
+}
+
+fn fetch_paginated_json(url: &str, headers: Vec<(&str, String)>) -> Result<Vec<Value>, String> {
+    let mut items = Vec::new();
+    let separator = if url.contains('?') { '&' } else { '?' };
+    let mut page = 1;
+
+    loop {
+        let page_json = fetch_json(
+            &format!("{url}{separator}per_page=100&page={page}"),
+            headers.clone(),
+        )?;
+        let page_items = page_json
+            .as_array()
+            .ok_or_else(|| "provider returned an invalid paginated response".to_string())?;
+        let page_len = page_items.len();
+        items.extend(page_items.iter().cloned());
+        if page_len < 100 {
+            break;
+        }
+        page += 1;
+    }
+
+    Ok(items)
+}
+
+fn json_id_string(json: &Value, key: &str) -> Option<String> {
+    json.get(key).and_then(|value| match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    })
+}
+
+fn json_i64(json: &Value, key: &str) -> Option<i64> {
+    json.get(key).and_then(Value::as_i64)
+}
+
+fn diff_context(
+    path: String,
+    diff: &str,
+    old_target: Option<i64>,
+    new_target: Option<i64>,
+    outdated: bool,
+) -> TaskCommentCodeContext {
+    let mut old_line = 0_i64;
+    let mut new_line = 0_i64;
+    let mut parsed = Vec::new();
+    for raw in diff.lines() {
+        if let Some(header) = raw.strip_prefix("@@ -") {
+            let Some((old, rest)) = header.split_once(" +") else {
+                continue;
+            };
+            let Some((new, _)) = rest.split_once(" @@") else {
+                continue;
+            };
+            old_line = old
+                .split(',')
+                .next()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            new_line = new
+                .split(',')
+                .next()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            continue;
+        }
+        let (kind, old, new, content) = if let Some(content) = raw.strip_prefix('+') {
+            let line = new_line;
+            new_line += 1;
+            ("addition", None, Some(line), content)
+        } else if let Some(content) = raw.strip_prefix('-') {
+            let line = old_line;
+            old_line += 1;
+            ("deletion", Some(line), None, content)
+        } else {
+            let content = raw.strip_prefix(' ').unwrap_or(raw);
+            let old = old_line;
+            let new = new_line;
+            old_line += 1;
+            new_line += 1;
+            ("context", Some(old), Some(new), content)
+        };
+        let highlighted = old_target.is_some_and(|target| old == Some(target))
+            || new_target.is_some_and(|target| new == Some(target));
+        parsed.push(TaskCommentDiffLine {
+            kind: kind.to_string(),
+            old_line: old,
+            new_line: new,
+            content: content.to_string(),
+            highlighted,
+        });
+    }
+    let target = parsed
+        .iter()
+        .position(|line| line.highlighted)
+        .unwrap_or_else(|| parsed.len().saturating_sub(1));
+    let start = target.saturating_sub(3);
+    let end = (target + 4).min(parsed.len());
+    TaskCommentCodeContext {
+        path,
+        old_start_line: old_target,
+        old_line: old_target,
+        new_start_line: new_target,
+        new_line: new_target,
+        outdated,
+        lines: parsed[start..end].to_vec(),
+    }
+}
+
+fn github_inline_comments_from_json(items: &[Value]) -> Vec<TaskComment> {
+    let mut comments = github_comments_from_json(items, "inline");
+    for (comment, item) in comments.iter_mut().zip(items.iter().filter(|item| {
+        item.get("user").is_some_and(|user| !is_bot_user(user))
+            && json_string(item, "body").is_some_and(|body| !body.trim().is_empty())
+    })) {
+        let raw_id = json_id_string(item, "id").unwrap_or_default();
+        comment.reply_to_id =
+            json_id_string(item, "in_reply_to_id").map(|id| format!("github:inline:{id}"));
+        comment.discussion_id = Some(
+            comment
+                .reply_to_id
+                .clone()
+                .unwrap_or_else(|| format!("github:inline:{raw_id}")),
+        );
+        let current_line = json_i64(item, "line");
+        let old = if json_string(item, "side").as_deref() == Some("LEFT") {
+            current_line.or_else(|| json_i64(item, "original_line"))
+        } else {
+            None
+        };
+        let new = if json_string(item, "side").as_deref() != Some("LEFT") {
+            current_line.or_else(|| json_i64(item, "original_line"))
+        } else {
+            None
+        };
+        if let (Some(path), Some(hunk)) =
+            (json_string(item, "path"), json_string(item, "diff_hunk"))
+        {
+            comment.code_context =
+                Some(diff_context(path, &hunk, old, new, current_line.is_none()));
+        }
+    }
+    let parents = comments
+        .iter()
+        .map(|comment| (comment.id.clone(), comment.reply_to_id.clone()))
+        .collect::<HashMap<_, _>>();
+    for comment in &mut comments {
+        let mut root = comment.reply_to_id.clone();
+        let mut seen = HashSet::new();
+        while let Some(parent) = root.clone() {
+            if !seen.insert(parent.clone()) {
+                break;
+            }
+            match parents.get(&parent).cloned().flatten() {
+                Some(next) => root = Some(next),
+                None => {
+                    comment.discussion_id = Some(parent);
+                    break;
+                }
+            }
+        }
+    }
+    comments
+}
+
+fn is_bot_user(json: &Value) -> bool {
+    json_bool(json, "bot") == Some(true)
+        || json_string(json, "type").is_some_and(|value| value.eq_ignore_ascii_case("bot"))
+        || json_string(json, "login").is_some_and(|value| value.ends_with("[bot]"))
+}
+
+fn normalize_task_comments(comments: Vec<TaskComment>) -> Vec<TaskComment> {
+    let mut by_id = HashMap::new();
+    for comment in comments {
+        if !comment.body.trim().is_empty() {
+            by_id.insert(comment.id.clone(), comment);
+        }
+    }
+    let mut comments = by_id.into_values().collect::<Vec<_>>();
+    comments.sort_by(|left, right| {
+        left.created_at
+            .as_deref()
+            .unwrap_or("9999")
+            .cmp(right.created_at.as_deref().unwrap_or("9999"))
+            .then_with(|| left.updated_at.cmp(&right.updated_at))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    comments
+}
+
+fn github_comments_from_json(items: &[Value], kind: &str) -> Vec<TaskComment> {
+    items
+        .iter()
+        .filter_map(|item| {
+            let user = item.get("user")?;
+            if is_bot_user(user) {
+                return None;
+            }
+            let body = json_string(item, "body")?;
+            if body.trim().is_empty() {
+                return None;
+            }
+            let id = json_id_string(item, "id")?;
+            Some(TaskComment {
+                id: format!("github:{kind}:{id}"),
+                kind: kind.to_string(),
+                author: json_string(user, "login").unwrap_or_else(|| "Unknown author".to_string()),
+                body,
+                created_at: json_string(item, "submitted_at")
+                    .or_else(|| json_string(item, "created_at")),
+                updated_at: json_string(item, "updated_at"),
+                url: json_string(item, "html_url"),
+                discussion_id: None,
+                reply_to_id: None,
+                code_context: None,
+            })
+        })
+        .collect()
+}
+
+fn fetch_github_pull_request_comments(
+    connection: &ConnectionRecord,
+    repo_path: &str,
+    number: &str,
+) -> Result<Vec<TaskComment>, String> {
+    let headers = vec![
+        ("Authorization", format!("Bearer {}", connection.token)),
+        ("X-GitHub-Api-Version", "2022-11-28".to_string()),
+        ("User-Agent", "dev-crash-flash-ai-studio".to_string()),
+    ];
+    let conversation = fetch_paginated_json(
+        &format!("https://api.github.com/repos/{repo_path}/issues/{number}/comments"),
+        headers.clone(),
+    )?;
+    let reviews = fetch_paginated_json(
+        &format!("https://api.github.com/repos/{repo_path}/pulls/{number}/reviews"),
+        headers.clone(),
+    )?;
+    let inline = fetch_paginated_json(
+        &format!("https://api.github.com/repos/{repo_path}/pulls/{number}/comments"),
+        headers,
+    )?;
+
+    let mut comments = github_comments_from_json(&conversation, "comment");
+    comments.extend(github_comments_from_json(&reviews, "review"));
+    comments.extend(github_inline_comments_from_json(&inline));
+    Ok(normalize_task_comments(comments))
+}
+
+fn trello_comments_from_json(items: &[Value], card_url: Option<&str>) -> Vec<TaskComment> {
+    let comments = items.iter().filter_map(|item| {
+        if item.get("appCreator").is_some_and(|value| !value.is_null()) {
+            return None;
+        }
+        let id = json_id_string(item, "id")?;
+        let body = item
+            .get("data")
+            .and_then(|data| json_string(data, "text"))?;
+        let author = item.get("memberCreator").and_then(|member| {
+            json_string(member, "fullName").or_else(|| json_string(member, "username"))
+        })?;
+        Some(TaskComment {
+            id: format!("trello:{id}"),
+            kind: "comment".to_string(),
+            author,
+            body,
+            created_at: json_string(item, "date"),
+            updated_at: None,
+            url: card_url.map(|url| format!("{url}#comment-{id}")),
+            discussion_id: None,
+            reply_to_id: None,
+            code_context: None,
+        })
+    });
+    normalize_task_comments(comments.collect())
+}
+
+fn fetch_trello_card_comments(
+    id: &str,
+    card_url: Option<&str>,
+    api_key: &str,
+    token: &str,
+) -> Result<Vec<TaskComment>, String> {
+    let mut actions = Vec::new();
+    let mut before: Option<String> = None;
+    loop {
+        let before_query = before
+            .as_deref()
+            .map(|value| format!("&before={}", percent_encode(value)))
+            .unwrap_or_default();
+        let json = fetch_json(
+            &format!(
+                "https://api.trello.com/1/cards/{}/actions?filter=commentCard&limit=1000{before_query}&key={}&token={}",
+                percent_encode(id),
+                percent_encode(api_key),
+                percent_encode(token)
+            ),
+            vec![],
+        )?;
+        let page = json
+            .as_array()
+            .ok_or_else(|| "Trello returned an invalid comments response".to_string())?;
+        let page_len = page.len();
+        before = page.last().and_then(|item| json_id_string(item, "id"));
+        actions.extend(page.iter().cloned());
+        if page_len < 1000 || before.is_none() {
+            break;
+        }
+    }
+    Ok(trello_comments_from_json(&actions, card_url))
+}
+
+fn gitlab_comments_from_json(
+    discussions: &[Value],
+    diffs: &[Value],
+    merge_request_url: Option<&str>,
+) -> Vec<TaskComment> {
+    let diff_by_path = diffs
+        .iter()
+        .filter_map(|diff| {
+            Some((
+                (
+                    json_string(diff, "comment_head_sha"),
+                    json_string(diff, "new_path").or_else(|| json_string(diff, "old_path"))?,
+                ),
+                json_string(diff, "diff")?,
+            ))
+        })
+        .collect::<HashMap<_, _>>();
+    let comments = discussions.iter().flat_map(|discussion| {
+        let diff_by_path = &diff_by_path;
+        let discussion_id = json_id_string(discussion, "id");
+        let notes = discussion
+            .get("notes")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let threaded = notes.len() > 1;
+        notes.into_iter().filter_map(move |item| {
+            if json_bool(&item, "system") == Some(true) {
+                return None;
+            }
+            let author = item.get("author")?;
+            if is_bot_user(author) {
+                return None;
+            }
+            let id = json_id_string(&item, "id")?;
+            let kind = if json_string(&item, "type").as_deref() == Some("DiffNote") {
+                "inline"
+            } else {
+                "comment"
+            };
+            let position = item.get("position");
+            let path = position.and_then(|value| {
+                json_string(value, "new_path").or_else(|| json_string(value, "old_path"))
+            });
+            let old = position.and_then(|value| json_i64(value, "old_line"));
+            let new = position.and_then(|value| json_i64(value, "new_line"));
+            let head_sha = position.and_then(|value| json_string(value, "head_sha"));
+            let code_context = path.clone().map(|path| {
+                diff_by_path
+                    .get(&(head_sha.clone(), path.clone()))
+                    .or_else(|| diff_by_path.get(&(None, path.clone())))
+                    .map(|diff| diff_context(path.clone(), diff, old, new, false))
+                    .unwrap_or(TaskCommentCodeContext {
+                        path,
+                        old_start_line: old,
+                        old_line: old,
+                        new_start_line: new,
+                        new_line: new,
+                        outdated: true,
+                        lines: Vec::new(),
+                    })
+            });
+            Some(TaskComment {
+                id: format!("gitlab:{id}"),
+                kind: kind.to_string(),
+                author: json_string(author, "name")
+                    .or_else(|| json_string(author, "username"))
+                    .unwrap_or_else(|| "Unknown author".to_string()),
+                body: json_string(&item, "body")?,
+                created_at: json_string(&item, "created_at"),
+                updated_at: json_string(&item, "updated_at"),
+                url: merge_request_url.map(|url| format!("{url}#note_{id}")),
+                discussion_id: if threaded || kind == "inline" {
+                    discussion_id.clone().map(|id| format!("gitlab:{id}"))
+                } else {
+                    None
+                },
+                reply_to_id: None,
+                code_context,
+            })
+        })
+    });
+    normalize_task_comments(comments.collect())
+}
+
+fn fetch_gitlab_merge_request_comments(
+    connection: &ConnectionRecord,
+    project_path: &str,
+    iid: &str,
+    merge_request_url: Option<&str>,
+) -> Result<Vec<TaskComment>, String> {
+    let base_url = normalize_base_url(&connection.base_url);
+    let discussions = fetch_paginated_json(
+        &format!(
+            "{base_url}/api/v4/projects/{}/merge_requests/{}/discussions",
+            percent_encode(project_path),
+            percent_encode(iid)
+        ),
+        vec![("PRIVATE-TOKEN", connection.token.clone())],
+    )?;
+    let mut diffs = fetch_paginated_json(
+        &format!(
+            "{base_url}/api/v4/projects/{}/merge_requests/{}/diffs",
+            percent_encode(project_path),
+            percent_encode(iid)
+        ),
+        vec![("PRIVATE-TOKEN", connection.token.clone())],
+    )
+    .unwrap_or_default();
+    let requested_heads = discussions
+        .iter()
+        .flat_map(|discussion| {
+            discussion
+                .get("notes")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|note| {
+            note.get("position")
+                .and_then(|position| json_string(position, "head_sha"))
+        })
+        .collect::<HashSet<_>>();
+    if !requested_heads.is_empty() {
+        let versions = fetch_paginated_json(
+            &format!(
+                "{base_url}/api/v4/projects/{}/merge_requests/{}/versions",
+                percent_encode(project_path),
+                percent_encode(iid)
+            ),
+            vec![("PRIVATE-TOKEN", connection.token.clone())],
+        )
+        .unwrap_or_default();
+        for head_sha in requested_heads {
+            let Some(version_id) = versions
+                .iter()
+                .find(|version| {
+                    json_string(version, "head_commit_sha").as_deref() == Some(head_sha.as_str())
+                })
+                .and_then(|version| json_id_string(version, "id"))
+            else {
+                continue;
+            };
+            let Ok(version) = fetch_json(
+                &format!(
+                    "{base_url}/api/v4/projects/{}/merge_requests/{}/versions/{version_id}",
+                    percent_encode(project_path),
+                    percent_encode(iid)
+                ),
+                vec![("PRIVATE-TOKEN", connection.token.clone())],
+            ) else {
+                continue;
+            };
+            for mut diff in version
+                .get("diffs")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+            {
+                if let Some(object) = diff.as_object_mut() {
+                    object.insert(
+                        "comment_head_sha".to_string(),
+                        Value::String(head_sha.clone()),
+                    );
+                }
+                diffs.push(diff);
+            }
+        }
+    }
+    Ok(gitlab_comments_from_json(
+        &discussions,
+        &diffs,
+        merge_request_url,
+    ))
+}
+
+fn trello_credentials(connection: &ConnectionRecord) -> Result<(&str, &str), String> {
+    validate_connection_credentials(connection)?;
+    if connection.provider != "trello" {
+        return Err("The selected resource does not use a Trello connection.".to_string());
+    }
+    Ok((
+        connection.api_key.as_deref().unwrap_or_default().trim(),
+        connection.token.trim(),
+    ))
+}
+
+fn trello_board_templates_from_json(cards: &Value, lists: &Value) -> TrelloBoardTemplates {
+    let templates = cards
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|card| {
+            json_bool(card, "isTemplate") == Some(true)
+                || card
+                    .get("cover")
+                    .and_then(|cover| json_bool(cover, "isTemplate"))
+                    == Some(true)
+        })
+        .filter_map(|card| {
+            Some(TrelloTicketTemplate {
+                id: json_string(card, "id")?,
+                name: json_string(card, "name").unwrap_or_else(|| "Untitled template".to_string()),
+                description: json_string(card, "desc").unwrap_or_default(),
+                list_id: json_string(card, "idList")?,
+            })
+        })
+        .collect();
+    let lists = lists
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|list| json_bool(list, "closed") != Some(true))
+        .filter_map(|list| {
+            Some(TrelloBoardList {
+                id: json_string(list, "id")?,
+                name: json_string(list, "name").unwrap_or_else(|| "Untitled list".to_string()),
+            })
+        })
+        .collect();
+    TrelloBoardTemplates { templates, lists }
+}
+
+fn fetch_trello_board_templates(
+    connection: &ConnectionRecord,
+    board_id: &str,
+) -> Result<TrelloBoardTemplates, String> {
+    let (api_key, token) = trello_credentials(connection)?;
+    let cards_url = format!(
+        "https://api.trello.com/1/boards/{}/cards/open?fields=id,name,desc,idBoard,idList,isTemplate,cover&key={}&token={}",
+        percent_encode(board_id),
+        percent_encode(api_key),
+        percent_encode(token)
+    );
+    let lists_url = format!(
+        "https://api.trello.com/1/boards/{}/lists/open?fields=id,name,closed&key={}&token={}",
+        percent_encode(board_id),
+        percent_encode(api_key),
+        percent_encode(token)
+    );
+    let cards = fetch_json(&cards_url, Vec::new())?;
+    let lists = fetch_json(&lists_url, Vec::new())?;
+    Ok(trello_board_templates_from_json(&cards, &lists))
+}
+
+fn create_trello_card_from_template(
+    connection: &ConnectionRecord,
+    template_id: &str,
+    list_id: &str,
+    title: &str,
+    description: &str,
+) -> Result<Value, String> {
+    let (api_key, token) = trello_credentials(connection)?;
+    let url = format!(
+        "https://api.trello.com/1/cards?key={}&token={}",
+        percent_encode(api_key),
+        percent_encode(token)
+    );
+    let response = reqwest::blocking::Client::new()
+        .post(url)
+        .header("Accept", "application/json")
+        .json(&serde_json::json!({
+            "idList": list_id,
+            "idCardSource": template_id,
+            "keepFromSource": "all",
+            "name": title,
+            "desc": description,
+        }))
+        .send()
+        .map_err(db_error)?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().unwrap_or_default();
+        return Err(if body.trim().is_empty() {
+            format!("Trello returned {status} while creating the card.")
+        } else {
+            format!(
+                "Trello returned {status} while creating the card: {}",
+                body.trim()
+            )
+        });
+    }
+    response.json::<Value>().map_err(db_error)
+}
+
+fn delete_trello_card(connection: &ConnectionRecord, card_id: &str) -> Result<(), String> {
+    let (api_key, token) = trello_credentials(connection)?;
+    let url = format!(
+        "https://api.trello.com/1/cards/{}?key={}&token={}",
+        percent_encode(card_id),
+        percent_encode(api_key),
+        percent_encode(token)
+    );
+    let response = reqwest::blocking::Client::new()
+        .delete(url)
+        .send()
+        .map_err(db_error)?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Trello returned {} while removing the card.",
+            response.status()
+        ))
+    }
+}
+
 fn fetch_connection_activities(
     connection: &ConnectionRecord,
     date: &str,
@@ -4497,26 +6411,18 @@ fn fetch_trello_assigned_cards(
         .as_deref()
         .ok_or_else(|| "Trello API key is required.".to_string())?;
     let url = format!(
-        "https://api.trello.com/1/members/me/cards?filter=open&fields=id,name,shortLink,shortUrl,url,closed,dateLastActivity,idBoard,idList&board=true&board_fields=name&list=true&list_fields=name&key={}&token={}",
+        "https://api.trello.com/1/members/me/cards?filter=open&fields=id,name,shortLink,shortUrl,url,closed,dateLastActivity,idBoard,idList&board=true&board_fields=name&list=true&list_fields=name,closed&key={}&token={}",
         percent_encode(api_key),
         percent_encode(&connection.token)
     );
     let json = fetch_json(&url, Vec::new())?;
     let boards_url = format!(
-        "https://api.trello.com/1/members/me/boards?filter=all&fields=id,name&key={}&token={}",
+        "https://api.trello.com/1/members/me/boards?filter=all&fields=id,name&lists=all&list_fields=id,name,closed&key={}&token={}",
         percent_encode(api_key),
         percent_encode(&connection.token)
     );
     let boards_json = fetch_json(&boards_url, Vec::new())?;
-    let board_names = boards_json
-        .as_array()
-        .map(|boards| {
-            boards
-                .iter()
-                .filter_map(|board| Some((json_string(board, "id")?, json_string(board, "name")?)))
-                .collect::<HashMap<_, _>>()
-        })
-        .unwrap_or_default();
+    let (board_names, list_metadata) = trello_board_and_list_metadata(&boards_json);
 
     Ok(json
         .as_array()
@@ -4524,11 +6430,54 @@ fn fetch_trello_assigned_cards(
             items
                 .iter()
                 .filter_map(|item| {
-                    trello_assigned_card_from_json_with_board_names(connection, item, &board_names)
+                    trello_assigned_card_from_json_with_context(
+                        connection,
+                        item,
+                        &board_names,
+                        &list_metadata,
+                    )
                 })
                 .collect()
         })
         .unwrap_or_default())
+}
+
+#[derive(Debug, Clone)]
+struct TrelloListMetadata {
+    name: Option<String>,
+    closed: bool,
+}
+
+fn trello_board_and_list_metadata(
+    json: &Value,
+) -> (HashMap<String, String>, HashMap<String, TrelloListMetadata>) {
+    let mut board_names = HashMap::new();
+    let mut list_metadata = HashMap::new();
+
+    for board in json.as_array().into_iter().flatten() {
+        if let (Some(id), Some(name)) = (json_string(board, "id"), json_string(board, "name")) {
+            board_names.insert(id, name);
+        }
+        for list in board
+            .get("lists")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(id) = json_string(list, "id") else {
+                continue;
+            };
+            list_metadata.insert(
+                id,
+                TrelloListMetadata {
+                    name: json_string(list, "name"),
+                    closed: list.get("closed").and_then(Value::as_bool).unwrap_or(false),
+                },
+            );
+        }
+    }
+
+    (board_names, list_metadata)
 }
 
 #[cfg(test)]
@@ -4536,20 +6485,29 @@ fn trello_assigned_card_from_json(
     connection: &ConnectionRecord,
     item: &Value,
 ) -> Option<SmartInboxReviewRequest> {
-    trello_assigned_card_from_json_with_board_names(connection, item, &HashMap::new())
+    trello_assigned_card_from_json_with_context(connection, item, &HashMap::new(), &HashMap::new())
 }
 
-fn trello_assigned_card_from_json_with_board_names(
+fn trello_assigned_card_from_json_with_context(
     connection: &ConnectionRecord,
     item: &Value,
     board_names: &HashMap<String, String>,
+    list_metadata: &HashMap<String, TrelloListMetadata>,
 ) -> Option<SmartInboxReviewRequest> {
-    if item.get("closed").and_then(Value::as_bool).unwrap_or(false) {
+    let list = json_string(item, "idList").and_then(|id| list_metadata.get(&id));
+    if item.get("closed").and_then(Value::as_bool).unwrap_or(false)
+        || item
+            .get("list")
+            .and_then(|list| list.get("closed"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || list.map(|list| list.closed).unwrap_or(false)
+    {
         return None;
     }
 
     // Smart-input task links use the `/c/{shortLink}` URL identity, so the cache
-    // must use that same value for immediate local exclusion after task creation.
+    // must use that same value when resolving an existing local task.
     let external_id = json_string(item, "shortLink").or_else(|| json_string(item, "id"))?;
     let title = json_string(item, "name")?;
     let url = json_string(item, "shortUrl")
@@ -4574,7 +6532,8 @@ fn trello_assigned_card_from_json_with_board_names(
         title,
         url,
         context_path: Some(source_name),
-        context_detail: json_path_string(item, &["list", "name"]),
+        context_detail: json_path_string(item, &["list", "name"])
+            .or_else(|| list.and_then(|list| list.name.clone())),
         number: None,
         author: None,
         review_requested_at: None,
@@ -4588,6 +6547,7 @@ fn trello_assigned_card_from_json_with_board_names(
         }
         .to_string(),
         state: "open".to_string(),
+        linked_task: None,
     })
 }
 
@@ -4686,6 +6646,7 @@ fn github_review_request_from_json(
         sort_at,
         sort_source,
         state: "open".to_string(),
+        linked_task: None,
     })
 }
 
@@ -4731,6 +6692,7 @@ fn gitlab_review_request_from_json(
         sort_at,
         sort_source,
         state: "opened".to_string(),
+        linked_task: None,
     })
 }
 
@@ -5230,6 +7192,132 @@ fn account_name_from_json(json: &Value, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| json_string(json, key))
 }
 
+fn normalize_label_color(value: Option<String>) -> Option<String> {
+    let value = value?.trim().trim_start_matches('#').to_ascii_lowercase();
+    if matches!(value.len(), 3 | 6) && value.chars().all(|character| character.is_ascii_hexdigit())
+    {
+        Some(format!("#{value}"))
+    } else {
+        None
+    }
+}
+
+fn normalize_external_labels(labels: Vec<ExternalLabel>) -> Vec<ExternalLabel> {
+    let mut names = HashSet::new();
+    labels
+        .into_iter()
+        .filter_map(|label| {
+            let name = label.name.trim().to_string();
+            if name.is_empty() || !names.insert(name.clone()) {
+                return None;
+            }
+            Some(ExternalLabel {
+                name,
+                color: normalize_label_color(label.color),
+            })
+        })
+        .collect()
+}
+
+fn trello_label_color(value: Option<String>) -> Option<String> {
+    let value = value?;
+    let family = value.trim().split('_').next().unwrap_or_default();
+    let color = match family {
+        "green" => "#61bd4f",
+        "yellow" => "#f2d600",
+        "orange" => "#ff9f1a",
+        "red" => "#eb5a46",
+        "purple" => "#c377e0",
+        "blue" => "#0079bf",
+        "sky" => "#00c2e0",
+        "lime" => "#51e898",
+        "pink" => "#ff78cb",
+        "black" => "#344563",
+        _ => return None,
+    };
+    Some(color.to_string())
+}
+
+fn trello_labels(json: &Value) -> Vec<ExternalLabel> {
+    normalize_external_labels(
+        json.get("labels")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|label| {
+                Some(ExternalLabel {
+                    name: json_string(label, "name")?,
+                    color: trello_label_color(json_string(label, "color")),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn github_labels(json: &Value) -> Vec<ExternalLabel> {
+    normalize_external_labels(
+        json.get("labels")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|label| {
+                Some(ExternalLabel {
+                    name: json_string(label, "name")?,
+                    color: json_string(label, "color"),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn gitlab_labels(
+    connection: &ConnectionRecord,
+    project_path: &str,
+    json: &Value,
+) -> Vec<ExternalLabel> {
+    if json
+        .get("labels")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty)
+    {
+        return Vec::new();
+    }
+
+    let base_url = normalize_base_url(&connection.base_url);
+    let catalog_url = format!(
+        "{base_url}/api/v4/projects/{}/labels?include_ancestor_groups=true",
+        percent_encode(project_path)
+    );
+    let catalog = fetch_paginated_json(
+        &catalog_url,
+        vec![("PRIVATE-TOKEN", connection.token.clone())],
+    )
+    .unwrap_or_default();
+
+    gitlab_labels_with_catalog(json, &catalog)
+}
+
+fn gitlab_labels_with_catalog(json: &Value, catalog: &[Value]) -> Vec<ExternalLabel> {
+    let colors = catalog
+        .iter()
+        .filter_map(|label| Some((json_string(label, "name")?, json_string(label, "color"))))
+        .collect::<HashMap<_, _>>();
+
+    normalize_external_labels(
+        json.get("labels")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .map(|name| ExternalLabel {
+                color: colors.get(&name).cloned().flatten(),
+                name,
+            })
+            .collect(),
+    )
+}
+
 fn fetch_trello_card(
     connection: &ConnectionRecord,
     parsed: &ParsedInputPayload,
@@ -5266,12 +7354,16 @@ fn fetch_trello_card(
         percent_encode(token)
     );
     let attachments_json = fetch_json(&attachments_url, vec![])?;
+    let card_url = json_string(&json, "url").or_else(|| parsed.url.clone());
+    let comments = fetch_trello_card_comments(id, card_url.as_deref(), api_key, token)?;
     Ok(ProviderMetadata {
         title: json_string(&json, "name"),
         body: json_string(&json, "desc"),
         state: trello_list_state(&list_json),
-        url: json_string(&json, "url").or_else(|| parsed.url.clone()),
+        url: card_url,
         files: trello_attachment_files(&attachments_json),
+        comments,
+        labels: trello_labels(&json),
         parent_resource,
         ..ProviderMetadata::empty()
     })
@@ -5331,12 +7423,15 @@ fn fetch_github_pull_request(
             ("User-Agent", "dev-crash-flash-ai-studio".to_string()),
         ],
     )?;
+    let comments = fetch_github_pull_request_comments(connection, &repo_path, &number)?;
     Ok(ProviderMetadata {
         title: json_string(&json, "title"),
         body: json_string(&json, "body"),
         state: github_pull_request_state(&json),
         target_branch: github_pull_request_target_branch(&json),
         url: json_string(&json, "html_url").or_else(|| parsed.url.clone()),
+        comments,
+        labels: github_labels(&json),
         ..ProviderMetadata::empty()
     })
 }
@@ -5360,6 +7455,7 @@ fn fetch_github_issue(
         body: json_string(&json, "body"),
         state: github_issue_state(&json),
         url: json_string(&json, "html_url").or_else(|| parsed.url.clone()),
+        labels: github_labels(&json),
         ..ProviderMetadata::empty()
     })
 }
@@ -5376,12 +7472,22 @@ fn fetch_gitlab_merge_request(
         percent_encode(&iid)
     );
     let json = fetch_json(&url, vec![("PRIVATE-TOKEN", connection.token.clone())])?;
+    let merge_request_url = json_string(&json, "web_url").or_else(|| parsed.url.clone());
+    let comments = fetch_gitlab_merge_request_comments(
+        connection,
+        &project_path,
+        &iid,
+        merge_request_url.as_deref(),
+    )?;
+    let labels = gitlab_labels(connection, &project_path, &json);
     Ok(ProviderMetadata {
         title: json_string(&json, "title"),
         body: json_string(&json, "description"),
         state: json_string(&json, "state"),
         target_branch: json_string(&json, "target_branch"),
-        url: json_string(&json, "web_url").or_else(|| parsed.url.clone()),
+        url: merge_request_url,
+        comments,
+        labels,
         ..ProviderMetadata::empty()
     })
 }
@@ -5398,11 +7504,13 @@ fn fetch_gitlab_issue(
         percent_encode(&iid)
     );
     let json = fetch_json(&url, vec![("PRIVATE-TOKEN", connection.token.clone())])?;
+    let labels = gitlab_labels(connection, &project_path, &json);
     Ok(ProviderMetadata {
         title: json_string(&json, "title"),
         body: json_string(&json, "description"),
         state: json_string(&json, "state"),
         url: json_string(&json, "web_url").or_else(|| parsed.url.clone()),
+        labels,
         ..ProviderMetadata::empty()
     })
 }
@@ -5861,6 +7969,48 @@ fn load_review_diff_file(
 }
 
 #[tauri::command]
+fn list_review_comment_drafts(
+    state: tauri::State<'_, AppState>,
+    task_id: String,
+) -> Result<Vec<ReviewCommentDraft>, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    list_review_comment_drafts_in_db(&db, &task_id)
+}
+
+#[tauri::command]
+fn save_review_comment_draft(
+    state: tauri::State<'_, AppState>,
+    input: ReviewCommentDraftInput,
+) -> Result<ReviewCommentDraft, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    save_review_comment_draft_in_db(&db, input)
+}
+
+#[tauri::command]
+fn delete_review_comment_draft(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let db = state.db.lock().map_err(db_error)?;
+    db.execute(
+        "DELETE FROM review_comment_drafts WHERE id = ?1",
+        params![id],
+    )
+    .map_err(db_error)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn submit_review_comments(
+    state: tauri::State<'_, AppState>,
+    task_id: String,
+    overall_body: Option<String>,
+) -> Result<ReviewCommentSubmissionResult, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    submit_review_comments_in_db(&db, &task_id, overall_body)
+}
+
+#[tauri::command]
 fn create_task_from_input(
     state: tauri::State<'_, AppState>,
     input: String,
@@ -5896,12 +8046,6 @@ fn list_smart_inbox_provider_items_in_db(
              WHERE i.provider = ?1
                AND i.source_id IS NOT NULL
                AND i.source_name IS NOT NULL
-               AND (i.provider != 'trello' OR NOT EXISTS (
-                   SELECT 1 FROM task_links link
-                   WHERE link.provider = 'trello'
-                     AND link.kind = 'trello_card'
-                     AND link.external_id = i.external_id
-               ))
              ORDER BY COALESCE(i.sort_at, 0) DESC, i.title ASC",
         )
         .map_err(db_error)?;
@@ -5926,6 +8070,7 @@ fn list_smart_inbox_provider_items_in_db(
                 sort_at: row.get(15)?,
                 sort_source: row.get(16)?,
                 state: row.get(17)?,
+                linked_task: None,
             })
         })
         .map_err(db_error)?
@@ -5934,6 +8079,18 @@ fn list_smart_inbox_provider_items_in_db(
 
     let mut seen = HashSet::new();
     items.retain(|item| seen.insert(format!("{}:{}", item.provider, item.url)));
+
+    let task_kind = match provider {
+        "github" => "pull_request",
+        "gitlab" => "merge_request",
+        "trello" => "trello_card",
+        _ => return Err("Unsupported smart inbox provider.".to_string()),
+    };
+    for item in &mut items {
+        item.linked_task =
+            get_latest_project_task_by_link(db, &item.provider, task_kind, &item.external_id)
+                .map_err(db_error)?;
+    }
 
     let mut warning_statement = db
         .prepare(
@@ -6382,6 +8539,254 @@ fn delete_task(state: tauri::State<'_, AppState>, id: String) -> Result<(), Stri
     delete_task_in_db(&db, &id)
 }
 
+fn task_trello_boards_in_db(db: &SqliteConnection, task_id: &str) -> Result<Vec<Resource>, String> {
+    let task = get_task(db, task_id)
+        .map_err(db_error)?
+        .ok_or_else(|| "Task not found.".to_string())?;
+    let project_id = task.project_id.ok_or_else(|| {
+        "The task must belong to a project before creating a Trello ticket.".to_string()
+    })?;
+    let mut statement = db
+        .prepare(
+            "SELECT id, project_id, provider, kind, external_id, url, name, icon_url, connection_id
+             FROM resources
+             WHERE project_id = ?1 AND provider = 'trello' AND kind = 'trello_board'
+             ORDER BY name COLLATE NOCASE ASC",
+        )
+        .map_err(db_error)?;
+    let boards = statement
+        .query_map(params![project_id], row_to_resource)
+        .map_err(db_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_error)?;
+    Ok(boards)
+}
+
+fn resolve_trello_board_connection(
+    db: &SqliteConnection,
+    resource: &Resource,
+) -> Result<ConnectionRecord, String> {
+    if let Some(connection_id) = resource.connection_id.as_deref() {
+        if let Some(connection) = get_connection(db, connection_id).map_err(db_error)? {
+            if connection.provider == "trello"
+                && validate_connection_credentials(&connection).is_ok()
+            {
+                return Ok(connection);
+            }
+        }
+    }
+
+    let connection = list_enabled_connections(db, &resource.project_id)
+        .map_err(db_error)?
+        .into_iter()
+        .map(|(connection, _)| connection)
+        .find(|connection| connection.provider == "trello")
+        .ok_or_else(|| {
+            "Enable a Trello connection for this project before creating a ticket.".to_string()
+        })?;
+    validate_connection_credentials(&connection)?;
+    Ok(connection)
+}
+
+fn prepare_trello_board_for_task(
+    db: &SqliteConnection,
+    task_id: &str,
+    board_resource_id: &str,
+    require_unlinked: bool,
+) -> Result<(Task, Resource, ConnectionRecord), String> {
+    let task = get_task(db, task_id)
+        .map_err(db_error)?
+        .ok_or_else(|| "Task not found.".to_string())?;
+    let project_id = task.project_id.as_deref().ok_or_else(|| {
+        "The task must belong to a project before creating a Trello ticket.".to_string()
+    })?;
+    if require_unlinked {
+        let has_link = !list_task_links_in_db(db, task_id)
+            .map_err(db_error)?
+            .is_empty();
+        if has_link || task.source_url.is_some() {
+            return Err("This task already has an external resource.".to_string());
+        }
+    }
+    let resource = get_resource_by_id(db, board_resource_id)
+        .map_err(db_error)?
+        .ok_or_else(|| "Trello board resource not found.".to_string())?;
+    if resource.project_id != project_id
+        || resource.provider != "trello"
+        || resource.kind != "trello_board"
+    {
+        return Err(
+            "The selected Trello board is not connected to this task's project.".to_string(),
+        );
+    }
+    let connection = resolve_trello_board_connection(db, &resource)?;
+    Ok((task, resource, connection))
+}
+
+fn persist_trello_ticket_conversion(
+    db: &mut SqliteConnection,
+    task_id: &str,
+    board_resource_id: &str,
+    card_id: &str,
+    card_url: &str,
+    title: &str,
+    description: &str,
+    status: &str,
+    metadata: &ProviderMetadata,
+) -> Result<TrelloTicketConversionResult, String> {
+    let transaction = db.transaction().map_err(db_error)?;
+    prepare_trello_board_for_task(&transaction, task_id, board_resource_id, true)?;
+    link_task_resource_in_db(
+        &transaction,
+        task_id.to_string(),
+        "trello".to_string(),
+        "trello_card".to_string(),
+        card_id.to_string(),
+        card_url.to_string(),
+        metadata,
+    )
+    .map_err(db_error)?;
+    transaction
+        .execute(
+            "UPDATE tasks SET title = ?1, body = ?2, status = ?3, updated_at = ?4 WHERE id = ?5",
+            params![title, description, status, now_millis(), task_id],
+        )
+        .map_err(db_error)?;
+    transaction.commit().map_err(db_error)?;
+    let task = get_task(db, task_id)
+        .map_err(db_error)?
+        .ok_or_else(|| "Converted task could not be reloaded.".to_string())?;
+    let link = list_task_links_in_db(db, task_id)
+        .map_err(db_error)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "Converted Trello link could not be reloaded.".to_string())?;
+    Ok(TrelloTicketConversionResult { task, link })
+}
+
+#[tauri::command]
+fn list_task_trello_boards(
+    state: tauri::State<'_, AppState>,
+    task_id: String,
+) -> Result<Vec<Resource>, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    task_trello_boards_in_db(&db, &task_id)
+}
+
+#[tauri::command]
+async fn list_trello_board_templates(
+    app_handle: tauri::AppHandle,
+    task_id: String,
+    board_resource_id: String,
+) -> Result<TrelloBoardTemplates, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_handle.state::<AppState>();
+        let (resource, connection) = {
+            let db = state.db.lock().map_err(db_error)?;
+            let (_, resource, connection) =
+                prepare_trello_board_for_task(&db, &task_id, &board_resource_id, true)?;
+            (resource, connection)
+        };
+        fetch_trello_board_templates(&connection, &resource.external_id)
+            .map_err(|error| format!("Could not load Trello templates: {error}"))
+    })
+    .await
+    .map_err(|error| format!("Could not load Trello templates: {error}"))?
+}
+
+#[tauri::command]
+async fn convert_task_to_trello_ticket(
+    app_handle: tauri::AppHandle,
+    task_id: String,
+    board_resource_id: String,
+    template_card_id: String,
+    list_id: String,
+    title: String,
+    description: String,
+) -> Result<TrelloTicketConversionResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let title = title.trim().to_string();
+        if title.is_empty() {
+            return Err("Ticket title is required.".to_string());
+        }
+
+        let state = app_handle.state::<AppState>();
+        let (resource, connection) = {
+            let db = state.db.lock().map_err(db_error)?;
+            let (_, resource, connection) =
+                prepare_trello_board_for_task(&db, &task_id, &board_resource_id, true)?;
+            (resource, connection)
+        };
+        let board_data = fetch_trello_board_templates(&connection, &resource.external_id)
+            .map_err(|error| format!("Could not validate the selected Trello template: {error}"))?;
+        if !board_data.templates.iter().any(|template| template.id == template_card_id) {
+            return Err("The selected card is not a template on this Trello board.".to_string());
+        }
+        let destination_list = board_data
+            .lists
+            .iter()
+            .find(|list| list.id == list_id)
+            .ok_or_else(|| "The selected destination list is not open on this Trello board.".to_string())?;
+
+        let created = create_trello_card_from_template(
+            &connection,
+            &template_card_id,
+            &list_id,
+            &title,
+            &description,
+        )?;
+        let card_id = json_string(&created, "id")
+            .ok_or_else(|| "Trello created a card without returning its ID.".to_string())?;
+        let card_url = json_string(&created, "url")
+            .or_else(|| json_string(&created, "shortUrl"))
+            .unwrap_or_else(|| format!("https://trello.com/c/{card_id}"));
+        let metadata = ProviderMetadata {
+            connection_id: Some(connection.id.clone()),
+            title: Some(title.clone()),
+            body: Some(description.clone()),
+            state: Some(destination_list.name.clone()),
+            url: Some(card_url.clone()),
+            fetched_at: Some(now_millis()),
+            parent_resource: Some(ProviderResourceMetadata {
+                provider: resource.provider.clone(),
+                kind: resource.kind.clone(),
+                external_id: resource.external_id.clone(),
+                url: resource.url.clone(),
+                name: resource.name.clone(),
+                icon_url: resource.icon_url.clone(),
+            }),
+            ..ProviderMetadata::empty()
+        };
+
+        let persisted = (|| {
+            let mut db = state.db.lock().map_err(db_error)?;
+            persist_trello_ticket_conversion(
+                &mut db,
+                &task_id,
+                &board_resource_id,
+                &card_id,
+                &card_url,
+                &title,
+                &description,
+                &destination_list.name,
+                &metadata,
+            )
+        })();
+
+        match persisted {
+            Ok(result) => Ok(result),
+            Err(error) => match delete_trello_card(&connection, &card_id) {
+                Ok(()) => Err(format!("Could not save the converted task: {error}")),
+                Err(cleanup_error) => Err(format!(
+                    "Could not save the converted task: {error}. The Trello card was created but could not be removed: {cleanup_error}"
+                )),
+            },
+        }
+    })
+    .await
+    .map_err(|error| format!("Could not create Trello ticket: {error}"))?
+}
+
 #[tauri::command]
 fn link_task_resource(
     state: tauri::State<'_, AppState>,
@@ -6491,6 +8896,43 @@ fn delete_connection(state: tauri::State<'_, AppState>, id: String) -> Result<()
     db.execute("DELETE FROM connections WHERE id = ?1", params![id])
         .map_err(db_error)?;
     Ok(())
+}
+
+#[tauri::command]
+fn list_ai_prompts(state: tauri::State<'_, AppState>) -> Result<Vec<AiPromptRecord>, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    list_ai_prompts_in_db(&db)
+}
+
+#[tauri::command]
+fn save_ai_prompt(
+    state: tauri::State<'_, AppState>,
+    input: AiPromptInput,
+) -> Result<AiPromptRecord, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    save_ai_prompt_in_db(&db, input)
+}
+
+#[tauri::command]
+fn delete_ai_prompt(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
+    let db = state.db.lock().map_err(db_error)?;
+    delete_ai_prompt_in_db(&db, &id)
+}
+
+#[tauri::command]
+fn open_ai_prompt_thread(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    input: OpenAiPromptThreadInput,
+) -> Result<String, String> {
+    let deep_link = {
+        let db = state.db.lock().map_err(db_error)?;
+        prepare_ai_prompt_thread_in_db(&db, &input)?
+    };
+    app.opener()
+        .open_url(&deep_link, None::<&str>)
+        .map_err(|error| format!("Could not open the AI Prompt: {error}"))?;
+    Ok(deep_link)
 }
 
 #[tauri::command]
@@ -6633,6 +9075,144 @@ fn set_project_connections(
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_error)?;
     Ok(connection_ids)
+}
+
+#[tauri::command]
+fn list_calendar_accounts(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<calendar::CalendarAccount>, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    calendar::list_accounts(&db)
+}
+
+#[tauri::command]
+async fn connect_google_account(
+    app: tauri::AppHandle,
+    account_id: Option<String>,
+) -> Result<calendar::CalendarAccount, String> {
+    if GOOGLE_OAUTH_ACTIVE.swap(true, Ordering::SeqCst) {
+        return Err("Google sign-in is already in progress.".to_string());
+    }
+    GOOGLE_OAUTH_CANCELLED.store(false, Ordering::SeqCst);
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let db = state.db.lock().map_err(db_error)?;
+        calendar::connect_google_account(
+            &db,
+            now_millis(),
+            account_id.as_deref(),
+            |url| {
+                app.opener()
+                    .open_url(url, None::<&str>)
+                    .map_err(|error| error.to_string())
+            },
+            || GOOGLE_OAUTH_CANCELLED.load(Ordering::SeqCst),
+        )
+    })
+    .await
+    .map_err(|error| format!("Google sign-in task failed: {error}"));
+
+    GOOGLE_OAUTH_ACTIVE.store(false, Ordering::SeqCst);
+    result?
+}
+
+#[tauri::command]
+fn cancel_google_account_connection() {
+    GOOGLE_OAUTH_CANCELLED.store(true, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn update_calendar_service(
+    state: tauri::State<'_, AppState>,
+    input: calendar::CalendarServiceInput,
+) -> Result<calendar::CalendarAccount, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    calendar::update_calendar_service(&db, input, now_millis())
+}
+
+#[tauri::command]
+fn save_calendar_subscription(
+    state: tauri::State<'_, AppState>,
+    input: calendar::CalendarSubscriptionInput,
+) -> Result<calendar::CalendarAccount, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    calendar::save_calendar_subscription(&db, input, now_millis())
+}
+
+#[tauri::command]
+fn save_caldav_account(
+    state: tauri::State<'_, AppState>,
+    input: calendar::CalDavAccountInput,
+) -> Result<calendar::CalendarAccount, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    calendar::save_caldav_account(&db, input, now_millis(), || new_id("calendar_account"))
+}
+
+#[tauri::command]
+fn refresh_calendar_collections(
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+) -> Result<calendar::CalendarAccount, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    calendar::refresh_collections(&db, &account_id, now_millis())
+}
+
+#[tauri::command]
+fn update_calendar_collections(
+    state: tauri::State<'_, AppState>,
+    selections: Vec<calendar::CalendarSelectionInput>,
+) -> Result<Vec<calendar::CalendarAccount>, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    calendar::update_collections(&db, selections)?;
+    calendar::list_accounts(&db)
+}
+
+#[tauri::command]
+fn test_calendar_account(
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+) -> Result<String, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    calendar::test_account(&db, &account_id)
+}
+
+#[tauri::command]
+fn delete_calendar_account(
+    state: tauri::State<'_, AppState>,
+    account_id: String,
+) -> Result<(), String> {
+    let db = state.db.lock().map_err(db_error)?;
+    calendar::delete_account(&db, &account_id)
+}
+
+#[tauri::command]
+fn list_calendar_events(
+    state: tauri::State<'_, AppState>,
+    date: String,
+    start_at: i64,
+    end_at: i64,
+) -> Result<calendar::CalendarResult, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    calendar::list_events(&db, &date, start_at, end_at)
+}
+
+#[tauri::command]
+async fn sync_calendar_events(
+    app: tauri::AppHandle,
+    date: String,
+    start_at: i64,
+    end_at: i64,
+) -> Result<calendar::CalendarResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let db_path = app.state::<AppState>().db_path.clone();
+        let db = SqliteConnection::open(db_path).map_err(db_error)?;
+        db.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(db_error)?;
+        calendar::sync_events(&db, &date, start_at, end_at, now_millis())
+    })
+    .await
+    .map_err(|error| format!("Calendar sync task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -6975,6 +9555,35 @@ mod tests {
         }
     }
 
+    fn smart_inbox_provider_item(
+        connection: &ConnectionRecord,
+        external_id: &str,
+        url: &str,
+        title: &str,
+    ) -> SmartInboxReviewRequest {
+        SmartInboxReviewRequest {
+            provider: connection.provider.clone(),
+            connection_id: connection.id.clone(),
+            connection_name: connection.name.clone(),
+            source_id: format!("{}-source", connection.provider),
+            source_name: format!("{} source", connection.provider),
+            external_id: external_id.to_string(),
+            title: title.to_string(),
+            url: url.to_string(),
+            context_path: None,
+            context_detail: None,
+            number: None,
+            author: None,
+            review_requested_at: None,
+            updated_at: Some(1),
+            created_at: Some(1),
+            sort_at: Some(1),
+            sort_source: "updated".to_string(),
+            state: "open".to_string(),
+            linked_task: None,
+        }
+    }
+
     #[test]
     fn github_review_request_normalization_excludes_closed_and_merged_items() {
         let connection = connection_record("github", None, "token");
@@ -7077,7 +9686,17 @@ mod tests {
             "dateLastActivity": "2026-07-12T08:30:00Z",
             "idBoard": "board-studio",
             "board": { "name": "Studio" },
-            "list": { "name": "Doing" }
+            "list": { "name": "Doing", "closed": false }
+        });
+        let archived_list = serde_json::json!({
+            "id": "card126",
+            "shortLink": "abc126",
+            "name": "Hidden with archived list",
+            "shortUrl": "https://trello.com/c/abc126",
+            "closed": false,
+            "idBoard": "board-studio",
+            "board": { "name": "Studio" },
+            "list": { "name": "Archived", "closed": true }
         });
         let closed = serde_json::json!({
             "id": "card124",
@@ -7095,16 +9714,49 @@ mod tests {
         assert_eq!(item.sort_source, "updated");
         let without_embedded_board = serde_json::json!({
             "id": "card125", "name": "Board lookup", "shortUrl": "https://trello.com/c/lookup",
-            "closed": false, "idBoard": "board-lookup"
+            "closed": false, "idBoard": "board-lookup", "idList": "list-doing"
         });
-        let looked_up = trello_assigned_card_from_json_with_board_names(
+        let archived_without_embedded_list = serde_json::json!({
+            "id": "card127", "name": "Archived lookup", "shortUrl": "https://trello.com/c/archived",
+            "closed": false, "idBoard": "board-lookup", "idList": "list-archived"
+        });
+        let missing_list_metadata = serde_json::json!({
+            "id": "card128", "name": "Unknown list", "shortUrl": "https://trello.com/c/unknown",
+            "closed": false, "idBoard": "board-lookup", "idList": "list-unknown"
+        });
+        let (board_names, list_metadata) = trello_board_and_list_metadata(&serde_json::json!([{
+            "id": "board-lookup",
+            "name": "Resolved board",
+            "lists": [
+                { "id": "list-doing", "name": "Doing", "closed": false },
+                { "id": "list-archived", "name": "Archived", "closed": true }
+            ]
+        }]));
+        let looked_up = trello_assigned_card_from_json_with_context(
             &connection,
             &without_embedded_board,
-            &HashMap::from([("board-lookup".to_string(), "Resolved board".to_string())]),
+            &board_names,
+            &list_metadata,
         )
         .expect("card with looked-up board");
         assert_eq!(looked_up.source_name, "Resolved board");
         assert_eq!(looked_up.context_path.as_deref(), Some("Resolved board"));
+        assert_eq!(looked_up.context_detail.as_deref(), Some("Doing"));
+        assert!(trello_assigned_card_from_json_with_context(
+            &connection,
+            &archived_without_embedded_list,
+            &board_names,
+            &list_metadata,
+        )
+        .is_none());
+        assert!(trello_assigned_card_from_json_with_context(
+            &connection,
+            &missing_list_metadata,
+            &board_names,
+            &list_metadata,
+        )
+        .is_some());
+        assert!(trello_assigned_card_from_json(&connection, &archived_list).is_none());
         assert!(trello_assigned_card_from_json(&connection, &closed).is_none());
         assert!(trello_assigned_card_from_json(&connection, &serde_json::json!({})).is_none());
     }
@@ -7251,29 +9903,8 @@ mod tests {
     }
 
     #[test]
-    fn linked_trello_cards_are_excluded_across_projects() {
+    fn linked_provider_items_include_latest_project_task() {
         let db = memory_db();
-        let connection = save_connection_in_db(
-            &db,
-            ConnectionInput {
-                id: None,
-                provider: "trello".to_string(),
-                name: "Trello".to_string(),
-                base_url: "https://api.trello.com".to_string(),
-                api_key: Some("key".to_string()),
-                token: "token".to_string(),
-            },
-        )
-        .expect("save connection");
-        let card = trello_assigned_card_from_json(
-            &connection,
-            &serde_json::json!({
-                "id": "card1", "shortLink": "linked", "name": "Linked", "shortUrl": "https://trello.com/c/linked",
-                "closed": false, "idBoard": "board-linked", "board": { "name": "Linked board" }
-            }),
-        )
-        .expect("card");
-        replace_smart_inbox_provider_items(&db, &connection, &[card]).expect("cache card");
         db.execute(
             "INSERT INTO projects (id, name, icon, color, created_at, updated_at)
              VALUES ('project1', 'Project', 'FolderKanban', '#2563eb', 1, 1)",
@@ -7282,31 +9913,112 @@ mod tests {
         .expect("insert project");
         db.execute(
             "INSERT INTO tasks (id, project_id, title, body, status, source_url, created_at, updated_at)
-             VALUES ('task1', 'project1', 'Task', '', 'todo', NULL, 1, 1)",
+             VALUES
+                ('trello-old', 'project1', 'Old Trello task', '', 'todo', NULL, 1, 1),
+                ('trello-new', 'project1', 'Current Trello task', '', 'todo', NULL, 1, 2),
+                ('github-task', 'project1', 'GitHub task', '', 'todo', NULL, 1, 1),
+                ('gitlab-task', 'project1', 'GitLab task', '', 'todo', NULL, 1, 1)",
             [],
         )
-        .expect("insert task");
-        db.execute(
-            "INSERT INTO task_links
-             (task_id, provider, kind, external_id, url, connection_id, files_json)
-             VALUES ('task1', 'trello', 'trello_card', 'linked', 'https://trello.com/c/linked', ?1, '[]')",
-            params![connection.id],
-        )
-        .expect("link task");
+        .expect("insert tasks");
 
-        assert!(list_smart_inbox_provider_items_in_db(&db, "trello")
-            .expect("list linked")
-            .items
-            .is_empty());
-        db.execute("DELETE FROM task_links WHERE task_id = 'task1'", [])
-            .expect("unlink task");
-        assert_eq!(
-            list_smart_inbox_provider_items_in_db(&db, "trello")
-                .expect("list unlinked")
+        let cases = [
+            (
+                "trello",
+                "trello_card",
+                "linked",
+                "https://trello.com/c/linked",
+                "trello-old",
+                "trello-new",
+            ),
+            (
+                "github",
+                "pull_request",
+                "owner/repo#42",
+                "https://github.com/owner/repo/pull/42",
+                "github-task",
+                "github-task",
+            ),
+            (
+                "gitlab",
+                "merge_request",
+                "group/app!17",
+                "https://gitlab.example.org/group/app/-/merge_requests/17",
+                "gitlab-task",
+                "gitlab-task",
+            ),
+        ];
+
+        for (provider, kind, external_id, url, first_task_id, expected_task_id) in cases {
+            let connection = save_connection_in_db(
+                &db,
+                ConnectionInput {
+                    id: None,
+                    provider: provider.to_string(),
+                    name: provider.to_string(),
+                    base_url: if provider == "trello" {
+                        "https://api.trello.com".to_string()
+                    } else {
+                        format!("https://{provider}.example.org")
+                    },
+                    api_key: (provider == "trello").then(|| "key".to_string()),
+                    token: "token".to_string(),
+                },
+            )
+            .expect("save connection");
+            let linked = smart_inbox_provider_item(&connection, external_id, url, "Linked");
+            let unlinked = smart_inbox_provider_item(
+                &connection,
+                &format!("{external_id}-unlinked"),
+                &format!("{url}-unlinked"),
+                "Unlinked",
+            );
+            replace_smart_inbox_provider_items(&db, &connection, &[linked, unlinked])
+                .expect("cache provider items");
+            db.execute(
+                "INSERT INTO task_links
+                 (task_id, provider, kind, external_id, url, connection_id, files_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, '[]')",
+                params![
+                    first_task_id,
+                    provider,
+                    kind,
+                    external_id,
+                    url,
+                    connection.id
+                ],
+            )
+            .expect("link task");
+            if provider == "trello" {
+                db.execute(
+                    "INSERT INTO task_links
+                     (task_id, provider, kind, external_id, url, connection_id, files_json)
+                     VALUES ('trello-new', ?1, ?2, ?3, ?4, ?5, '[]')",
+                    params![provider, kind, external_id, url, connection.id],
+                )
+                .expect("link newer task");
+            }
+
+            let result =
+                list_smart_inbox_provider_items_in_db(&db, provider).expect("list provider items");
+            assert_eq!(result.items.len(), 2);
+            let linked = result
                 .items
-                .len(),
-            1
-        );
+                .iter()
+                .find(|item| item.external_id == external_id)
+                .expect("linked item remains visible");
+            assert_eq!(
+                linked.linked_task.as_ref().map(|task| task.id.as_str()),
+                Some(expected_task_id)
+            );
+            assert!(result
+                .items
+                .iter()
+                .find(|item| item.title == "Unlinked")
+                .expect("unlinked item")
+                .linked_task
+                .is_none());
+        }
     }
 
     #[test]
@@ -7884,6 +10596,60 @@ mod tests {
     }
 
     #[test]
+    fn loads_review_diff_from_merge_base_when_target_advanced() {
+        let db = memory_db();
+        let project = create_project_in_db(&db, "Access".to_string(), None, None).expect("project");
+        let repo_path = git_repo_with_origin("git@github.com:owner/repo.git");
+        run_git_test(&repo_path, &["config", "user.email", "test@example.org"]);
+        run_git_test(&repo_path, &["config", "user.name", "Test User"]);
+        run_git_test(&repo_path, &["checkout", "-b", "main"]);
+        fs::write(repo_path.join("shared.txt"), "base\n").expect("write shared base");
+        run_git_test(&repo_path, &["add", "shared.txt"]);
+        run_git_test(&repo_path, &["commit", "-m", "base"]);
+
+        run_git_test(&repo_path, &["checkout", "-b", "review/test"]);
+        fs::write(repo_path.join("review-only.txt"), "review change\n")
+            .expect("write review change");
+        run_git_test(&repo_path, &["add", "review-only.txt"]);
+        run_git_test(&repo_path, &["commit", "-m", "review change"]);
+
+        run_git_test(&repo_path, &["checkout", "main"]);
+        fs::write(repo_path.join("target-only.txt"), "target change\n")
+            .expect("write target change");
+        run_git_test(&repo_path, &["add", "target-only.txt"]);
+        run_git_test(&repo_path, &["commit", "-m", "target advanced"]);
+        run_git_test(
+            &repo_path,
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        );
+
+        let resource = save_test_local_resource(&db, &project.id, &repo_path);
+        let diff = load_review_diff_in_db(
+            &db,
+            resource.id.clone(),
+            Some("review/test".to_string()),
+            Some("origin/main".to_string()),
+        )
+        .expect("load review diff from merge base");
+
+        assert_eq!(diff.files, vec!["review-only.txt".to_string()]);
+        let current_file = diff.current_file.expect("review file");
+        assert!(current_file.diff.contains("review change"));
+        assert!(!current_file.diff.contains("target change"));
+
+        let file = load_review_diff_file_in_db(
+            &db,
+            resource.id,
+            diff.base_ref,
+            diff.branch,
+            "review-only.txt".to_string(),
+        )
+        .expect("load review file diff from merge base");
+        assert!(file.diff.contains("review change"));
+        assert!(!file.diff.contains("target change"));
+    }
+
+    #[test]
     fn creates_and_updates_project() {
         let db = memory_db();
         let project = create_project_in_db(
@@ -7930,6 +10696,14 @@ mod tests {
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
+            CREATE TABLE ai_prompts (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                agent_type TEXT NOT NULL,
+                prompt_text TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
             CREATE TABLE resources (
                 id TEXT PRIMARY KEY,
                 project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -7966,6 +10740,8 @@ mod tests {
             INSERT INTO projects (id, name, icon, created_at, updated_at)
             VALUES ('project_1', 'Access', 'FolderKanban', 1, 1),
                    ('project_2', 'Portal', 'FolderKanban', 1, 1);
+            INSERT INTO ai_prompts (id, name, agent_type, prompt_text, created_at, updated_at)
+            VALUES ('prompt_1', 'Legacy prompt', 'codex', '', 1, 1);
             INSERT INTO resources
                 (id, project_id, provider, kind, external_id, url, name, icon_url, connection_id)
             VALUES
@@ -7978,9 +10754,16 @@ mod tests {
         init_database(&db).expect("migrate legacy schema");
 
         assert!(column_exists(&db, "connections", "api_key"));
+        assert!(column_exists(&db, "ai_prompts", "icon"));
+        assert_eq!(
+            list_ai_prompts_in_db(&db).expect("list migrated AI Prompts")[0].icon,
+            "sparkles"
+        );
         assert!(column_exists(&db, "task_links", "connection_id"));
         assert!(column_exists(&db, "task_links", "target_branch"));
         assert!(column_exists(&db, "task_links", "files_json"));
+        assert!(column_exists(&db, "task_links", "comments_json"));
+        assert!(column_exists(&db, "task_links", "labels_json"));
         assert!(column_exists(&db, "pull_requests", "external_state"));
         assert!(column_exists(&db, "pull_requests", "target_branch"));
         assert!(column_exists(&db, "directories", "path"));
@@ -8697,6 +11480,63 @@ mod tests {
     }
 
     #[test]
+    fn external_labels_round_trip_and_invalid_json_defaults_to_empty() {
+        let labels = vec![ExternalLabel {
+            name: "Bug".to_string(),
+            color: Some("#eb5a46".to_string()),
+        }];
+        assert_eq!(
+            external_labels_from_json(Some(&external_labels_to_json(&labels))),
+            labels
+        );
+        assert!(external_labels_from_json(None).is_empty());
+        assert!(external_labels_from_json(Some("not json")).is_empty());
+    }
+
+    #[test]
+    fn provider_labels_are_normalized_with_colors_and_fallbacks() {
+        let trello = trello_labels(&serde_json::json!({
+            "labels": [
+                { "name": " Bug ", "color": "red" },
+                { "name": "Bug", "color": "blue" },
+                { "name": "", "color": "green" },
+                { "name": "Uncolored", "color": null }
+            ]
+        }));
+        assert_eq!(
+            trello,
+            vec![
+                ExternalLabel {
+                    name: "Bug".to_string(),
+                    color: Some("#eb5a46".to_string())
+                },
+                ExternalLabel {
+                    name: "Uncolored".to_string(),
+                    color: None
+                },
+            ]
+        );
+
+        let github = github_labels(&serde_json::json!({
+            "labels": [
+                { "name": "feature", "color": "ABCDEF" },
+                { "name": "invalid", "color": "not-hex" }
+            ]
+        }));
+        assert_eq!(github[0].color.as_deref(), Some("#abcdef"));
+        assert_eq!(github[1].color, None);
+
+        let gitlab_json = serde_json::json!({ "labels": ["backend", "unknown"] });
+        let gitlab = gitlab_labels_with_catalog(
+            &gitlab_json,
+            &[serde_json::json!({ "name": "backend", "color": "#1F75CB" })],
+        );
+        assert_eq!(gitlab[0].color.as_deref(), Some("#1f75cb"));
+        assert_eq!(gitlab[1].color, None);
+        assert_eq!(gitlab_labels_with_catalog(&gitlab_json, &[])[0].color, None);
+    }
+
+    #[test]
     fn trello_attachment_files_maps_uploaded_files_only() {
         let json = serde_json::json!([
             {
@@ -8914,7 +11754,7 @@ mod tests {
 
         let mut statement = db
             .prepare(
-                "SELECT task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, target_branch, fetched_at, files_json
+                "SELECT task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, target_branch, fetched_at, files_json, comments_json, labels_json
                  FROM task_links WHERE task_id = ?1",
             )
             .expect("prepare task links query");
@@ -9007,6 +11847,175 @@ mod tests {
     }
 
     #[test]
+    fn review_comment_drafts_persist_update_and_cascade_with_tasks() {
+        let db = memory_db();
+        let task =
+            create_task_in_db(&db, None, "Review".to_string(), "".to_string(), None).expect("task");
+        let summary = save_review_comment_draft_in_db(
+            &db,
+            ReviewCommentDraftInput {
+                id: None,
+                task_id: task.id.clone(),
+                kind: "overall".to_string(),
+                body: "Initial summary".to_string(),
+                path: None,
+                old_path: None,
+                new_path: None,
+                start_old_line: None,
+                start_new_line: None,
+                start_side: None,
+                old_line: None,
+                new_line: None,
+                side: None,
+                head_sha: None,
+            },
+        )
+        .expect("summary");
+        let updated = save_review_comment_draft_in_db(
+            &db,
+            ReviewCommentDraftInput {
+                id: None,
+                task_id: task.id.clone(),
+                kind: "overall".to_string(),
+                body: "Updated summary".to_string(),
+                path: None,
+                old_path: None,
+                new_path: None,
+                start_old_line: None,
+                start_new_line: None,
+                start_side: None,
+                old_line: None,
+                new_line: None,
+                side: None,
+                head_sha: None,
+            },
+        )
+        .expect("update summary");
+        assert_eq!(summary.id, updated.id);
+
+        save_review_comment_draft_in_db(
+            &db,
+            ReviewCommentDraftInput {
+                id: None,
+                task_id: task.id.clone(),
+                kind: "inline".to_string(),
+                body: "Please rename this.".to_string(),
+                path: Some("src/app.rs".to_string()),
+                old_path: Some("src/app.rs".to_string()),
+                new_path: Some("src/app.rs".to_string()),
+                start_old_line: None,
+                start_new_line: Some(10),
+                start_side: Some("RIGHT".to_string()),
+                old_line: None,
+                new_line: Some(12),
+                side: Some("RIGHT".to_string()),
+                head_sha: Some("abc123".to_string()),
+            },
+        )
+        .expect("inline draft");
+        assert_eq!(
+            list_review_comment_drafts_in_db(&db, &task.id)
+                .expect("drafts")
+                .len(),
+            2
+        );
+
+        delete_task_in_db(&db, &task.id).expect("delete task");
+        assert!(list_review_comment_drafts_in_db(&db, &task.id)
+            .expect("drafts after delete")
+            .is_empty());
+    }
+
+    #[test]
+    fn review_comment_drafts_validate_inline_anchors() {
+        let input = ReviewCommentDraftInput {
+            id: None,
+            task_id: "task".to_string(),
+            kind: "inline".to_string(),
+            body: "Comment".to_string(),
+            path: Some("src/app.rs".to_string()),
+            old_path: None,
+            new_path: None,
+            start_old_line: None,
+            start_new_line: None,
+            start_side: None,
+            old_line: None,
+            new_line: None,
+            side: Some("RIGHT".to_string()),
+            head_sha: Some("abc123".to_string()),
+        };
+        assert_eq!(
+            validate_review_comment_draft(&input).unwrap_err(),
+            "A right-side review comment requires a new line."
+        );
+    }
+
+    #[test]
+    fn builds_github_and_gitlab_multiline_positions() {
+        let draft = ReviewCommentDraft {
+            id: "draft".to_string(),
+            task_id: "task".to_string(),
+            kind: "inline".to_string(),
+            body: "Comment".to_string(),
+            path: Some("src/app.rs".to_string()),
+            old_path: Some("src/app.rs".to_string()),
+            new_path: Some("src/app.rs".to_string()),
+            start_old_line: Some(10),
+            start_new_line: Some(10),
+            start_side: Some("RIGHT".to_string()),
+            old_line: Some(12),
+            new_line: Some(13),
+            side: Some("RIGHT".to_string()),
+            head_sha: Some("abc123".to_string()),
+            last_error: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        let github = github_review_comment_payload(&draft);
+        assert_eq!(github["start_line"], 10);
+        assert_eq!(github["start_side"], "RIGHT");
+        assert_eq!(github["line"], 13);
+        assert_eq!(github["side"], "RIGHT");
+
+        let gitlab = gitlab_review_position(&draft, "base", "start", "head");
+        assert_eq!(gitlab["base_sha"], "base");
+        assert_eq!(gitlab["new_line"], 13);
+        assert_eq!(gitlab["line_range"]["start"]["old_line"], 10);
+        assert_eq!(gitlab["line_range"]["start"]["new_line"], 10);
+        assert_eq!(gitlab["line_range"]["end"]["old_line"], 12);
+        assert_eq!(gitlab["line_range"]["end"]["new_line"], 13);
+
+        assert_eq!(
+            gitlab_line_code("src/app.rs", Some(10), Some(10)),
+            "a841ae12f0c6bcc9fffab1c77aa87ed0e21a0708_10_10"
+        );
+        let added = gitlab_range_point("src/app.rs", None, Some(13));
+        assert_eq!(added["type"], "new");
+        assert_eq!(added["old_line"], Value::Null);
+        assert_eq!(added["new_line"], 13);
+
+        let mut single = draft.clone();
+        single.start_old_line = single.old_line;
+        single.start_new_line = single.new_line;
+        let github_single = github_review_comment_payload(&single);
+        assert!(github_single.get("start_line").is_none());
+        let gitlab_single = gitlab_review_position(&single, "base", "start", "head");
+        assert!(gitlab_single.get("line_range").is_none());
+    }
+
+    #[test]
+    fn review_diff_paths_preserve_renames_and_deleted_files() {
+        assert_eq!(
+            review_diff_paths("--- a/old.rs\n+++ b/new.rs", "new.rs"),
+            ("old.rs".to_string(), "new.rs".to_string())
+        );
+        assert_eq!(
+            review_diff_paths("--- a/deleted.rs\n+++ /dev/null", "deleted.rs"),
+            ("deleted.rs".to_string(), "deleted.rs".to_string())
+        );
+    }
+
+    #[test]
     fn trello_refresh_requires_enabled_project_connection() {
         let db = memory_db();
         let project = create_project_in_db(&db, "Access".to_string(), None, None).expect("project");
@@ -9018,6 +12027,25 @@ mod tests {
             Some("https://trello.com/c/card123/review-auth".to_string()),
         )
         .expect("task");
+        let cached_metadata = ProviderMetadata {
+            comments: vec![TaskComment {
+                id: "trello:comment-1".to_string(),
+                kind: "comment".to_string(),
+                author: "Alice".to_string(),
+                body: "Cached comment".to_string(),
+                created_at: Some("2026-07-15T09:00:00Z".to_string()),
+                updated_at: None,
+                url: None,
+                discussion_id: None,
+                reply_to_id: None,
+                code_context: None,
+            }],
+            labels: vec![ExternalLabel {
+                name: "Cached".to_string(),
+                color: Some("#0079bf".to_string()),
+            }],
+            ..ProviderMetadata::empty()
+        };
         link_task_resource_in_db(
             &db,
             task.id.clone(),
@@ -9025,7 +12053,7 @@ mod tests {
             "trello_card".to_string(),
             "card123".to_string(),
             "https://trello.com/c/card123/review-auth".to_string(),
-            &ProviderMetadata::empty(),
+            &cached_metadata,
         )
         .expect("link trello card");
 
@@ -9033,6 +12061,8 @@ mod tests {
 
         assert!(result.connection_required);
         assert_eq!(result.task.body, "Local notes");
+        assert_eq!(result.links[0].comments[0].body, "Cached comment");
+        assert_eq!(result.links[0].labels[0].name, "Cached");
         assert_eq!(
             result.notice.as_deref(),
             Some("Please add a Trello connection to this project.")
@@ -9095,6 +12125,11 @@ mod tests {
                 bytes: Some(2048),
                 created_at: Some("2026-07-09T10:00:00.000Z".to_string()),
             }],
+            comments: Vec::new(),
+            labels: vec![ExternalLabel {
+                name: "Ready".to_string(),
+                color: Some("#61bd4f".to_string()),
+            }],
             parent_resource: None,
             notice: None,
         };
@@ -9120,6 +12155,8 @@ mod tests {
         assert_eq!(links[0].fetched_at, Some(123));
         assert_eq!(links[0].files.len(), 1);
         assert_eq!(links[0].files[0].name, "Design spec.pdf");
+        assert_eq!(links[0].labels[0].name, "Ready");
+        assert_eq!(links[0].labels[0].color.as_deref(), Some("#61bd4f"));
     }
 
     #[test]
@@ -9166,6 +12203,8 @@ mod tests {
                 url: None,
                 fetched_at: Some(123),
                 files: Vec::new(),
+                comments: Vec::new(),
+                labels: Vec::new(),
                 parent_resource: None,
                 notice: None,
             },
@@ -9490,6 +12529,341 @@ mod tests {
     }
 
     #[test]
+    fn stores_updates_lists_and_deletes_ai_prompts() {
+        let db = memory_db();
+        let codex = save_ai_prompt_in_db(
+            &db,
+            AiPromptInput {
+                id: None,
+                agent_type: "codex".to_string(),
+                name: " Implement ticket ".to_string(),
+                icon: "hammer".to_string(),
+                prompt_text: " Fix it carefully. ".to_string(),
+            },
+        )
+        .expect("save Codex prompt");
+        let claude = save_ai_prompt_in_db(
+            &db,
+            AiPromptInput {
+                id: None,
+                agent_type: "claude".to_string(),
+                name: "Review ticket".to_string(),
+                icon: "review".to_string(),
+                prompt_text: String::new(),
+            },
+        )
+        .expect("save Claude prompt");
+
+        assert_eq!(codex.name, "Implement ticket");
+        assert_eq!(codex.icon, "hammer");
+        assert_eq!(codex.prompt_text, "Fix it carefully.");
+        let listed = list_ai_prompts_in_db(&db).expect("list prompts");
+        assert_eq!(
+            listed
+                .iter()
+                .map(|prompt| prompt.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Implement ticket", "Review ticket"]
+        );
+
+        let updated = save_ai_prompt_in_db(
+            &db,
+            AiPromptInput {
+                id: Some(codex.id.clone()),
+                agent_type: "claude".to_string(),
+                name: "Ship ticket".to_string(),
+                icon: "target".to_string(),
+                prompt_text: String::new(),
+            },
+        )
+        .expect("update prompt");
+        assert_eq!(updated.id, codex.id);
+        assert_eq!(updated.agent_type, "claude");
+        assert_eq!(updated.icon, "target");
+        assert_eq!(updated.prompt_text, "");
+        assert_eq!(updated.created_at, codex.created_at);
+
+        delete_ai_prompt_in_db(&db, &claude.id).expect("delete prompt");
+        assert_eq!(
+            list_ai_prompts_in_db(&db).expect("list remaining"),
+            vec![updated]
+        );
+    }
+
+    #[test]
+    fn validates_ai_prompt_agent_name_and_case_insensitive_uniqueness() {
+        let db = memory_db();
+        let existing = save_ai_prompt_in_db(
+            &db,
+            AiPromptInput {
+                id: None,
+                agent_type: "codex".to_string(),
+                name: "Implement ticket".to_string(),
+                icon: "hammer".to_string(),
+                prompt_text: String::new(),
+            },
+        )
+        .expect("save prompt");
+
+        let invalid_type = save_ai_prompt_in_db(
+            &db,
+            AiPromptInput {
+                id: None,
+                agent_type: "other".to_string(),
+                name: "Other".to_string(),
+                icon: "hammer".to_string(),
+                prompt_text: String::new(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(invalid_type, "AI Prompt agent must be Codex or Claude.");
+
+        let invalid_icon = save_ai_prompt_in_db(
+            &db,
+            AiPromptInput {
+                id: None,
+                agent_type: "codex".to_string(),
+                name: "Other".to_string(),
+                icon: "other".to_string(),
+                prompt_text: String::new(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(invalid_icon, "AI Prompt icon is not supported.");
+
+        let blank_name = save_ai_prompt_in_db(
+            &db,
+            AiPromptInput {
+                id: None,
+                agent_type: "codex".to_string(),
+                name: "  ".to_string(),
+                icon: "hammer".to_string(),
+                prompt_text: String::new(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(blank_name, "AI Prompt name is required.");
+
+        let duplicate = save_ai_prompt_in_db(
+            &db,
+            AiPromptInput {
+                id: None,
+                agent_type: "claude".to_string(),
+                name: "implement ticket".to_string(),
+                icon: "review".to_string(),
+                prompt_text: String::new(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(duplicate, "An AI Prompt with this name already exists.");
+
+        assert!(save_ai_prompt_in_db(
+            &db,
+            AiPromptInput {
+                id: Some(existing.id),
+                agent_type: "claude".to_string(),
+                name: "IMPLEMENT TICKET".to_string(),
+                icon: "review".to_string(),
+                prompt_text: String::new(),
+            },
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn migrates_legacy_ai_agents_into_ai_prompts() {
+        let db = SqliteConnection::open_in_memory().expect("open database");
+        db.execute_batch(
+            "
+            CREATE TABLE ai_agents (
+                id TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            INSERT INTO ai_agents (id, type, name, created_at, updated_at)
+            VALUES ('agent_1', 'codex', 'Legacy Codex', 1, 2);
+            ",
+        )
+        .expect("create legacy AI Agent schema");
+
+        init_database(&db).expect("migrate database");
+
+        assert_eq!(
+            list_ai_prompts_in_db(&db).expect("list migrated prompts"),
+            vec![AiPromptRecord {
+                id: "agent_1".to_string(),
+                name: "Legacy Codex".to_string(),
+                agent_type: "codex".to_string(),
+                icon: "sparkles".to_string(),
+                prompt_text: String::new(),
+                created_at: 1,
+                updated_at: 2,
+            }]
+        );
+        let legacy_table_exists: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ai_agents')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("check legacy table");
+        assert!(!legacy_table_exists);
+    }
+
+    #[test]
+    fn builds_provider_specific_ai_prompt_deep_links_with_task_content() {
+        let task = Task {
+            id: "task_1".to_string(),
+            project_id: None,
+            title: "Fix login redirect".to_string(),
+            body: "Preserve the requested destination.".to_string(),
+            status: "open".to_string(),
+            source_url: Some("https://trello.com/c/card123/fix-login".to_string()),
+            source_provider: Some("trello".to_string()),
+            source_kind: Some("trello_card".to_string()),
+            created_at: 1,
+            updated_at: 1,
+        };
+        let prompt = ai_prompt_with_task_context("Implement this ticket.", &task);
+        assert_eq!(
+            prompt,
+            "Implement this ticket.\n\nhttps://trello.com/c/card123/fix-login\n\nFix login redirect\n\nPreserve the requested destination."
+        );
+
+        let codex = reqwest::Url::parse(
+            &ai_prompt_deep_link("codex", &prompt, "/work/app").expect("Codex deep link"),
+        )
+        .expect("parse Codex deep link");
+        let codex_query = codex.query_pairs().collect::<HashMap<_, _>>();
+        assert_eq!(codex.scheme(), "codex");
+        assert_eq!(codex.host_str(), Some("threads"));
+        assert_eq!(codex.path(), "/new");
+        assert_eq!(
+            codex_query.get("prompt").map(|value| value.as_ref()),
+            Some(prompt.as_str())
+        );
+        assert_eq!(
+            codex_query.get("path").map(|value| value.as_ref()),
+            Some("/work/app")
+        );
+
+        let claude = reqwest::Url::parse(
+            &ai_prompt_deep_link("claude", &prompt, "/work/app").expect("Claude deep link"),
+        )
+        .expect("parse Claude deep link");
+        let claude_query = claude.query_pairs().collect::<HashMap<_, _>>();
+        assert_eq!(claude.scheme(), "claude");
+        assert_eq!(claude.host_str(), Some("code"));
+        assert_eq!(claude.path(), "/new");
+        assert_eq!(
+            claude_query.get("q").map(|value| value.as_ref()),
+            Some(prompt.as_str())
+        );
+        assert_eq!(
+            claude_query.get("folder").map(|value| value.as_ref()),
+            Some("/work/app")
+        );
+    }
+
+    #[test]
+    fn omits_empty_values_when_composing_ai_prompt_task_context() {
+        let task = Task {
+            id: "task_1".to_string(),
+            project_id: None,
+            title: "Task title".to_string(),
+            body: String::new(),
+            status: "open".to_string(),
+            source_url: None,
+            source_provider: None,
+            source_kind: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        assert_eq!(ai_prompt_with_task_context("  ", &task), "Task title");
+    }
+
+    #[test]
+    fn avoids_repeating_a_todo_title_in_ai_prompt_task_context() {
+        let task = Task {
+            id: "task_1".to_string(),
+            project_id: Some("project_1".to_string()),
+            title: "Review onboarding".to_string(),
+            body: "  Review   onboarding  ".to_string(),
+            status: "open".to_string(),
+            source_url: None,
+            source_provider: None,
+            source_kind: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+
+        assert_eq!(
+            ai_prompt_with_task_context("Implement this task.", &task),
+            "Implement this task.\n\nReview onboarding"
+        );
+    }
+
+    #[test]
+    fn prepares_ai_prompt_thread_for_a_configured_directory() {
+        let db = memory_db();
+        let directory_path = temp_test_path("ai-prompt-workspace");
+        fs::create_dir_all(&directory_path).expect("create workspace");
+        let directory = save_directory_in_db(
+            &db,
+            DirectoryInput {
+                path: directory_path.to_string_lossy().to_string(),
+            },
+        )
+        .expect("save directory");
+        let prompt = save_ai_prompt_in_db(
+            &db,
+            AiPromptInput {
+                id: None,
+                agent_type: "codex".to_string(),
+                name: "Implement ticket".to_string(),
+                icon: "hammer".to_string(),
+                prompt_text: "Use the project conventions.".to_string(),
+            },
+        )
+        .expect("save prompt");
+        let task = create_task_in_db(
+            &db,
+            None,
+            "Task title".to_string(),
+            "Task content".to_string(),
+            Some("https://github.com/acme/app/issues/7".to_string()),
+        )
+        .expect("create task");
+
+        let deep_link = prepare_ai_prompt_thread_in_db(
+            &db,
+            &OpenAiPromptThreadInput {
+                ai_prompt_id: prompt.id,
+                task_id: task.id.clone(),
+                path: directory.path,
+            },
+        )
+        .expect("prepare thread");
+        assert!(deep_link.starts_with("codex://threads/new?"));
+        let deep_link = reqwest::Url::parse(&deep_link).expect("parse deep link");
+        let query = deep_link.query_pairs().collect::<HashMap<_, _>>();
+        assert_eq!(
+            query.get("prompt").map(|value| value.as_ref()),
+            Some("Use the project conventions.\n\nhttps://github.com/acme/app/issues/7\n\nTask title\n\nTask content")
+        );
+        assert!(
+            get_task(&db, &task.id)
+                .expect("load original task")
+                .is_some(),
+            "preparing an AI thread must keep the original task"
+        );
+
+        fs::remove_dir_all(directory_path).expect("remove workspace");
+    }
+
+    #[test]
     fn normalizes_connection_base_url_on_save() {
         let db = memory_db();
         let connection = save_connection_in_db(
@@ -9592,6 +12966,202 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_provider_comments_and_filters_automation() {
+        let github = github_comments_from_json(
+            &[
+                serde_json::json!({
+                    "id": 2, "body": "Second", "created_at": "2026-07-15T11:00:00Z",
+                    "html_url": "https://github.com/acme/app/pull/1#issuecomment-2",
+                    "user": { "login": "bob", "type": "User" }
+                }),
+                serde_json::json!({
+                    "id": 1, "body": "Bot", "created_at": "2026-07-15T09:00:00Z",
+                    "user": { "login": "ci[bot]", "type": "Bot" }
+                }),
+                serde_json::json!({
+                    "id": 3, "body": "", "created_at": "2026-07-15T12:00:00Z",
+                    "user": { "login": "alice", "type": "User" }
+                }),
+            ],
+            "comment",
+        );
+        assert_eq!(github.len(), 1);
+        assert_eq!(github[0].author, "bob");
+        assert_eq!(github[0].kind, "comment");
+
+        let trello = trello_comments_from_json(
+            &[
+                serde_json::json!({
+                    "id": "action-1", "date": "2026-07-15T10:00:00Z",
+                    "data": { "text": "Human comment" },
+                    "memberCreator": { "fullName": "Alice" }
+                }),
+                serde_json::json!({
+                    "id": "action-2", "date": "2026-07-15T11:00:00Z",
+                    "data": { "text": "Automation" },
+                    "memberCreator": { "fullName": "Butler" },
+                    "appCreator": { "id": "butler" }
+                }),
+            ],
+            Some("https://trello.com/c/card"),
+        );
+        assert_eq!(trello.len(), 1);
+        assert_eq!(trello[0].author, "Alice");
+        assert_eq!(
+            trello[0].url.as_deref(),
+            Some("https://trello.com/c/card#comment-action-1")
+        );
+
+        let gitlab = gitlab_comments_from_json(
+            &[serde_json::json!({
+              "id": "discussion-1",
+              "notes": [
+                {
+                    "id": 8, "body": "Inline note", "type": "DiffNote", "system": false,
+                    "created_at": "2026-07-15T08:00:00Z", "updated_at": "2026-07-15T08:30:00Z",
+                    "author": { "name": "Alex", "bot": false }
+                },
+                {
+                    "id": 9, "body": "changed title", "system": true,
+                    "author": { "name": "Alex", "bot": false }
+                },
+                {
+                    "id": 10, "body": "Bot note", "system": false,
+                    "author": { "name": "Bot", "bot": true }
+                }
+              ]
+            })],
+            &[],
+            Some("https://gitlab.example/acme/app/-/merge_requests/1"),
+        );
+        assert_eq!(gitlab.len(), 1);
+        assert_eq!(gitlab[0].kind, "inline");
+        assert_eq!(gitlab[0].author, "Alex");
+    }
+
+    #[test]
+    fn groups_github_inline_replies_and_extracts_compact_diff_context() {
+        let comments = github_inline_comments_from_json(&[
+            serde_json::json!({
+                "id": 11, "body": "Root", "path": "src/app.js", "line": 3, "side": "RIGHT",
+                "diff_hunk": "@@ -1,3 +1,4 @@\n one\n two\n+three\n four",
+                "created_at": "2026-07-15T09:00:00Z", "user": { "login": "alice", "type": "User" }
+            }),
+            serde_json::json!({
+                "id": 12, "in_reply_to_id": 11, "body": "Reply", "path": "src/app.js", "line": 3, "side": "RIGHT",
+                "diff_hunk": "@@ -1,3 +1,4 @@\n one\n two\n+three\n four",
+                "created_at": "2026-07-15T10:00:00Z", "user": { "login": "bob", "type": "User" }
+            }),
+        ]);
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].discussion_id, comments[1].discussion_id);
+        let context = comments[0].code_context.as_ref().expect("code context");
+        assert_eq!(context.path, "src/app.js");
+        assert!(context.lines.len() <= 7);
+        assert!(context
+            .lines
+            .iter()
+            .any(|line| line.highlighted && line.content == "three"));
+    }
+
+    #[test]
+    fn comment_cache_is_sorted_deduplicated_replaceable_and_malformed_safe() {
+        assert!(task_comments_from_json(Some("not json")).is_empty());
+
+        let comments = normalize_task_comments(vec![
+            TaskComment {
+                id: "comment-2".to_string(),
+                kind: "comment".to_string(),
+                author: "Bob".to_string(),
+                body: "Old body".to_string(),
+                created_at: Some("2026-07-15T11:00:00Z".to_string()),
+                updated_at: None,
+                url: None,
+                discussion_id: None,
+                reply_to_id: None,
+                code_context: None,
+            },
+            TaskComment {
+                id: "comment-1".to_string(),
+                kind: "review".to_string(),
+                author: "Alice".to_string(),
+                body: "First".to_string(),
+                created_at: Some("2026-07-15T09:00:00Z".to_string()),
+                updated_at: None,
+                url: None,
+                discussion_id: None,
+                reply_to_id: None,
+                code_context: None,
+            },
+            TaskComment {
+                id: "comment-2".to_string(),
+                kind: "comment".to_string(),
+                author: "Bob".to_string(),
+                body: "Edited body".to_string(),
+                created_at: Some("2026-07-15T11:00:00Z".to_string()),
+                updated_at: Some("2026-07-15T12:00:00Z".to_string()),
+                url: None,
+                discussion_id: None,
+                reply_to_id: None,
+                code_context: None,
+            },
+        ]);
+        assert_eq!(comments.len(), 2);
+        assert_eq!(comments[0].id, "comment-1");
+        assert_eq!(comments[1].body, "Edited body");
+        assert_eq!(
+            task_comments_from_json(Some(&task_comments_to_json(&comments))),
+            comments
+        );
+
+        let db = memory_db();
+        let project =
+            create_project_in_db(&db, "Comments".to_string(), None, None).expect("project");
+        let task = create_task_in_db(
+            &db,
+            Some(project.id),
+            "Review".to_string(),
+            "Description".to_string(),
+            Some("https://github.com/acme/app/pull/1".to_string()),
+        )
+        .expect("task");
+        let with_comments = ProviderMetadata {
+            comments,
+            ..ProviderMetadata::empty()
+        };
+        link_task_resource_in_db(
+            &db,
+            task.id.clone(),
+            "github".to_string(),
+            "pull_request".to_string(),
+            "acme/app#1".to_string(),
+            "https://github.com/acme/app/pull/1".to_string(),
+            &with_comments,
+        )
+        .expect("cache comments");
+        assert_eq!(
+            list_task_links_in_db(&db, &task.id).expect("links")[0]
+                .comments
+                .len(),
+            2
+        );
+
+        link_task_resource_in_db(
+            &db,
+            task.id.clone(),
+            "github".to_string(),
+            "pull_request".to_string(),
+            "acme/app#1".to_string(),
+            "https://github.com/acme/app/pull/1".to_string(),
+            &ProviderMetadata::empty(),
+        )
+        .expect("replace comments");
+        assert!(list_task_links_in_db(&db, &task.id).expect("links")[0]
+            .comments
+            .is_empty());
+    }
+
+    #[test]
     fn maps_provider_metadata_status_values() {
         let trello_list = serde_json::json!({ "name": "In Progress" });
         assert_eq!(
@@ -9610,6 +13180,11 @@ mod tests {
             github_pull_request_state(&merged_pr).as_deref(),
             Some("merged")
         );
+        assert!(review_request_is_closed(Some("merged")));
+        assert!(review_request_is_closed(Some(" CLOSED ")));
+        assert!(!review_request_is_closed(Some("open")));
+        assert!(!review_request_is_closed(Some("opened")));
+        assert!(!review_request_is_closed(None));
 
         let github_pr = serde_json::json!({ "base": { "ref": "2.x" } });
         assert_eq!(
@@ -9716,6 +13291,152 @@ mod tests {
         assert_eq!(
             json_string(&json, "web_url").as_deref(),
             Some("https://gitlab.example.org/group/app/-/merge_requests/17")
+        );
+    }
+
+    #[test]
+    fn trello_board_template_payload_filters_templates_and_closed_lists() {
+        let cards = serde_json::json!([
+            {"id": "template-1", "name": "Bug", "desc": "Bug body", "idList": "list-1", "isTemplate": true},
+            {"id": "template-2", "name": "Feature", "desc": "", "idList": "list-2", "cover": {"isTemplate": true}},
+            {"id": "regular", "name": "Ordinary card", "idList": "list-1", "isTemplate": false}
+        ]);
+        let lists = serde_json::json!([
+            {"id": "list-1", "name": "Todo", "closed": false},
+            {"id": "list-2", "name": "Archived", "closed": true}
+        ]);
+
+        let result = trello_board_templates_from_json(&cards, &lists);
+
+        assert_eq!(result.templates.len(), 2);
+        assert_eq!(result.templates[0].name, "Bug");
+        assert_eq!(result.templates[1].list_id, "list-2");
+        assert_eq!(
+            result.lists,
+            vec![TrelloBoardList {
+                id: "list-1".to_string(),
+                name: "Todo".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn task_trello_boards_are_project_scoped_and_conversion_rejects_linked_tasks() {
+        let mut db = memory_db();
+        let project = create_project_in_db(&db, "Access".to_string(), None, None).expect("project");
+        let other_project =
+            create_project_in_db(&db, "Other".to_string(), None, None).expect("other project");
+        let connection = save_connection_in_db(
+            &db,
+            ConnectionInput {
+                id: None,
+                provider: "trello".to_string(),
+                name: "Trello".to_string(),
+                base_url: "https://api.trello.com".to_string(),
+                api_key: Some("key".to_string()),
+                token: "token".to_string(),
+            },
+        )
+        .expect("connection");
+        let board = connect_resource_in_db(
+            &db,
+            ResourceInput {
+                project_id: project.id.clone(),
+                provider: "trello".to_string(),
+                kind: "trello_board".to_string(),
+                external_id: "board-1".to_string(),
+                url: "https://trello.com/b/board-1".to_string(),
+                name: "Delivery".to_string(),
+                icon_url: None,
+                connection_id: Some(connection.id.clone()),
+            },
+        )
+        .expect("board");
+        connect_resource_in_db(
+            &db,
+            ResourceInput {
+                project_id: other_project.id,
+                provider: "trello".to_string(),
+                kind: "trello_board".to_string(),
+                external_id: "board-2".to_string(),
+                url: "https://trello.com/b/board-2".to_string(),
+                name: "Other board".to_string(),
+                icon_url: None,
+                connection_id: Some(connection.id.clone()),
+            },
+        )
+        .expect("other board");
+        let task = create_task_in_db(
+            &db,
+            Some(project.id),
+            "Local task".to_string(),
+            "Description".to_string(),
+            None,
+        )
+        .expect("task");
+
+        let boards = task_trello_boards_in_db(&db, &task.id).expect("boards");
+        assert_eq!(boards.len(), 1);
+        assert_eq!(boards[0].id, board.id);
+        assert!(prepare_trello_board_for_task(&db, &task.id, &board.id, true).is_ok());
+
+        let related = create_task_in_db(
+            &db,
+            task.project_id.clone(),
+            "Related task".to_string(),
+            "".to_string(),
+            None,
+        )
+        .expect("related task");
+        save_task_relation_in_db(
+            &db,
+            TaskRelationInput {
+                id: None,
+                source_task_id: task.id.clone(),
+                target_task_id: related.id,
+                relation_type: "related".to_string(),
+            },
+        )
+        .expect("relation");
+        let metadata = ProviderMetadata {
+            connection_id: Some(connection.id),
+            title: Some("Converted title".to_string()),
+            body: Some("Converted body".to_string()),
+            state: Some("Doing".to_string()),
+            url: Some("https://trello.com/c/card-1".to_string()),
+            fetched_at: Some(now_millis()),
+            ..ProviderMetadata::empty()
+        };
+        let converted = persist_trello_ticket_conversion(
+            &mut db,
+            &task.id,
+            &board.id,
+            "card-1",
+            "https://trello.com/c/card-1",
+            "Converted title",
+            "Converted body",
+            "Doing",
+            &metadata,
+        )
+        .expect("convert");
+        assert_eq!(converted.task.id, task.id);
+        assert_eq!(converted.task.created_at, task.created_at);
+        assert_eq!(converted.task.title, "Converted title");
+        assert_eq!(converted.task.body, "Converted body");
+        assert_eq!(converted.task.status, "Doing");
+        assert_eq!(converted.task.source_kind.as_deref(), Some("trello_card"));
+        assert_eq!(
+            db.query_row(
+                "SELECT COUNT(*) FROM task_relations WHERE source_task_id = ?1 OR target_task_id = ?1",
+                params![task.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("relation count"),
+            1
+        );
+        assert_eq!(
+            prepare_trello_board_for_task(&db, &task.id, &board.id, true).unwrap_err(),
+            "This task already has an external resource."
         );
     }
 }

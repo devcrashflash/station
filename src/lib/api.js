@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { formatLocalDate, localDayBounds, sortActivities } from "./activity.js";
 import { EMAIL_DESKTOP_REQUIRED_MESSAGE, OCR_DESKTOP_REQUIRED_MESSAGE } from "./ocr.js";
+import { AI_PROMPT_ICON_IDS } from "./aiPromptIcons.js";
+import { normalizeExternalLabelColor } from "./externalLabels.js";
 import { normalizeProjectColor } from "./projectAvatar.js";
 import { parseSmartInput } from "./smartInputParser.js";
 
@@ -10,6 +12,7 @@ const STORAGE_KEY = "dev-crash-flash-ai-studio-state";
 const defaultState = {
   projects: [],
   connections: [],
+  aiPrompts: [],
   directories: [],
   projectConnections: {},
   resources: [],
@@ -21,8 +24,12 @@ const defaultState = {
   taskLinks: [],
   taskRelations: [],
   pullRequests: [],
+  reviewCommentDrafts: [],
   activities: [],
   activitySyncRuns: [],
+  calendarAccounts: [],
+  calendarEvents: [],
+  calendarSyncRuns: [],
   browserSettings: {
     detectedBrowserBundleId: null,
     browserBundleId: null,
@@ -51,6 +58,14 @@ export const api = {
   loadReviewDiff: (payload) => call("load_review_diff", payload, () => local.loadReviewDiff(payload)),
   loadReviewDiffFile: (payload) =>
     call("load_review_diff_file", payload, () => local.loadReviewDiffFile(payload)),
+  listReviewCommentDrafts: (payload) =>
+    call("list_review_comment_drafts", payload, () => local.listReviewCommentDrafts(payload)),
+  saveReviewCommentDraft: (payload) =>
+    call("save_review_comment_draft", { input: payload }, () => local.saveReviewCommentDraft(payload)),
+  deleteReviewCommentDraft: (payload) =>
+    call("delete_review_comment_draft", payload, () => local.deleteReviewCommentDraft(payload)),
+  submitReviewComments: (payload) =>
+    call("submit_review_comments", payload, () => local.submitReviewComments(payload)),
   chooseLocalResourceDirectory: async () => {
     if (typeof window === "undefined" || !window.__TAURI_INTERNALS__) {
       throw new Error("Choosing local resource directories requires the desktop app.");
@@ -94,6 +109,12 @@ export const api = {
   listTasks: (payload) => call("list_tasks", payload, () => local.listTasks(payload)),
   updateTask: (payload) => call("update_task", payload, () => local.updateTask(payload)),
   deleteTask: (payload) => call("delete_task", payload, () => local.deleteTask(payload)),
+  listTaskTrelloBoards: (payload) =>
+    call("list_task_trello_boards", payload, () => local.listTaskTrelloBoards(payload)),
+  listTrelloBoardTemplates: (payload) =>
+    call("list_trello_board_templates", payload, () => local.listTrelloBoardTemplates(payload)),
+  convertTaskToTrelloTicket: (payload) =>
+    call("convert_task_to_trello_ticket", payload, () => local.convertTaskToTrelloTicket(payload)),
   linkTaskResource: (payload) => call("link_task_resource", payload, () => local.linkTaskResource(payload)),
   listTaskLinks: (payload) => call("list_task_links", payload, () => local.listTaskLinks(payload)),
   refreshTaskExternalDetails: (payload) =>
@@ -109,6 +130,12 @@ export const api = {
   },
   deleteConnection: (payload) => call("delete_connection", payload, () => local.deleteConnection(payload)),
   testConnection: (payload) => call("test_connection", payload, () => local.testConnection(payload)),
+  listAiPrompts: () => call("list_ai_prompts", {}, local.listAiPrompts),
+  saveAiPrompt: (payload) => call("save_ai_prompt", { input: payload }, () => local.saveAiPrompt(payload)),
+  deleteAiPrompt: (payload) => call("delete_ai_prompt", payload, () => local.deleteAiPrompt(payload)),
+  openAiPromptThread: (payload) => call("open_ai_prompt_thread", { input: payload }, () => {
+    throw new Error("Opening an AI Prompt thread requires the desktop app.");
+  }),
   listProjectConnections: (payload) =>
     call("list_project_connections", payload, () => local.listProjectConnections(payload)),
   setProjectConnections: (payload) =>
@@ -125,6 +152,28 @@ export const api = {
     const input = activityRequestPayload(payload);
     return call("sync_activities", input, () => local.syncActivities(input));
   },
+  listCalendarAccounts: () => call("list_calendar_accounts", {}, local.listCalendarAccounts),
+  connectGoogleAccount: ({ accountId = null } = {}) => call("connect_google_account", { accountId }, () => {
+    throw new Error("Google sign-in requires the desktop app.");
+  }),
+  cancelGoogleAccountConnection: () => call("cancel_google_account_connection", {}, () => null),
+  updateCalendarService: (payload) => call("update_calendar_service", { input: payload }, () => local.updateCalendarService(payload)),
+  saveCalendarSubscription: (payload) => call("save_calendar_subscription", { input: payload }, () => {
+    throw new Error("Secret calendar URLs can only be stored securely in the desktop app.");
+  }),
+  saveCalDavAccount: (payload) => call("save_caldav_account", { input: payload }, () => local.saveCalDavAccount(payload)),
+  refreshCalendarCollections: ({ accountId }) => call("refresh_calendar_collections", { accountId }, () => local.refreshCalendarCollections({ accountId })),
+  updateCalendarCollections: ({ selections }) => call("update_calendar_collections", { selections }, () => local.updateCalendarCollections({ selections })),
+  testCalendarAccount: ({ accountId }) => call("test_calendar_account", { accountId }, () => local.testCalendarAccount({ accountId })),
+  deleteCalendarAccount: ({ accountId }) => call("delete_calendar_account", { accountId }, () => local.deleteCalendarAccount({ accountId })),
+  listCalendarEvents: (payload) => {
+    const input = activityRequestPayload(payload);
+    return call("list_calendar_events", input, () => local.listCalendarEvents(input));
+  },
+  syncCalendarEvents: (payload) => {
+    const input = activityRequestPayload(payload);
+    return call("sync_calendar_events", input, () => local.syncCalendarEvents(input));
+  },
 };
 
 async function call(command, payload, fallback) {
@@ -137,7 +186,29 @@ async function call(command, payload, fallback) {
 
 function readState() {
   try {
-    return { ...freshDefaultState(), ...JSON.parse(localStorage.getItem(STORAGE_KEY)) };
+    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY));
+    let migrated = false;
+    if (!Array.isArray(parsed?.aiPrompts) && Array.isArray(parsed?.aiAgents)) {
+      parsed.aiPrompts = parsed.aiAgents.map(({ type, ...agent }) => ({
+        ...agent,
+        agentType: agent.agentType || type,
+        icon: AI_PROMPT_ICON_IDS.includes(agent.icon) ? agent.icon : "sparkles",
+        promptText: agent.promptText || "",
+      }));
+      delete parsed.aiAgents;
+      migrated = true;
+    }
+    if (Array.isArray(parsed?.aiPrompts)) {
+      parsed.aiPrompts = parsed.aiPrompts.map((prompt) => {
+        if (AI_PROMPT_ICON_IDS.includes(prompt.icon)) return prompt;
+        migrated = true;
+        return { ...prompt, icon: "sparkles" };
+      });
+    }
+    if (migrated) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
+    }
+    return { ...freshDefaultState(), ...parsed };
   } catch {
     return freshDefaultState();
   }
@@ -148,6 +219,7 @@ function freshDefaultState() {
     ...defaultState,
     projects: [],
     connections: [],
+    aiPrompts: [],
     directories: [],
     projectConnections: {},
     resources: [],
@@ -159,8 +231,12 @@ function freshDefaultState() {
     taskLinks: [],
     taskRelations: [],
     pullRequests: [],
+    reviewCommentDrafts: [],
     activities: [],
     activitySyncRuns: [],
+    calendarAccounts: [],
+    calendarEvents: [],
+    calendarSyncRuns: [],
     browserSettings: { ...defaultState.browserSettings },
   };
 }
@@ -231,6 +307,20 @@ export function validateConnectionForTest(connection) {
   if (!connection?.token?.trim()) return "Token is required.";
   if (connection.provider === "trello" && !connection.apiKey?.trim()) {
     return "Trello API key is required.";
+  }
+  return "";
+}
+
+export function validateAiPromptForTest(prompt, prompts = []) {
+  const agentType = prompt?.agentType?.trim() || "";
+  if (!["codex", "claude"].includes(agentType)) return "AI Prompt agent must be Codex or Claude.";
+  if (!AI_PROMPT_ICON_IDS.includes(prompt?.icon)) return "AI Prompt icon is not supported.";
+
+  const name = prompt?.name?.trim() || "";
+  if (!name) return "AI Prompt name is required.";
+  const normalizedName = name.toLocaleLowerCase();
+  if (prompts.some((item) => item.id !== prompt?.id && item.name?.trim().toLocaleLowerCase() === normalizedName)) {
+    return "An AI Prompt with this name already exists.";
   }
   return "";
 }
@@ -409,10 +499,37 @@ function normalizeTaskFiles(files) {
     .filter((file) => file.url);
 }
 
+function normalizeTaskComments(comments) {
+  if (!Array.isArray(comments)) return [];
+  return comments
+    .map((comment) => ({
+      id: comment?.id || "",
+      kind: comment?.kind || "comment",
+      author: comment?.author || "Unknown author",
+      body: comment?.body || "",
+      createdAt: comment?.createdAt ?? null,
+      updatedAt: comment?.updatedAt ?? null,
+      url: comment?.url ?? null,
+      discussionId: comment?.discussionId ?? null,
+      replyToId: comment?.replyToId ?? null,
+      codeContext: comment?.codeContext ?? null,
+    }))
+    .filter((comment) => comment.id && comment.body.trim());
+}
+
 function normalizeTaskLink(link) {
   return {
     ...link,
     files: normalizeTaskFiles(link?.files),
+    comments: normalizeTaskComments(link?.comments),
+    labels: (Array.isArray(link?.labels) ? link.labels : [])
+      .map((label) => ({
+        name: String(label?.name || "").trim(),
+        color: normalizeExternalLabelColor(label?.color),
+      }))
+      .filter((label, index, labels) => (
+        label.name && labels.findIndex((candidate) => candidate.name === label.name) === index
+      )),
   };
 }
 
@@ -463,6 +580,28 @@ function enrichTask(state, task) {
 
 function enrichTasks(state, tasks) {
   return tasks.map((task) => enrichTask(state, task));
+}
+
+function latestProjectTaskForProviderItem(state, item, taskKind) {
+  if (!taskKind) return null;
+
+  const linkedTaskIds = new Set(
+    (state.taskLinks || [])
+      .filter((link) => (
+        link.provider === item.provider &&
+        link.kind === taskKind &&
+        link.externalId === item.externalId
+      ))
+      .map((link) => link.taskId),
+  );
+  const task = (state.tasks || [])
+    .filter((candidate) => candidate.projectId && linkedTaskIds.has(candidate.id))
+    .sort((left, right) => (
+      (right.updatedAt || 0) - (left.updatedAt || 0) || left.id.localeCompare(right.id)
+    ))
+    .at(0);
+
+  return task ? enrichTask(state, task) : null;
 }
 
 function supportsExternalRefresh(link) {
@@ -523,6 +662,17 @@ function localActivityResult(state, { date, startAt, endAt }) {
   return {
     activities: sortActivities((state.activities || []).filter((activity) => activityMatchesBounds(activity, startAt, endAt))),
     syncRuns: (state.activitySyncRuns || []).filter((run) => activitySyncRunMatches(run, date)),
+  };
+}
+
+function localCalendarResult(state, { date, startAt, endAt }) {
+  const enabledIds = new Set((state.calendarAccounts || []).flatMap((account) =>
+    (account.calendars || []).filter((calendar) => account.provider !== "google" || calendar.enabled).map((calendar) => calendar.id)));
+  return {
+    events: (state.calendarEvents || [])
+      .filter((event) => enabledIds.has(event.collectionId) && event.startAt < endAt && event.endAt > startAt)
+      .sort((left, right) => Number(right.allDay) - Number(left.allDay) || left.startAt - right.startAt),
+    syncRuns: (state.calendarSyncRuns || []).filter((run) => run.date === date),
   };
 }
 
@@ -734,17 +884,21 @@ const local = {
     const disabledSources = new Set((state.smartInboxProviderSources || [])
       .filter((source) => source.provider === provider && source.enabled === false)
       .map((source) => `${source.connectionId}:${source.sourceId}`));
-    const linkedTrelloCardIds = new Set(
-      (state.taskLinks || [])
-        .filter((link) => link.provider === "trello" && link.kind === "trello_card")
-        .map((link) => link.externalId),
-    );
+    const taskKind = {
+      github: "pull_request",
+      gitlab: "merge_request",
+      trello: "trello_card",
+    }[provider];
     return {
-      items: (state.smartInboxProviderItems || []).filter((item) => (
-        item.provider === provider &&
-        !disabledSources.has(`${item.connectionId}:${item.sourceId}`) &&
-        (provider !== "trello" || !linkedTrelloCardIds.has(item.externalId))
-      )),
+      items: (state.smartInboxProviderItems || [])
+        .filter((item) => (
+          item.provider === provider &&
+          !disabledSources.has(`${item.connectionId}:${item.sourceId}`)
+        ))
+        .map((item) => ({
+          ...item,
+          linkedTask: latestProjectTaskForProviderItem(state, item, taskKind),
+        })),
       warnings: [],
       syncRuns: [],
     };
@@ -883,6 +1037,62 @@ const local = {
     throw new Error("Loading review diffs requires the desktop app.");
   },
 
+  listReviewCommentDrafts({ taskId }) {
+    return (readState().reviewCommentDrafts || [])
+      .filter((draft) => draft.taskId === taskId)
+      .sort((left, right) => left.createdAt - right.createdAt);
+  },
+
+  saveReviewCommentDraft(input) {
+    const body = input?.body?.trim() || "";
+    if (!body) throw new Error("Review comment cannot be blank.");
+    if (!input?.taskId) throw new Error("Task is required.");
+    if (!["overall", "inline"].includes(input.kind)) throw new Error("Review draft kind is invalid.");
+    if (input.kind === "inline" && (!input.path || !["LEFT", "RIGHT"].includes(input.side))) {
+      throw new Error("Inline review draft position is invalid.");
+    }
+
+    const state = readState();
+    state.reviewCommentDrafts = state.reviewCommentDrafts || [];
+    const timestamp = now();
+    let draft = state.reviewCommentDrafts.find((item) => item.id === input.id);
+    if (!draft && input.kind === "overall") {
+      draft = state.reviewCommentDrafts.find((item) => item.taskId === input.taskId && item.kind === "overall");
+    }
+    if (!draft) {
+      draft = { id: id("review_draft"), taskId: input.taskId, createdAt: timestamp };
+      state.reviewCommentDrafts.push(draft);
+    }
+    Object.assign(draft, {
+      kind: input.kind,
+      body,
+      path: input.kind === "inline" ? input.path : null,
+      oldPath: input.kind === "inline" ? input.oldPath || input.path : null,
+      newPath: input.kind === "inline" ? input.newPath || input.path : null,
+      startOldLine: input.kind === "inline" ? input.startOldLine ?? input.oldLine ?? null : null,
+      startNewLine: input.kind === "inline" ? input.startNewLine ?? input.newLine ?? null : null,
+      startSide: input.kind === "inline" ? input.startSide || input.side : null,
+      oldLine: input.kind === "inline" ? input.oldLine ?? null : null,
+      newLine: input.kind === "inline" ? input.newLine ?? null : null,
+      side: input.kind === "inline" ? input.side : null,
+      headSha: input.kind === "inline" ? input.headSha || null : null,
+      lastError: null,
+      updatedAt: timestamp,
+    });
+    writeState(state);
+    return draft;
+  },
+
+  deleteReviewCommentDraft({ id: draftId }) {
+    const state = readState();
+    state.reviewCommentDrafts = (state.reviewCommentDrafts || []).filter((draft) => draft.id !== draftId);
+    writeState(state);
+  },
+
+  submitReviewComments() {
+    throw new Error("Publishing review comments requires the desktop app.");
+  },
+
   ocrImageFile() {
     throw new Error(OCR_DESKTOP_REQUIRED_MESSAGE);
   },
@@ -992,6 +1202,8 @@ const local = {
         externalState: null,
         fetchedAt: null,
         files: [],
+        comments: [],
+        labels: [],
       });
     }
 
@@ -1035,7 +1247,32 @@ const local = {
     state.taskRelations = (state.taskRelations || []).filter(
       (relation) => relation.sourceTaskId !== taskId && relation.targetTaskId !== taskId,
     );
+    state.reviewCommentDrafts = (state.reviewCommentDrafts || []).filter(
+      (draft) => draft.taskId !== taskId,
+    );
     writeState(state);
+  },
+
+  listTaskTrelloBoards({ taskId }) {
+    const state = readState();
+    const task = state.tasks.find((item) => item.id === taskId);
+    if (!task) throw new Error("Task not found.");
+    if (!task.projectId) return [];
+    return state.resources
+      .filter((resource) => (
+        resource.projectId === task.projectId &&
+        resource.provider === "trello" &&
+        resource.kind === "trello_board"
+      ))
+      .sort((left, right) => left.name.localeCompare(right.name));
+  },
+
+  listTrelloBoardTemplates() {
+    throw new Error("Loading Trello templates requires the desktop app.");
+  },
+
+  convertTaskToTrelloTicket() {
+    throw new Error("Creating Trello tickets requires the desktop app.");
   },
 
   linkTaskResource(payload) {
@@ -1235,6 +1472,45 @@ const local = {
     writeState(state);
   },
 
+  listAiPrompts() {
+    return [...(readState().aiPrompts || [])].sort((left, right) => (
+      left.name.localeCompare(right.name, undefined, { sensitivity: "base" }) || left.id.localeCompare(right.id)
+    ));
+  },
+
+  saveAiPrompt(input) {
+    const state = readState();
+    state.aiPrompts = state.aiPrompts || [];
+    const validationMessage = validateAiPromptForTest(input, state.aiPrompts);
+    if (validationMessage) throw new Error(validationMessage);
+
+    const timestamp = now();
+    let prompt = state.aiPrompts.find((item) => item.id === input.id);
+    if (!prompt) {
+      prompt = {
+        id: id("ai_prompt"),
+        createdAt: timestamp,
+      };
+      state.aiPrompts.push(prompt);
+    }
+
+    Object.assign(prompt, {
+      agentType: input.agentType.trim(),
+      name: input.name.trim(),
+      icon: input.icon,
+      promptText: input.promptText?.trim() || "",
+      updatedAt: timestamp,
+    });
+    writeState(state);
+    return prompt;
+  },
+
+  deleteAiPrompt({ id: promptId }) {
+    const state = readState();
+    state.aiPrompts = (state.aiPrompts || []).filter((prompt) => prompt.id !== promptId);
+    writeState(state);
+  },
+
   testConnection({ id: connectionId }) {
     const connection = readState().connections.find((item) => item.id === connectionId);
     if (!connection) throw new Error("Connection not found");
@@ -1334,5 +1610,71 @@ const local = {
     ];
     writeState(state);
     return localActivityResult(state, payload);
+  },
+
+  listCalendarAccounts() {
+    return readState().calendarAccounts || [];
+  },
+
+  updateCalendarService({ accountId, enabled }) {
+    const state = readState();
+    const account = (state.calendarAccounts || []).find((item) => item.id === accountId);
+    if (!account) throw new Error("Calendar account not found.");
+    if (account.provider !== "google") throw new Error("Only Google accounts have optional Calendar access.");
+    account.calendarEnabled = enabled;
+    account.updatedAt = now();
+    writeState(state);
+    return account;
+  },
+
+  saveCalDavAccount(input) {
+    const state = readState();
+    const timestamp = now();
+    let account = (state.calendarAccounts || []).find((item) => item.id === input.id);
+    if (!account) {
+      account = { id: id("calendar_account"), provider: "caldav", authType: "basic", calendars: [], createdAt: timestamp };
+      state.calendarAccounts = [...(state.calendarAccounts || []), account];
+    }
+    Object.assign(account, { name: input.name, serverUrl: input.serverUrl, username: input.username, hasCredential: true, updatedAt: timestamp });
+    writeState(state);
+    return account;
+  },
+
+  refreshCalendarCollections({ accountId }) {
+    const account = (readState().calendarAccounts || []).find((item) => item.id === accountId);
+    if (!account) throw new Error("Calendar account not found.");
+    return account;
+  },
+
+  updateCalendarCollections({ selections }) {
+    const state = readState();
+    const byId = new Map(selections.map((selection) => [selection.id, selection]));
+    for (const account of state.calendarAccounts || []) {
+      account.calendars = (account.calendars || []).map((calendar) => byId.has(calendar.id) ? { ...calendar, ...byId.get(calendar.id), enabled: account.provider === "google" ? byId.get(calendar.id).enabled : true } : calendar);
+    }
+    writeState(state);
+    return state.calendarAccounts || [];
+  },
+
+  testCalendarAccount({ accountId }) {
+    const account = (readState().calendarAccounts || []).find((item) => item.id === accountId);
+    if (!account) throw new Error("Calendar account not found.");
+    return `Connected. Found ${(account.calendars || []).length} calendars.`;
+  },
+
+  deleteCalendarAccount({ accountId }) {
+    const state = readState();
+    const collectionIds = new Set((state.calendarAccounts || []).find((item) => item.id === accountId)?.calendars?.map((item) => item.id) || []);
+    state.calendarAccounts = (state.calendarAccounts || []).filter((item) => item.id !== accountId);
+    state.calendarEvents = (state.calendarEvents || []).filter((event) => !collectionIds.has(event.collectionId));
+    writeState(state);
+  },
+
+  listCalendarEvents(payload) {
+    return localCalendarResult(readState(), payload);
+  },
+
+  syncCalendarEvents(payload) {
+    return localCalendarResult(readState(), payload);
   },
 };

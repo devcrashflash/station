@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ClipboardList, ExternalLink, Eye, Files, FileText, GitPullRequest, Inbox, Pencil, Plus, RefreshCw, Settings, SquareKanban, Trash2 } from "lucide-react";
+import { CalendarDays, ClipboardList, ExternalLink, Eye, Files, FileText, GitPullRequest, Inbox, LoaderCircle, MapPin, Pencil, Plus, RefreshCw, Settings, SquareKanban, Trash2, Video } from "lucide-react";
 
 import { EmptyState } from "@/components/common/EmptyState";
 import { Modal } from "@/components/common/Modal";
@@ -16,6 +16,7 @@ import { dashboardTaskCreatedAt, dashboardTaskProjectName, latestDashboardTasks 
 import { isSupportedOcrFile } from "@/lib/ocr";
 import { reviewRequestInput, reviewRequestSubtitle } from "@/lib/smartInboxReviewRequests";
 import { cn } from "@/lib/utils";
+import { calendarEventOpenUrl, calendarEventTimeLabel, calendarWarningMessages, sortCalendarEvents } from "@/lib/calendar";
 
 export function InboxView({
   tasks = [],
@@ -35,13 +36,20 @@ export function InboxView({
   onUpdateProviderSources,
   onOpenReviewRequest,
   onOpenTask,
+  smartInputFocusRequestKey = 0,
+  calendarEvents = [],
+  calendarSyncRuns = [],
+  isCalendarSyncing = false,
+  hasCalendarAccounts = false,
+  onRefreshCalendar,
+  onShowCalendarSettings,
 }) {
   const [activeTab, setActiveTab] = useState("todos");
   const latestTasks = latestDashboardTasks(tasks, 20);
   const recentTasks = latestTasks.slice(0, 3);
 
   return (
-    <div className="grid flex-1 gap-6 overflow-y-auto p-6 lg:grid-cols-[minmax(0,1fr)_360px]">
+    <div className="grid flex-1 gap-6 overflow-y-auto p-6 [scrollbar-gutter:stable] lg:grid-cols-[minmax(0,1fr)_360px]">
       <section className="flex min-w-0 flex-col gap-5">
         <div>
           <h2 className="text-3xl font-semibold">Capture work from anywhere</h2>
@@ -51,6 +59,7 @@ export function InboxView({
         </div>
         <SmartInput
           large
+          focusRequestKey={smartInputFocusRequestKey}
           onSubmit={onSubmit}
           onFileDrop={onFileDrop}
         />
@@ -76,7 +85,17 @@ export function InboxView({
         />
       </section>
 
-      <aside className="min-w-0">
+      <aside className="grid min-w-0 content-start gap-6">
+        <Panel title="Today's meetings" icon={CalendarDays}>
+          <TodayMeetings
+            events={calendarEvents}
+            syncRuns={calendarSyncRuns}
+            isSyncing={isCalendarSyncing}
+            hasAccounts={hasCalendarAccounts}
+            onRefresh={onRefreshCalendar}
+            onShowSettings={onShowCalendarSettings}
+          />
+        </Panel>
         <Panel title="Recent tasks" icon={ClipboardList}>
           <DashboardTaskList tasks={recentTasks} projects={projects} onOpenTask={onOpenTask} />
           {tasks.length > 3 && (
@@ -91,6 +110,67 @@ export function InboxView({
           )}
         </Panel>
       </aside>
+    </div>
+  );
+}
+
+function TodayMeetings({ events, syncRuns, isSyncing, hasAccounts, onRefresh, onShowSettings }) {
+  const warnings = calendarWarningMessages(syncRuns);
+  const sorted = sortCalendarEvents(events);
+
+  if (!hasAccounts) {
+    return (
+      <div className="grid gap-3">
+        <EmptyState text="Connect a calendar to see today's meetings." />
+        <Button type="button" variant="outline" className="w-full" onClick={onShowSettings}>
+          <Settings />
+          Calendar settings
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid gap-3">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-xs text-muted-foreground">
+          {isSyncing ? "Syncing calendars…" : `${sorted.length} event${sorted.length === 1 ? "" : "s"}`}
+        </p>
+        <Button type="button" size="icon-sm" variant="ghost" title={isSyncing ? "Syncing calendars" : "Refresh today's meetings"} aria-label={isSyncing ? "Syncing calendars" : "Refresh today's meetings"} aria-busy={isSyncing} disabled={isSyncing} onClick={onRefresh}>
+          {isSyncing ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : <RefreshCw aria-hidden="true" />}
+        </Button>
+      </div>
+      {warnings.map((warning) => <p key={warning} className="text-xs text-destructive">{warning}</p>)}
+      {sorted.length === 0 ? <EmptyState text={isSyncing ? "Syncing today's meetings…" : "No events today."} /> : (
+        <div className="grid gap-2">
+          {sorted.map((event) => {
+            const openUrl = calendarEventOpenUrl(event);
+            return (
+              <div key={event.id} className="grid gap-1 rounded-md border p-3" style={{ borderLeftColor: event.calendarColor || "#64748b", borderLeftWidth: 4 }}>
+                <div className="flex min-w-0 items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium text-muted-foreground">{calendarEventTimeLabel(event)}</p>
+                    <p className="mt-0.5 break-words text-sm font-medium [overflow-wrap:anywhere]">{event.title}</p>
+                  </div>
+                  {openUrl && (
+                    <Button size="icon-sm" variant="ghost" asChild>
+                      <a href={openUrl} target="_blank" rel="noreferrer" title={event.joinUrl ? "Join meeting" : "Open event"}>
+                        {event.joinUrl ? <Video /> : <ExternalLink />}
+                      </a>
+                    </Button>
+                  )}
+                </div>
+                <p className="truncate text-xs text-muted-foreground">{event.calendarName}</p>
+                {event.location && !event.joinUrl && (
+                  <p className="flex min-w-0 items-center gap-1 truncate text-xs text-muted-foreground">
+                    <MapPin className="size-3 shrink-0" /><span className="truncate">{event.location}</span>
+                  </p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -144,8 +224,11 @@ function InboxCaptureTabs({
   }, [onLoadProviderItems, onSyncProviderItems]);
 
   useEffect(() => {
-    if (!startedProviders.current.has("trello")) return;
-    loadProviderItems("trello");
+    for (const provider of ["github", "gitlab", "trello"]) {
+      if (startedProviders.current.has(provider)) {
+        loadProviderItems(provider);
+      }
+    }
   }, [tasks]);
 
   async function refreshFiles() {
@@ -329,6 +412,7 @@ function InboxCaptureTabs({
             provider={activeTab}
             result={providerItems[activeTab]}
             onOpenReviewRequest={onOpenReviewRequest}
+            onOpenTask={onOpenTask}
           />
         )}
       </div>
@@ -477,7 +561,7 @@ function tabLabel(tabs, activeTab) {
   return tabs.find((tab) => tab.id === activeTab)?.label || activeTab;
 }
 
-function ReviewRequestList({ provider, result, onOpenReviewRequest }) {
+function ReviewRequestList({ provider, result, onOpenReviewRequest, onOpenTask }) {
   const displayName = providerName(provider);
   const items = result?.items || [];
   const warnings = result?.warnings || [];
@@ -493,12 +577,13 @@ function ReviewRequestList({ provider, result, onOpenReviewRequest }) {
         </div>
       ))}
       {items.length === 0 ? (
-        <EmptyState text={provider === "trello" ? "No unlinked assigned Trello cards." : `No ${displayName} review requests.`} />
+        <EmptyState text={provider === "trello" ? "No assigned Trello cards." : `No ${displayName} review requests.`} />
       ) : (
         <div className="flex flex-col gap-2">
           {items.map((item) => {
             const input = reviewRequestInput(item);
             const canOpen = Boolean(item.url);
+            const linkedTask = item.linkedTask || null;
             return (
               <div
                 key={`${item.provider}:${item.externalId || item.url}`}
@@ -547,19 +632,35 @@ function ReviewRequestList({ provider, result, onOpenReviewRequest }) {
                   <ExternalLink />
                   View
                 </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  className="col-start-2 row-start-3 w-fit sm:col-start-auto sm:row-start-auto"
-                  disabled={!input || !onOpenReviewRequest}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onOpenReviewRequest?.(input);
-                  }}
-                >
-                  <Plus />
-                  Create task
-                </Button>
+                {linkedTask ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="col-start-2 row-start-3 w-fit sm:col-start-auto sm:row-start-auto"
+                    disabled={!onOpenTask}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onOpenTask?.(linkedTask);
+                    }}
+                  >
+                    <Eye />
+                    View Task
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="col-start-2 row-start-3 w-fit sm:col-start-auto sm:row-start-auto"
+                    disabled={!input || !onOpenReviewRequest}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onOpenReviewRequest?.(input);
+                    }}
+                  >
+                    <Plus />
+                    Create task
+                  </Button>
+                )}
               </div>
             );
           })}

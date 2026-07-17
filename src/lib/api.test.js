@@ -8,6 +8,7 @@ import {
   normalizeRepoUrl,
   repoUrlFromPullRequestUrl,
   selectBestConnection,
+  validateAiPromptForTest,
   validateConnectionForTest,
 } from "./api.js";
 import {
@@ -84,6 +85,65 @@ test("validates local connection test requirements", () => {
     }),
     "",
   );
+});
+
+test("validates AI Prompt agents, names, and case-insensitive uniqueness", () => {
+  const existing = [{ id: "prompt_1", agentType: "codex", name: "Implement ticket", icon: "hammer" }];
+  assert.equal(validateAiPromptForTest({ agentType: "other", name: "Prompt", icon: "hammer" }, existing), "AI Prompt agent must be Codex or Claude.");
+  assert.equal(validateAiPromptForTest({ agentType: "codex", name: "Prompt", icon: "other" }, existing), "AI Prompt icon is not supported.");
+  assert.equal(validateAiPromptForTest({ agentType: "codex", name: "  ", icon: "hammer" }, existing), "AI Prompt name is required.");
+  assert.equal(
+    validateAiPromptForTest({ agentType: "claude", name: "implement ticket", icon: "review" }, existing),
+    "An AI Prompt with this name already exists.",
+  );
+  assert.equal(validateAiPromptForTest({ id: "prompt_1", agentType: "claude", name: "IMPLEMENT TICKET", icon: "review" }, existing), "");
+});
+
+test("local fallback stores, updates, lists, and deletes AI Prompts", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => { stored = value; },
+  };
+
+  const codex = await api.saveAiPrompt({ agentType: "codex", name: " Implement ticket ", icon: "hammer", promptText: " Fix it carefully. " });
+  const claude = await api.saveAiPrompt({ agentType: "claude", name: "Review ticket", icon: "review", promptText: "" });
+  assert.equal(codex.name, "Implement ticket");
+  assert.equal(codex.promptText, "Fix it carefully.");
+  assert.deepEqual((await api.listAiPrompts()).map(({ name }) => name), ["Implement ticket", "Review ticket"]);
+
+  const updated = await api.saveAiPrompt({ id: codex.id, agentType: "claude", name: "Ship ticket", icon: "target", promptText: "" });
+  assert.equal(updated.id, codex.id);
+  assert.equal(updated.agentType, "claude");
+  await assert.rejects(
+    async () => api.saveAiPrompt({ agentType: "codex", name: "ship ticket", icon: "clock", promptText: "" }),
+    /already exists/,
+  );
+
+  await api.deleteAiPrompt({ id: claude.id });
+  assert.deepEqual((await api.listAiPrompts()).map(({ id }) => id), [codex.id]);
+});
+
+test("local fallback migrates legacy AI Agents into AI Prompts", async () => {
+  let stored = JSON.stringify({
+    projects: [{ id: "project_1", name: "Legacy" }],
+    aiAgents: [{ id: "agent_1", type: "codex", name: "Legacy Codex", createdAt: 1, updatedAt: 2 }],
+  });
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => { stored = value; },
+  };
+
+  assert.deepEqual(await api.listAiPrompts(), [{
+    id: "agent_1",
+    agentType: "codex",
+    name: "Legacy Codex",
+    icon: "sparkles",
+    promptText: "",
+    createdAt: 1,
+    updatedAt: 2,
+  }]);
+  assert.equal(JSON.parse(stored).aiAgents, undefined);
 });
 
 test("normalizes base urls without a scheme", () => {
@@ -229,6 +289,95 @@ test("local fallback keeps matching source names independent across connections"
   assert.equal(sources.find(({ connectionId }) => connectionId === "connection_1").enabled, false);
   assert.equal(sources.find(({ connectionId }) => connectionId === "connection_2").enabled, true);
   assert.equal((await api.listSmartInboxProviderItems({ provider: "gitlab" })).items.length, 1);
+});
+
+test("local fallback keeps linked provider items and exposes the latest project task", async () => {
+  const providerCases = [
+    ["trello", "trello_card", "card123"],
+    ["github", "pull_request", "owner/repo#42"],
+    ["gitlab", "merge_request", "group/app!17"],
+  ];
+  let stored = JSON.stringify({
+    projects: [{ id: "project_1", name: "Studio" }],
+    connections: providerCases.map(([provider]) => ({
+      id: `${provider}_connection`,
+      provider,
+      name: provider,
+    })),
+    tasks: providerCases.flatMap(([provider], index) => ([
+      {
+        id: `${provider}_old`,
+        projectId: "project_1",
+        title: `${provider} old task`,
+        body: "",
+        status: "open",
+        createdAt: 1,
+        updatedAt: index + 1,
+      },
+      {
+        id: `${provider}_new`,
+        projectId: "project_1",
+        title: `${provider} current task`,
+        body: "",
+        status: "open",
+        createdAt: 1,
+        updatedAt: index + 10,
+      },
+    ])),
+    taskLinks: providerCases.flatMap(([provider, kind, externalId]) => ([
+      {
+        taskId: `${provider}_old`,
+        provider,
+        kind,
+        externalId,
+        url: `https://example.org/${provider}/linked`,
+      },
+      {
+        taskId: `${provider}_new`,
+        provider,
+        kind,
+        externalId,
+        url: `https://example.org/${provider}/linked`,
+      },
+    ])),
+    smartInboxProviderItems: providerCases.flatMap(([provider, _kind, externalId]) => ([
+      {
+        provider,
+        connectionId: `${provider}_connection`,
+        connectionName: provider,
+        sourceId: `${provider}_source`,
+        sourceName: `${provider} source`,
+        externalId,
+        title: `${provider} linked`,
+        url: `https://example.org/${provider}/linked`,
+      },
+      {
+        provider,
+        connectionId: `${provider}_connection`,
+        connectionName: provider,
+        sourceId: `${provider}_source`,
+        sourceName: `${provider} source`,
+        externalId: `${externalId}-unlinked`,
+        title: `${provider} unlinked`,
+        url: `https://example.org/${provider}/unlinked`,
+      },
+    ])),
+  });
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => { stored = value; },
+  };
+
+  for (const [provider] of providerCases) {
+    const result = await api.listSmartInboxProviderItems({ provider });
+    assert.equal(result.items.length, 2);
+    assert.equal(
+      result.items.find((item) => item.title.endsWith("linked") && !item.title.endsWith("unlinked"))
+        .linkedTask.id,
+      `${provider}_new`,
+    );
+    assert.equal(result.items.find((item) => item.title.endsWith("unlinked")).linkedTask, null);
+  }
 });
 
 test("local fallback normalizes legacy project colors", async () => {
@@ -1018,6 +1167,54 @@ test("local fallback deletes tasks with links and relations", async () => {
   assert.equal((await api.listTaskRelations({ taskId: child.task.id })).length, 0);
 });
 
+test("local fallback persists review drafts and removes them with the task", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => {
+      stored = value;
+    },
+  };
+
+  const project = await api.createProject({ name: "Review" });
+  const result = await api.createTaskFromInput({
+    input: "Review PR",
+    parsed: { kind: "text", provider: null, externalId: null, url: null, title: "Review PR", repoUrl: null },
+    projectId: project.id,
+  });
+  const summary = await api.saveReviewCommentDraft({
+    taskId: result.task.id,
+    kind: "overall",
+    body: "Please address the inline notes.",
+  });
+  const updated = await api.saveReviewCommentDraft({
+    taskId: result.task.id,
+    kind: "overall",
+    body: "Updated summary.",
+  });
+  assert.equal(updated.id, summary.id);
+  const inline = await api.saveReviewCommentDraft({
+    taskId: result.task.id,
+    kind: "inline",
+    body: "Rename this variable.",
+    path: "src/app.js",
+    oldPath: "src/app.js",
+    newPath: "src/app.js",
+    startNewLine: 10,
+    startSide: "RIGHT",
+    newLine: 12,
+    side: "RIGHT",
+    headSha: "abc123",
+  });
+  assert.equal(inline.startNewLine, 10);
+  assert.equal(inline.startSide, "RIGHT");
+  assert.equal((await api.listReviewCommentDrafts({ taskId: result.task.id })).length, 2);
+
+  await api.deleteTask({ id: result.task.id });
+  assert.deepEqual(await api.listReviewCommentDrafts({ taskId: result.task.id }), []);
+  await assert.rejects(() => api.submitReviewComments({ taskId: result.task.id }), /desktop app/);
+});
+
 test("local fallback creates task relations and rejects duplicates/self-relations", async () => {
   let stored = "";
   global.localStorage = {
@@ -1070,11 +1267,33 @@ test("local fallback creates task relations and rejects duplicates/self-relation
         createdAt: "2026-07-09T10:00:00.000Z",
       },
     ],
+    comments: [
+      {
+        id: "trello:comment-1",
+        kind: "comment",
+        author: "Alice",
+        body: "Looks good",
+        createdAt: "2026-07-09T11:00:00.000Z",
+        updatedAt: null,
+        url: "https://trello.com/c/card123/review#comment-comment-1",
+      },
+    ],
+    labels: [
+      { name: " Bug ", color: "#EB5A46" },
+      { name: "Bug", color: "#000000" },
+      { name: "Needs review", color: "not-a-color" },
+    ],
   });
   const trelloLinks = await api.listTaskLinks({ taskId: parent.task.id });
   assert.equal(trelloLinks[0].files.length, 1);
   assert.equal(trelloLinks[0].files[0].name, "Design spec.pdf");
   assert.equal(trelloLinks[0].files[0].source, "trello");
+  assert.equal(trelloLinks[0].comments.length, 1);
+  assert.equal(trelloLinks[0].comments[0].author, "Alice");
+  assert.deepEqual(trelloLinks[0].labels, [
+    { name: "Bug", color: "#eb5a46" },
+    { name: "Needs review", color: null },
+  ]);
 
   await api.linkTaskResource({
     taskId: parent.task.id,
@@ -1087,6 +1306,8 @@ test("local fallback creates task relations and rejects duplicates/self-relation
   assert.equal(links.length, 1);
   assert.equal(links[0].kind, "github_issue");
   assert.deepEqual(links[0].files, []);
+  assert.deepEqual(links[0].comments, []);
+  assert.deepEqual(links[0].labels, []);
 
   const relation = await api.saveTaskRelation({
     sourceTaskId: parent.task.id,

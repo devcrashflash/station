@@ -8,6 +8,18 @@ Minimal Tauri v2 starter using React, JavaScript, Vite, Tailwind CSS, and shadcn
 - Start the frontend with `pnpm dev`.
 - Start the desktop app with `pnpm tauri dev`.
 
+### Google Calendar sign-in
+
+The published desktop Google OAuth client is compiled into the app, so Google sign-in
+works without local or build configuration. The Google Calendar API must remain enabled
+and the OAuth app must remain available to the intended audience in its Google Cloud
+project.
+
+The desktop OAuth flow uses PKCE and a temporary loopback callback. Its installed-app
+OAuth client ID and client secret are compiled into the app and must not be treated as
+confidential. User calendar credentials are stored unencrypted in the local application
+database; anyone with access to that database may be able to read them.
+
 ## Local-First Behavior
 
 The app should always prefer local data first. Opening projects, tasks, and
