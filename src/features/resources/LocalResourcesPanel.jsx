@@ -2,11 +2,10 @@ import { useState } from "react";
 import { FolderGit2, FolderOpen, Trash2 } from "lucide-react";
 
 import { EmptyState } from "@/components/common/EmptyState";
-import { Modal } from "@/components/common/Modal";
 import { Panel } from "@/components/common/Panel";
 import { Button } from "@/components/ui/button";
 
-export function LocalResourcesPanel({ localResources, onManageLocalResources }) {
+export function LocalResourcesPanel({ localResources }) {
   return (
     <Panel title="Local resources" icon={FolderGit2}>
       <div className="grid gap-4">
@@ -20,20 +19,14 @@ export function LocalResourcesPanel({ localResources, onManageLocalResources }) 
         ) : (
           <LocalResourceList localResources={localResources} editable={false} />
         )}
-
-        <Button type="button" variant="outline" onClick={onManageLocalResources}>
-          <FolderGit2 className="size-4" />
-          Manage local resources
-        </Button>
       </div>
     </Panel>
   );
 }
 
-export function ProjectLocalResourcesDialog({
+export function ProjectLocalResourcesEditor({
   project,
   localResources,
-  onClose,
   onChooseDirectory,
   onSaveLocalResource,
   onDeleteLocalResource,
@@ -57,18 +50,17 @@ export function ProjectLocalResourcesDialog({
   }
 
   return (
-    <Modal title="Local resources" onClose={onClose}>
-      <div className="grid gap-4">
-        <Button type="button" variant="outline" disabled={isChoosing} onClick={chooseDirectory}>
-          <FolderOpen className="size-4" />
-          {isChoosing ? "Choosing..." : "Choose repository directory"}
-        </Button>
+    <div className="grid gap-4">
+      <Button type="button" variant="outline" disabled={isChoosing} onClick={chooseDirectory}>
+        <FolderOpen className="size-4" />
+        {isChoosing ? "Choosing..." : "Choose repository directory"}
+      </Button>
 
-        {notice && <p className="text-sm text-muted-foreground">{notice}</p>}
+      {notice && <p className="text-sm text-muted-foreground" role="status">{notice}</p>}
 
-        {localResources.length === 0 ? (
-          <EmptyState text="No local repositories linked." />
-        ) : (
+      {localResources.length === 0 ? (
+        <EmptyState text="No local repositories linked." />
+      ) : (
         <LocalResourceList
           localResources={localResources}
           editable
@@ -82,8 +74,7 @@ export function ProjectLocalResourcesDialog({
           }}
         />
       )}
-      </div>
-    </Modal>
+    </div>
   );
 }
 

@@ -3,13 +3,9 @@ import { ClipboardList } from "lucide-react";
 
 import { Panel } from "@/components/common/Panel";
 import { Button } from "@/components/ui/button";
+import { LocalResourcesPanel } from "@/features/resources/LocalResourcesPanel";
 import {
-  LocalResourcesPanel,
-  ProjectLocalResourcesDialog,
-} from "@/features/resources/LocalResourcesPanel";
-import {
-  ProjectConnectionsDialog,
-  ProjectEditDialog,
+  ProjectEditorDialog,
   ProjectSettingsPanel,
 } from "@/features/projects/ProjectSettingsPanel";
 import { ResourcesPanel } from "@/features/resources/ResourcesPanel";
@@ -31,7 +27,7 @@ export function ProjectWorkspaceView({
   onUpdateTask,
   onOpenTask,
 }) {
-  const [activeOverlay, setActiveOverlay] = useState(null);
+  const [isEditorOpen, setIsEditorOpen] = useState(false);
 
   return (
     <>
@@ -47,51 +43,28 @@ export function ProjectWorkspaceView({
             project={project}
             connections={connections}
             projectConnectionIds={projectConnectionIds}
-            onEditProject={() => setActiveOverlay("project")}
-            onManageConnections={() => setActiveOverlay("connections")}
+            onEdit={() => setIsEditorOpen(true)}
           />
           <ResourcesPanel
             resources={resources}
           />
-          <LocalResourcesPanel
-            localResources={localResources}
-            onManageLocalResources={() => setActiveOverlay("local-resources")}
-          />
+          <LocalResourcesPanel localResources={localResources} />
           <Button type="button" variant="outline" onClick={onRefresh}>
             Refresh project
           </Button>
         </div>
       </div>
 
-      {activeOverlay === "project" && (
-        <ProjectEditDialog
+      {isEditorOpen && (
+        <ProjectEditorDialog
           project={project}
-          onClose={() => setActiveOverlay(null)}
-          onSave={async (payload) => {
-            await onUpdateProject(payload);
-            setActiveOverlay(null);
-          }}
-        />
-      )}
-
-      {activeOverlay === "connections" && (
-        <ProjectConnectionsDialog
           connections={connections}
           projectConnectionIds={projectConnectionIds}
-          onClose={() => setActiveOverlay(null)}
-          onSave={async (connectionIds) => {
-            await onUpdateProjectConnections(connectionIds);
-            setActiveOverlay(null);
-          }}
-        />
-      )}
-
-      {activeOverlay === "local-resources" && (
-        <ProjectLocalResourcesDialog
-          project={project}
           localResources={localResources}
-          onClose={() => setActiveOverlay(null)}
-          onChooseDirectory={onChooseLocalResourceDirectory}
+          onClose={() => setIsEditorOpen(false)}
+          onUpdateProject={onUpdateProject}
+          onUpdateProjectConnections={onUpdateProjectConnections}
+          onChooseLocalResourceDirectory={onChooseLocalResourceDirectory}
           onSaveLocalResource={onSaveLocalResource}
           onDeleteLocalResource={onDeleteLocalResource}
         />

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Pencil, Plug, Settings } from "lucide-react";
+import { Pencil, Settings } from "lucide-react";
+import { Tabs as TabsPrimitive } from "radix-ui";
 
 import { EmptyState } from "@/components/common/EmptyState";
 import { Modal } from "@/components/common/Modal";
@@ -8,7 +9,9 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { ProjectColorPicker } from "@/features/projects/ProjectColorPicker";
+import { ProjectLocalResourcesEditor } from "@/features/resources/LocalResourcesPanel";
 import { providerLabels } from "@/lib/domain";
 import { getProjectInitial, normalizeProjectColor } from "@/lib/projectAvatar";
 
@@ -16,14 +19,28 @@ export function ProjectSettingsPanel({
   project,
   connections = [],
   projectConnectionIds = [],
-  onEditProject,
-  onManageConnections,
+  onEdit,
 }) {
   const projectColor = normalizeProjectColor(project.color);
   const enabledConnections = connections.filter((connection) => projectConnectionIds.includes(connection.id));
 
   return (
-    <Panel title="Project details" icon={Settings}>
+    <Panel
+      title="Project details"
+      icon={Settings}
+      headerAction={(
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button type="button" size="icon-xs" variant="ghost" aria-label="Edit project" onClick={onEdit}>
+                <Pencil />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="left">Edit project</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      )}
+    >
       <div className="grid gap-4">
         <div className="flex min-w-0 items-center gap-3">
           <div
@@ -58,61 +75,60 @@ export function ProjectSettingsPanel({
             </div>
           )}
         </div>
-
-        <div className="grid gap-2">
-          <Button type="button" variant="outline" onClick={onEditProject}>
-            <Pencil className="size-4" />
-            Edit project
-          </Button>
-          <Button type="button" variant="outline" onClick={onManageConnections}>
-            <Plug className="size-4" />
-            Manage connections
-          </Button>
-        </div>
       </div>
     </Panel>
   );
 }
 
-export function ProjectEditDialog({ project, onClose, onSave }) {
+function ProjectEditor({ project, onSave }) {
   const [name, setName] = useState(project.name);
   const [color, setColor] = useState(normalizeProjectColor(project.color));
+  const [isSaving, setIsSaving] = useState(false);
+  const [notice, setNotice] = useState("");
 
   useEffect(() => {
     setName(project.name);
     setColor(normalizeProjectColor(project.color));
   }, [project]);
 
+  async function submitProject(event) {
+    event.preventDefault();
+    setIsSaving(true);
+    setNotice("");
+    try {
+      await onSave({ id: project.id, name, color });
+      setNotice("Project saved.");
+    } catch (error) {
+      setNotice(error?.message || String(error));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   return (
-    <Modal title="Edit project" onClose={onClose}>
-      <form
-        className="grid gap-3"
-        onSubmit={async (event) => {
-          event.preventDefault();
-          await onSave({ id: project.id, name, color });
-        }}
-      >
-        <Field>
-          <FieldLabel>Name</FieldLabel>
-          <Input value={name} onChange={(event) => setName(event.target.value)} required />
-        </Field>
-        <Field>
-          <FieldLabel>Color</FieldLabel>
-          <ProjectColorPicker value={color} onChange={setColor} />
-        </Field>
-        <Button type="submit">Save project</Button>
-      </form>
-    </Modal>
+    <form className="grid gap-3" onSubmit={submitProject}>
+      <Field>
+        <FieldLabel>Name</FieldLabel>
+        <Input value={name} onChange={(event) => setName(event.target.value)} required />
+      </Field>
+      <Field>
+        <FieldLabel>Color</FieldLabel>
+        <ProjectColorPicker value={color} onChange={setColor} />
+      </Field>
+      {notice && <p className="text-sm text-muted-foreground" role="status">{notice}</p>}
+      <Button type="submit" disabled={isSaving}>{isSaving ? "Saving..." : "Save project"}</Button>
+    </form>
   );
 }
 
-export function ProjectConnectionsDialog({
+function ProjectConnectionsEditor({
   connections = [],
   projectConnectionIds = [],
-  onClose,
   onSave,
 }) {
   const [enabledConnectionIds, setEnabledConnectionIds] = useState(projectConnectionIds);
+  const [isSaving, setIsSaving] = useState(false);
+  const [notice, setNotice] = useState("");
 
   useEffect(() => {
     setEnabledConnectionIds(projectConnectionIds);
@@ -132,49 +148,106 @@ export function ProjectConnectionsDialog({
     return groups;
   }, {});
 
+  async function submitConnections(event) {
+    event.preventDefault();
+    setIsSaving(true);
+    setNotice("");
+    try {
+      await onSave(enabledConnectionIds);
+      setNotice("Connections saved.");
+    } catch (error) {
+      setNotice(error?.message || String(error));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   return (
-    <Modal title="Project connections" onClose={onClose}>
-      <form
-        className="grid gap-4"
-        onSubmit={async (event) => {
-          event.preventDefault();
-          await onSave(enabledConnectionIds);
-        }}
-      >
-        <div className="grid gap-3">
-          {connections.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No global connections configured.</p>
-          ) : (
-            Object.entries(groupedConnections).map(([provider, items]) => (
-              <div key={provider} className="grid gap-2">
-                <p className="text-xs font-medium uppercase text-muted-foreground">
-                  {providerLabels[provider] || provider}
-                </p>
-                {items.map((connection) => (
-                  <label
-                    key={connection.id}
-                    className="flex min-w-0 items-center gap-2 rounded-md border p-2 text-sm"
-                  >
-                    <Checkbox
-                      checked={enabledConnectionIds.includes(connection.id)}
-                      onCheckedChange={(checked) => toggleConnection(connection.id, checked === true)}
-                    />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate font-medium">{connection.name}</span>
-                      <span className="block truncate text-xs text-muted-foreground">
-                        {connection.baseUrl}
-                      </span>
+    <form className="grid gap-4" onSubmit={submitConnections}>
+      <div className="grid gap-3">
+        {connections.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No global connections configured.</p>
+        ) : (
+          Object.entries(groupedConnections).map(([provider, items]) => (
+            <div key={provider} className="grid gap-2">
+              <p className="text-xs font-medium uppercase text-muted-foreground">
+                {providerLabels[provider] || provider}
+              </p>
+              {items.map((connection) => (
+                <label
+                  key={connection.id}
+                  className="flex min-w-0 items-center gap-2 rounded-md border p-2 text-sm"
+                >
+                  <Checkbox
+                    checked={enabledConnectionIds.includes(connection.id)}
+                    onCheckedChange={(checked) => toggleConnection(connection.id, checked === true)}
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate font-medium">{connection.name}</span>
+                    <span className="block truncate text-xs text-muted-foreground">
+                      {connection.baseUrl}
                     </span>
-                  </label>
-                ))}
-              </div>
-            ))
-          )}
-        </div>
-        <Button type="submit" disabled={!connections.length}>
-          Save connections
-        </Button>
-      </form>
+                  </span>
+                </label>
+              ))}
+            </div>
+          ))
+        )}
+      </div>
+      {notice && <p className="text-sm text-muted-foreground" role="status">{notice}</p>}
+      <Button type="submit" disabled={!connections.length || isSaving}>
+        {isSaving ? "Saving..." : "Save connections"}
+      </Button>
+    </form>
+  );
+}
+
+const tabTriggerClassName = "rounded-md px-3 py-2 text-sm font-medium text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm";
+const tabContentClassName = "mt-4 max-h-[min(65vh,36rem)] overflow-y-auto pr-1 outline-none focus-visible:ring-2 focus-visible:ring-ring";
+
+export function ProjectEditorDialog({
+  project,
+  connections,
+  projectConnectionIds,
+  localResources,
+  onClose,
+  onUpdateProject,
+  onUpdateProjectConnections,
+  onChooseLocalResourceDirectory,
+  onSaveLocalResource,
+  onDeleteLocalResource,
+}) {
+  return (
+    <Modal title="Edit project" onClose={onClose} contentClassName="sm:max-w-2xl">
+      <TabsPrimitive.Root defaultValue="project">
+        <TabsPrimitive.List
+          className="grid grid-cols-3 rounded-lg bg-muted p-1"
+          aria-label="Project editing sections"
+        >
+          <TabsPrimitive.Trigger className={tabTriggerClassName} value="project">Project</TabsPrimitive.Trigger>
+          <TabsPrimitive.Trigger className={tabTriggerClassName} value="connections">Connections</TabsPrimitive.Trigger>
+          <TabsPrimitive.Trigger className={tabTriggerClassName} value="local-resources">Local resources</TabsPrimitive.Trigger>
+        </TabsPrimitive.List>
+        <TabsPrimitive.Content className={tabContentClassName} value="project">
+          <ProjectEditor project={project} onSave={onUpdateProject} />
+        </TabsPrimitive.Content>
+        <TabsPrimitive.Content className={tabContentClassName} value="connections">
+          <ProjectConnectionsEditor
+            connections={connections}
+            projectConnectionIds={projectConnectionIds}
+            onSave={onUpdateProjectConnections}
+          />
+        </TabsPrimitive.Content>
+        <TabsPrimitive.Content className={tabContentClassName} value="local-resources">
+          <ProjectLocalResourcesEditor
+            project={project}
+            localResources={localResources}
+            onChooseDirectory={onChooseLocalResourceDirectory}
+            onSaveLocalResource={onSaveLocalResource}
+            onDeleteLocalResource={onDeleteLocalResource}
+          />
+        </TabsPrimitive.Content>
+      </TabsPrimitive.Root>
     </Modal>
   );
 }
