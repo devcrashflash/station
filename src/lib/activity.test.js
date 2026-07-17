@@ -80,6 +80,11 @@ test("only auto-syncs today when cached sync is stale", () => {
   );
 });
 
+test("normalizes cached GitHub review submissions independently from review comments", () => {
+  assert.equal(activityActionLabel({ eventType: "PullRequestReviewEvent", actionLabel: "Created" }), "Reviewed");
+  assert.equal(activityActionLabel({ eventType: "PullRequestReviewCommentEvent", actionLabel: "Created" }), "Commented");
+});
+
 test("sorts activities oldest first", () => {
   const sorted = sortActivities([
     { id: "old", occurredAt: 10 },

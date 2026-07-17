@@ -13,9 +13,25 @@ export function extractTrelloCardUrls(value = "") {
 }
 
 export function trelloTicketUrlsForActivities(activities = []) {
+  const cachedTicketMetadata = new Map();
+  for (const activity of activities) {
+    if (activity?.provider !== "trello") continue;
+    const ticket = ticketFromTrelloActivity(activity);
+    if (!ticket) continue;
+    const raw = safeJson(activity.rawJson);
+    const cachedTitle = raw?.data?.card?.name || activity.title;
+    const current = cachedTicketMetadata.get(ticket.externalId) || { hasTitle: false, hasBoard: false };
+    cachedTicketMetadata.set(ticket.externalId, {
+      hasTitle: current.hasTitle || Boolean(String(cachedTitle || "").trim()),
+      hasBoard: current.hasBoard || Boolean(ticket.boardExternalId || ticket.boardName),
+    });
+  }
+
   const urls = new Map();
   for (const activity of activities) {
     for (const ticket of trelloTicketReferencesForActivity(activity)) {
+      const cached = cachedTicketMetadata.get(ticket.externalId);
+      if (cached?.hasTitle && cached.hasBoard) continue;
       urls.set(ticket.externalId, ticket.url);
     }
   }
@@ -346,7 +362,10 @@ function renderProviderGroups(providers) {
 
 function activityEntity(activity, subject, unmatchedRefEvent = null) {
   const url = subject?.web_url || subject?.html_url || activity.targetUrl || null;
-  const author = subject?.author?.username || subject?.author?.login || subject?.user?.login || activity.actor || null;
+  const subjectAuthor = subject?.author?.username || subject?.author?.login || subject?.user?.login || null;
+  const isGithubReview = activity.provider === "github"
+    && String(activity.eventType || "").toLowerCase().includes("pullrequestreview");
+  const author = isGithubReview ? activity.actor || subjectAuthor : subjectAuthor || activity.actor || null;
   if (unmatchedRefEvent) {
     const repository = codeActivityRepository(activity, null);
     const projectName = codeActivityProjectName(activity, unmatchedRefEvent.ref);
@@ -492,15 +511,69 @@ function providerOrder(provider) {
 
 function activitySubject(activity) {
   const subject = safeJson(activity.subjectJson);
+  if (activity.provider === "github") {
+    const raw = safeJson(activity.rawJson);
+    return githubPullRequestSubject(activity, subject, raw)
+      || subject
+      || raw?.payload?.pull_request
+      || raw?.payload?.issue
+      || null;
+  }
   if (subject) return subject;
   if (activity.provider === "gitlab" && String(activity.eventType || "").toLowerCase().includes("mergerequest")) {
     return safeJson(activity.rawJson);
   }
-  if (activity.provider === "github") {
-    const raw = safeJson(activity.rawJson);
-    return raw?.payload?.pull_request || raw?.payload?.issue || null;
-  }
   return null;
+}
+
+function githubPullRequestSubject(activity, subject, raw) {
+  const eventType = String(activity?.eventType || "").toLowerCase();
+  const rawSubject = raw?.payload?.pull_request || raw?.payload?.issue || null;
+  const candidate = subject || rawSubject;
+  const isPullRequest = eventType.includes("pullrequest")
+    || Boolean(candidate?.pull_request)
+    || Boolean(raw?.payload?.issue?.pull_request)
+    || /github\.com\/[^/]+\/[^/]+\/pull\/\d+/i.test(activity?.targetUrl || "");
+  if (!isPullRequest) return null;
+
+  const identity = githubPullRequestIdentity(candidate, raw, activity?.targetUrl);
+  if (!identity) return candidate;
+  const { repository, number } = identity;
+  const htmlUrl = candidate?.html_url || `https://github.com/${repository}/pull/${number}`;
+  const title = candidate?.title || `${repository} PR #${number}`;
+  return { ...(candidate || {}), title, html_url: htmlUrl };
+}
+
+function githubPullRequestIdentity(subject, raw, targetUrl) {
+  const urls = [
+    subject?.html_url,
+    subject?.url,
+    subject?.pull_request?.html_url,
+    subject?.pull_request?.url,
+    raw?.payload?.comment?.pull_request_url,
+    raw?.payload?.comment?._links?.pull_request?.href,
+    raw?.payload?.review?.pull_request_url,
+    raw?.payload?.review?._links?.pull_request?.href,
+    targetUrl,
+  ];
+  for (const url of urls) {
+    const identity = githubPullRequestIdentityFromUrl(url);
+    if (identity) return identity;
+  }
+
+  const repository = raw?.repo?.name
+    || subject?.base?.repo?.full_name
+    || subject?.head?.repo?.full_name;
+  const number = subject?.number || raw?.payload?.number || raw?.payload?.pull_request?.number;
+  return repository && number ? { repository, number: String(number) } : null;
+}
+
+function githubPullRequestIdentityFromUrl(value) {
+  const url = String(value || "");
+  const webMatch = url.match(/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/i);
+  if (webMatch) return { repository: webMatch[1], number: webMatch[2] };
+  const apiMatch = url.match(/api\.github\.com\/repos\/([^/]+\/[^/]+)\/pulls\/(\d+)/i);
+  return apiMatch ? { repository: apiMatch[1], number: apiMatch[2] } : null;
 }
 
 function isGithubPullRequestSubject(activity, subject) {

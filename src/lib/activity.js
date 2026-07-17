@@ -218,6 +218,7 @@ export function activityActionLabel(activity) {
   const label = activity?.actionLabel || activity?.eventType || "Activity";
   const normalized = label.toLowerCase();
   const eventType = String(activity?.eventType || "").toLowerCase();
+  if (eventType === "pullrequestreviewevent") return "Reviewed";
   if (eventType.includes("comment")) return "Commented";
   if (normalized.includes("attach") || eventType.includes("attachment")) return "Changed";
   if (normalized.startsWith("moved:")) return label;

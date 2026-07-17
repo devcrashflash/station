@@ -6840,18 +6840,119 @@ fn fetch_github_activities(
             "https://api.github.com/users/{}/events?per_page=100",
             percent_encode(&login)
         ),
-        headers,
+        headers.clone(),
     )?;
 
-    Ok(events
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|event| github_activity_from_json(connection, event, start_at, end_at))
-                .collect()
+    let mut pull_requests = HashMap::<String, Option<Value>>::new();
+    let mut activities = Vec::new();
+    for event in events.as_array().into_iter().flatten() {
+        let Some(mut activity) = github_activity_from_json(connection, event, start_at, end_at)
+        else {
+            continue;
+        };
+        if let Some(locator) = github_pull_request_locator(event) {
+            let pull_request = pull_requests
+                .entry(locator.api_url.clone())
+                .or_insert_with(|| fetch_json(&locator.api_url, headers.clone()).ok());
+            hydrate_github_pull_request_activity(
+                &mut activity,
+                event,
+                Some(&locator),
+                pull_request.as_ref(),
+            );
+        }
+        activities.push(activity);
+    }
+    Ok(activities)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GithubPullRequestLocator {
+    api_url: String,
+    web_url: String,
+    fallback_title: String,
+}
+
+fn github_pull_request_locator(event: &Value) -> Option<GithubPullRequestLocator> {
+    let api_url = [
+        &["payload", "pull_request", "url"][..],
+        &["payload", "comment", "pull_request_url"][..],
+        &["payload", "comment", "_links", "pull_request", "href"][..],
+        &["payload", "review", "pull_request_url"][..],
+        &["payload", "review", "_links", "pull_request", "href"][..],
+        &["payload", "issue", "pull_request", "url"][..],
+    ]
+    .into_iter()
+    .find_map(|path| json_path_string(event, path))?;
+    let (repository, number) = github_pull_request_identity(&api_url).or_else(|| {
+        let repository = json_path_string(event, &["repo", "name"])?;
+        let payload = event.get("payload")?;
+        let number = payload
+            .get("pull_request")
+            .and_then(|pull_request| json_id_string(pull_request, "number"))
+            .or_else(|| json_id_string(payload, "number"))?;
+        Some((repository, number))
+    })?;
+    Some(GithubPullRequestLocator {
+        api_url,
+        web_url: format!("https://github.com/{repository}/pull/{number}"),
+        fallback_title: format!("{repository} PR #{number}"),
+    })
+}
+
+fn github_pull_request_identity(api_url: &str) -> Option<(String, String)> {
+    let path = api_url
+        .trim()
+        .strip_prefix("https://api.github.com/repos/")?;
+    let parts = path.split('/').collect::<Vec<_>>();
+    if parts.len() < 4 || parts[2] != "pulls" || parts[0].is_empty() || parts[1].is_empty() {
+        return None;
+    }
+    Some((format!("{}/{}", parts[0], parts[1]), parts[3].to_string()))
+}
+
+fn hydrate_github_pull_request_activity(
+    activity: &mut ActivityInput,
+    event: &Value,
+    locator: Option<&GithubPullRequestLocator>,
+    hydrated: Option<&Value>,
+) {
+    let derived_locator;
+    let locator = match locator {
+        Some(locator) => locator,
+        None => {
+            derived_locator = github_pull_request_locator(event);
+            let Some(locator) = derived_locator.as_ref() else {
+                return;
+            };
+            locator
+        }
+    };
+    let mut subject = hydrated
+        .cloned()
+        .or_else(|| {
+            event
+                .get("payload")
+                .and_then(|payload| payload.get("pull_request").or_else(|| payload.get("issue")))
+                .cloned()
         })
-        .unwrap_or_default())
+        .unwrap_or_else(|| Value::Object(Default::default()));
+    let title = json_string(&subject, "title")
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| locator.fallback_title.clone());
+    let has_web_url = json_string(&subject, "html_url").is_some();
+    let Some(subject_object) = subject.as_object_mut() else {
+        return;
+    };
+    subject_object.insert("title".to_string(), Value::String(title.clone()));
+    if !has_web_url {
+        subject_object.insert(
+            "html_url".to_string(),
+            Value::String(locator.web_url.clone()),
+        );
+    }
+    activity.title = title;
+    activity.subject_json = Some(subject.to_string());
 }
 
 fn github_activity_from_json(
@@ -6887,7 +6988,7 @@ fn github_activity_from_json(
         .or_else(|| json_path_string(event, &["payload", "comment", "html_url"]))
         .or_else(|| repo_name.map(|name| format!("https://github.com/{name}")));
 
-    Some(ActivityInput {
+    let mut activity = ActivityInput {
         provider: "github".to_string(),
         connection_id: connection.id.clone(),
         external_id,
@@ -6902,7 +7003,9 @@ fn github_activity_from_json(
             .get("payload")
             .and_then(|payload| payload.get("pull_request").or_else(|| payload.get("issue")))
             .map(Value::to_string),
-    })
+    };
+    hydrate_github_pull_request_activity(&mut activity, event, None, None);
+    Some(activity)
 }
 
 fn fetch_gitlab_activities(
@@ -12142,6 +12245,94 @@ mod tests {
         let activity = trello_activity_from_json(&trello, &list_move_action, start, end)
             .expect("Trello list move activity");
         assert_eq!(activity.action_label, "Moved: Waiting for Approval");
+    }
+
+    #[test]
+    fn hydrates_github_review_activity_with_its_parent_pull_request() {
+        let github = connection_record("github", None, "token");
+        let event = serde_json::json!({
+            "id": "review-comment-1",
+            "type": "PullRequestReviewCommentEvent",
+            "created_at": "2026-07-09T09:42:21Z",
+            "actor": { "login": "alexander-schranz" },
+            "repo": { "name": "sulu/SuluProductBundle" },
+            "payload": {
+                "action": "created",
+                "pull_request": {
+                    "number": 391,
+                    "url": "https://api.github.com/repos/sulu/SuluProductBundle/pulls/391"
+                },
+                "comment": {
+                    "body": "Think it would be code/stage/version",
+                    "html_url": "https://github.com/sulu/SuluProductBundle/pull/391#discussion_r1",
+                    "pull_request_url": "https://api.github.com/repos/sulu/SuluProductBundle/pulls/391"
+                }
+            }
+        });
+        let start = parse_rfc3339_millis("2026-07-09T00:00:00Z").unwrap();
+        let end = parse_rfc3339_millis("2026-07-10T00:00:00Z").unwrap();
+        let locator = github_pull_request_locator(&event).expect("pull request locator");
+
+        assert_eq!(
+            locator.web_url,
+            "https://github.com/sulu/SuluProductBundle/pull/391"
+        );
+        assert_eq!(locator.fallback_title, "sulu/SuluProductBundle PR #391");
+
+        let review_event = serde_json::json!({
+            "id": "review-1",
+            "type": "PullRequestReviewEvent",
+            "created_at": "2026-07-09T09:45:53Z",
+            "actor": { "login": "alexander-schranz" },
+            "repo": { "name": "sulu/SuluProductBundle" },
+            "payload": {
+                "action": "created",
+                "pull_request": {
+                    "number": 391,
+                    "url": "https://api.github.com/repos/sulu/SuluProductBundle/pulls/391"
+                },
+                "review": {
+                    "state": "commented",
+                    "pull_request_url": "https://api.github.com/repos/sulu/SuluProductBundle/pulls/391"
+                }
+            }
+        });
+        assert_eq!(
+            github_pull_request_locator(&review_event),
+            Some(locator.clone())
+        );
+        let review_activity = github_activity_from_json(&github, &review_event, start, end)
+            .expect("GitHub review activity");
+        assert_eq!(review_activity.action_label, "Reviewed");
+        assert_eq!(review_activity.title, "sulu/SuluProductBundle PR #391");
+
+        let mut activity = github_activity_from_json(&github, &event, start, end)
+            .expect("GitHub review comment activity");
+        assert_eq!(activity.title, "sulu/SuluProductBundle PR #391");
+        assert!(activity.subject_json.as_deref().is_some_and(|subject| {
+            subject.contains("https://github.com/sulu/SuluProductBundle/pull/391")
+        }));
+        assert_eq!(
+            activity.target_url.as_deref(),
+            Some("https://github.com/sulu/SuluProductBundle/pull/391#discussion_r1")
+        );
+
+        let hydrated = serde_json::json!({
+            "number": 391,
+            "title": "Add product versioning",
+            "html_url": "https://github.com/sulu/SuluProductBundle/pull/391",
+            "user": { "login": "martinlagler" }
+        });
+        hydrate_github_pull_request_activity(
+            &mut activity,
+            &event,
+            Some(&locator),
+            Some(&hydrated),
+        );
+        assert_eq!(activity.title, "Add product versioning");
+        assert!(activity.subject_json.as_deref().is_some_and(|subject| {
+            subject.contains("Add product versioning") && subject.contains("martinlagler")
+        }));
     }
 
     #[test]

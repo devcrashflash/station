@@ -49,6 +49,84 @@ test("extracts ticket relationships from GitLab descriptions and GitHub bodies",
   }), []);
 });
 
+test("resolves only Trello references without a complete cached activity snapshot", () => {
+  const reference = (externalId) => ({
+    provider: "gitlab",
+    subjectJson: JSON.stringify({ description: `Tracks https://trello.com/c/${externalId}` }),
+  });
+  const trelloActivity = (externalId, { title = null, board = null } = {}) => ({
+    provider: "trello",
+    title,
+    targetUrl: `https://trello.com/c/${externalId}`,
+    rawJson: JSON.stringify({
+      data: {
+        card: { shortLink: externalId, ...(title ? { name: title } : {}) },
+        ...(board ? { board } : {}),
+      },
+    }),
+  });
+  const activities = [
+    reference("cached-card"),
+    trelloActivity("cached-card", { title: "Cached card", board: { shortLink: "board-one" } }),
+    reference("missing-card"),
+    reference("title-only-card"),
+    trelloActivity("title-only-card", { title: "Title only" }),
+    reference("board-only-card"),
+    trelloActivity("board-only-card", { board: { name: "Board only" } }),
+  ];
+
+  assert.deepEqual(trelloTicketUrlsForActivities(activities), [
+    "https://trello.com/c/missing-card",
+    "https://trello.com/c/title-only-card",
+    "https://trello.com/c/board-only-card",
+  ]);
+});
+
+test("builds a linked ticket from its historical Trello activity snapshot", () => {
+  const markdown = buildDaySummaryMarkdown({
+    projects: [{ id: "project-a", name: "Project A" }],
+    resources: [{
+      projectId: "project-a",
+      provider: "trello",
+      kind: "trello_board",
+      externalId: "board-one",
+    }],
+    activities: [
+      {
+        id: "trello-card",
+        provider: "trello",
+        actionLabel: "Changed",
+        occurredAt: 1,
+        title: "Historical card",
+        targetUrl: "https://trello.com/c/cached-card",
+        rawJson: JSON.stringify({
+          data: {
+            card: { shortLink: "cached-card", name: "Historical card" },
+            board: { shortLink: "board-one", name: "Project board" },
+          },
+        }),
+      },
+      {
+        id: "gitlab-mr",
+        provider: "gitlab",
+        actionLabel: "Merged",
+        occurredAt: 2,
+        subjectJson: JSON.stringify({
+          title: "Linked merge request",
+          description: "Tracks https://trello.com/c/cached-card",
+          web_url: "https://gitlab.example.com/acme/app/-/merge_requests/1",
+        }),
+      },
+    ],
+  });
+
+  assert.match(markdown, /^# Project A/m);
+  assert.match(markdown, /## Historical card/);
+  assert.match(markdown, /- Ticket: changed/);
+  assert.match(markdown, /Linked merge request/);
+  assert.doesNotMatch(markdown, /## Unknown/);
+});
+
 test("hides only move-only Trello tickets without visible code relationships", () => {
   const trello = (id, actionLabel, rawJson = null) => ({
     id: `${id}:${actionLabel}`,
@@ -165,6 +243,61 @@ test("groups GitHub pull requests beneath referenced Trello tickets", () => {
   assert.match(markdown, /## GitHub ticket/);
   assert.match(markdown, /- GitHub:\n  - \[Ship GitHub feature\].*— @octocat \(merged\)/);
   assert.doesNotMatch(markdown, /## Unknown/);
+});
+
+test("groups cached GitHub review comments and submissions by their canonical pull request", () => {
+  const repository = "sulu/SuluProductBundle";
+  const apiUrl = `https://api.github.com/repos/${repository}/pulls/391`;
+  const comment = (id, body, occurredAt) => ({
+    id,
+    provider: "github",
+    eventType: "PullRequestReviewCommentEvent",
+    actionLabel: "Created",
+    actor: "alexander-schranz",
+    title: body,
+    targetUrl: `https://github.com/${repository}/pull/391#discussion_r${id}`,
+    occurredAt,
+    subjectJson: null,
+    rawJson: JSON.stringify({
+      repo: { name: repository },
+      payload: {
+        action: "created",
+        pull_request: { number: 391, url: apiUrl },
+        comment: { body, pull_request_url: apiUrl },
+      },
+    }),
+  });
+  const review = {
+    id: "review",
+    provider: "github",
+    eventType: "PullRequestReviewEvent",
+    actionLabel: "Created",
+    actor: "alexander-schranz",
+    title: repository,
+    targetUrl: `https://github.com/${repository}`,
+    occurredAt: 3,
+    subjectJson: null,
+    rawJson: JSON.stringify({
+      repo: { name: repository },
+      payload: {
+        action: "created",
+        pull_request: { number: 391, url: apiUrl },
+        review: { state: "commented", pull_request_url: apiUrl },
+      },
+    }),
+  };
+  const firstComment = "Think it would be code/stage/version";
+  const secondComment = "Introduce a ProductMapperInterface";
+  const markdown = buildDaySummaryMarkdown({
+    activities: [comment("3550545123", firstComment, 1), comment("3550565014", secondComment, 2), review],
+  });
+
+  assert.match(markdown, /\[sulu\/SuluProductBundle PR #391\]\(https:\/\/github\.com\/sulu\/SuluProductBundle\/pull\/391\).*\(commented, reviewed\)/);
+  assert.match(markdown, /@alexander-schranz/);
+  assert.equal((markdown.match(/SuluProductBundle PR #391/g) || []).length, 1);
+  assert.doesNotMatch(markdown, new RegExp(firstComment));
+  assert.doesNotMatch(markdown, new RegExp(secondComment));
+  assert.doesNotMatch(markdown, /\[sulu\/SuluProductBundle\]\(https:\/\/github\.com\/sulu\/SuluProductBundle\)/);
 });
 
 test("groups hydrated unlinked GitLab comments and merges under project Unknown", () => {

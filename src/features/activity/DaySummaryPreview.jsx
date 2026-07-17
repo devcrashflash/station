@@ -7,23 +7,23 @@ import { cn } from "@/lib/utils";
 
 export function DaySummaryPreview({ summary }) {
   return (
-    <div className="grid gap-7">
+    <div className="grid min-w-0 gap-7">
       {summary.sections.map((section) => (
-        <section className="grid gap-3" key={section.id}>
-          <div className="flex items-center gap-2 border-b pb-2">
-            <span className={cn("size-2.5 rounded-full", section.isUnknown ? "bg-slate-400" : "bg-blue-500")} />
-            <h2 className="text-lg font-semibold tracking-tight">{section.name}</h2>
+        <section className="grid min-w-0 gap-3" key={section.id}>
+          <div className="flex min-w-0 items-center gap-2 border-b pb-2">
+            <span className={cn("size-2.5 shrink-0 rounded-full", section.isUnknown ? "bg-slate-400" : "bg-blue-500")} />
+            <h2 className="min-w-0 break-words text-lg font-semibold tracking-tight [overflow-wrap:anywhere]">{section.name}</h2>
           </div>
 
           {section.tickets.map((ticket) => (
-            <article className="overflow-hidden rounded-lg border bg-card shadow-sm" key={ticket.externalId}>
+            <article className="min-w-0 overflow-hidden rounded-lg border bg-card shadow-sm" key={ticket.externalId}>
               <div className="flex flex-wrap items-start justify-between gap-3 border-b bg-muted/30 px-4 py-3">
                 <div className="flex min-w-0 items-start gap-2.5">
                   <div className="mt-0.5 rounded-md bg-blue-100 p-1.5 text-blue-700">
                     <Ticket className="size-4" />
                   </div>
                   <div className="min-w-0">
-                    <h3 className="font-semibold leading-5">{ticket.title}</h3>
+                    <h3 className="break-words font-semibold leading-5 [overflow-wrap:anywhere]">{ticket.title}</h3>
                     <p className="mt-0.5 text-xs text-muted-foreground">Trello ticket</p>
                   </div>
                 </div>
@@ -108,11 +108,11 @@ function ProviderGroup({ provider }) {
     <SummaryRow label={provider.label} icon={GitPullRequest} labelClassName={providerLabelClassName(provider.provider)}>
       <div className="grid min-w-0 flex-1 gap-2">
         {provider.items.map((item) => (
-          <div className="rounded-md border bg-background px-3 py-2.5" key={item.key}>
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <div className="min-w-0 overflow-hidden rounded-md border bg-background px-3 py-2.5" key={item.key}>
+            <div className="flex min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-1">
               {item.url ? (
                 <a
-                  className="min-w-0 font-medium text-blue-700 hover:underline"
+                  className="min-w-0 max-w-full break-words font-medium text-blue-700 [overflow-wrap:anywhere] hover:underline"
                   href={item.url}
                   target="_blank"
                   rel="noreferrer"
@@ -124,9 +124,9 @@ function ProviderGroup({ provider }) {
                   {item.title}
                 </a>
               ) : (
-                <span className="font-medium">{item.title}</span>
+                <span className="min-w-0 max-w-full break-words font-medium [overflow-wrap:anywhere]">{item.title}</span>
               )}
-              {item.author && <span className="text-xs text-muted-foreground">@{String(item.author).replace(/^@/, "")}</span>}
+              {item.author && <span className="min-w-0 max-w-full break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">@{String(item.author).replace(/^@/, "")}</span>}
             </div>
             {item.actions.length > 0 && <ActionBadges actions={item.actions} className="mt-2" />}
           </div>
@@ -138,7 +138,7 @@ function ProviderGroup({ provider }) {
 
 function SummaryRow({ label, icon: Icon, labelClassName, children }) {
   return (
-    <div className="grid gap-2 sm:grid-cols-[96px_minmax(0,1fr)] sm:items-start">
+    <div className="grid min-w-0 gap-2 sm:grid-cols-[96px_minmax(0,1fr)] sm:items-start">
       <div className={cn("flex items-center gap-1.5 pt-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground", labelClassName)}>
         <Icon className="size-3.5" />
         {label}
