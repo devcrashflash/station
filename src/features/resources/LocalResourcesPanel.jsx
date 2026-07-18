@@ -89,7 +89,7 @@ export function LocalResourceList({ localResources, editable, onDeleteLocalResou
               <p className="truncate text-xs text-muted-foreground">
                 {resource.provider} · {resource.repoUrl}
               </p>
-              <p className="truncate text-xs text-blue-700">{resource.path}</p>
+              <p className="truncate text-xs text-blue-700 dark:text-blue-300">{resource.path}</p>
             </div>
             {editable && (
               <Button

@@ -254,12 +254,12 @@ export function activityEventKindLabel(activity) {
 
 export function activityActionClassName(label) {
   const normalized = String(label || "").toLowerCase();
-  if (normalized === "created") return "border-green-200 bg-green-50 text-green-800";
-  if (normalized === "moved" || normalized.startsWith("moved:")) return "border-blue-200 bg-blue-50 text-blue-800";
-  if (normalized === "changed") return "border-amber-200 bg-amber-50 text-amber-800";
-  if (normalized === "commented") return "border-cyan-200 bg-cyan-50 text-cyan-800";
-  if (normalized === "merged") return "border-purple-200 bg-purple-50 text-purple-800";
-  if (normalized === "closed" || normalized === "deleted") return "border-red-200 bg-red-50 text-red-800";
+  if (normalized === "created") return "border-green-200 bg-green-50 text-green-800 dark:border-green-900 dark:bg-green-950/40 dark:text-green-300";
+  if (normalized === "moved" || normalized.startsWith("moved:")) return "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300";
+  if (normalized === "changed") return "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300";
+  if (normalized === "commented") return "border-cyan-200 bg-cyan-50 text-cyan-800 dark:border-cyan-900 dark:bg-cyan-950/40 dark:text-cyan-300";
+  if (normalized === "merged") return "border-purple-200 bg-purple-50 text-purple-800 dark:border-purple-900 dark:bg-purple-950/40 dark:text-purple-300";
+  if (normalized === "closed" || normalized === "deleted") return "border-red-200 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300";
   return "border-border bg-muted text-muted-foreground";
 }
 

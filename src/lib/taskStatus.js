@@ -1,3 +1,5 @@
+import { externalLabelStyle } from "./externalLabels.js";
+
 export function isProviderBackedTask(task) {
   return (
     (task?.sourceProvider === "trello" && task?.sourceKind === "trello_card") ||
@@ -16,4 +18,9 @@ export function taskStatusBadgeLabel(task) {
   }
 
   return task?.status || "new";
+}
+
+export function taskStatusBadgeStyle(task) {
+  if (task?.sourceProvider !== "trello" || task?.sourceKind !== "trello_card") return undefined;
+  return externalLabelStyle(task?.statusColor);
 }

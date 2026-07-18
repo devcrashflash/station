@@ -5,6 +5,21 @@
     <link rel="icon" type="image/png" href="/app-icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Dev Crash Flash AI Studio</title>
+    <script>
+      (() => {
+        try {
+          const stored = localStorage.getItem("dcf-theme-preference-v1");
+          const preference = ["system", "light", "dark"].includes(stored) ? stored : "system";
+          const dark = preference === "dark" || (preference === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.classList.toggle("dark", dark);
+          document.documentElement.style.colorScheme = dark ? "dark" : "light";
+        } catch {
+          const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+          document.documentElement.classList.toggle("dark", dark);
+          document.documentElement.style.colorScheme = dark ? "dark" : "light";
+        }
+      })();
+    </script>
   </head>
 
   <body>

@@ -10,7 +10,7 @@ export function ResourceLink({ label, url, meta }) {
     >
       <span className="block min-w-0 max-w-full truncate font-medium capitalize">{label}</span>
       <span className="mt-1 block min-w-0 max-w-full truncate text-xs text-muted-foreground">{meta}</span>
-      <span className="mt-1 block min-w-0 max-w-full truncate text-xs text-blue-700">{url}</span>
+      <span className="mt-1 block min-w-0 max-w-full truncate text-xs text-blue-700 dark:text-blue-300">{url}</span>
     </a>
   );
 }

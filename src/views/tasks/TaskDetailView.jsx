@@ -49,7 +49,7 @@ import {
   normalizeReviewDiffResult,
   normalizeReviewDrafts,
 } from "@/lib/reviewSession";
-import { taskStatusBadgeLabel } from "@/lib/taskStatus";
+import { taskStatusBadgeLabel, taskStatusBadgeStyle } from "@/lib/taskStatus";
 import { canCreateTrelloTicket } from "@/lib/trelloTicket";
 
 const relationTypeOptions = [
@@ -147,7 +147,7 @@ function ExternalLabels({ labels }) {
   if (!Array.isArray(labels) || labels.length === 0) return null;
 
   return (
-    <div className="grid gap-1.5" aria-label="External labels">
+    <div className="mt-3 grid gap-1.5" aria-label="External labels">
       <p className="text-xs font-medium text-muted-foreground">Labels</p>
       <div className="flex flex-wrap gap-1.5">
         {labels.map((label) => {
@@ -490,6 +490,7 @@ export function TaskDetailView({
   const reviewParsed = isPullRequestResource(taskResource) ? parseSmartInput(taskResource.url || "") : null;
   const isReviewRequestClosed = isClosedReviewState(taskResource?.externalState);
   const statusBadgeLabel = taskStatusBadgeLabel(task);
+  const statusBadgeStyle = taskStatusBadgeStyle(task);
   const canReviewResource = Boolean(
     task.projectId &&
     !isReviewRequestClosed &&
@@ -517,9 +518,16 @@ export function TaskDetailView({
           </p>
           <h2 className="mt-1 break-words text-3xl font-semibold">{task.title}</h2>
           <div className="mt-3 flex flex-wrap gap-2">
-            <Badge variant="secondary">{statusBadgeLabel}</Badge>
+            <Badge
+              variant={statusBadgeStyle ? "outline" : "secondary"}
+              className={statusBadgeStyle ? "border-transparent" : undefined}
+              style={statusBadgeStyle}
+            >
+              {statusBadgeLabel}
+            </Badge>
             {taskResource && <Badge variant="secondary">Has resource</Badge>}
           </div>
+          <ExternalLabels labels={taskResource?.labels} />
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-2">
           {canConvertToTrello && (
@@ -572,7 +580,7 @@ export function TaskDetailView({
         <div className="grid min-w-0 gap-6">
           <Panel title="Description" icon={ClipboardList}>
             {externalRefreshState.connectionRequired && (
-              <div className="mb-4 flex gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+              <div className="mb-4 flex gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
                 <AlertTriangle className="mt-0.5 size-4 shrink-0" />
                 <p>{externalRefreshState.notice || "Please add a connection to this project."}</p>
               </div>
@@ -614,7 +622,6 @@ export function TaskDetailView({
                     url={taskResource.url}
                     meta={taskLinkMeta(taskResource)}
                   />
-                  <ExternalLabels labels={taskResource.labels} />
                   {onRefreshExternalDetails && (
                     <Button
                       className="w-full"
@@ -814,6 +821,7 @@ function RelationRow({ relation, taskId, onOpenTask, onUpdateRelationType, onDel
   const [isEditing, setIsEditing] = useState(false);
   const [draftType, setDraftType] = useState(relation.relationType);
   const relatedTask = relation.relatedTask;
+  const statusBadgeStyle = taskStatusBadgeStyle(relatedTask);
   const relationLabel = relationTypeLabel(relation, taskId);
   const directionLabel = relationDirectionLabel(relation, taskId);
 
@@ -844,10 +852,16 @@ function RelationRow({ relation, taskId, onOpenTask, onUpdateRelationType, onDel
           <p className="min-w-0 max-w-full truncate font-medium">{relatedTask.title}</p>
           <Badge variant="secondary">{relationLabel}</Badge>
           {directionLabel && <Badge variant="secondary">{directionLabel}</Badge>}
-          <Badge variant="secondary">{taskStatusBadgeLabel(relatedTask)}</Badge>
+          <Badge
+            variant={statusBadgeStyle ? "outline" : "secondary"}
+            className={statusBadgeStyle ? "border-transparent" : undefined}
+            style={statusBadgeStyle}
+          >
+            {taskStatusBadgeLabel(relatedTask)}
+          </Badge>
         </div>
         {relatedTask.sourceUrl && (
-          <span className="mt-2 block min-w-0 max-w-full truncate text-xs text-blue-700">
+          <span className="mt-2 block min-w-0 max-w-full truncate text-xs text-blue-700 dark:text-blue-300">
             {relatedTask.sourceUrl}
           </span>
         )}
@@ -1060,7 +1074,7 @@ function ReviewCheckoutDialog({
 
         {checkoutResourceId ? (
           <div className="flex items-center gap-3 rounded-md border bg-muted/30 p-4" role="status" aria-live="polite">
-            <LoaderCircle className="size-5 shrink-0 animate-spin text-blue-600" />
+            <LoaderCircle className="size-5 shrink-0 animate-spin text-blue-600 dark:text-blue-400" />
             <div className="min-w-0">
               <p className="font-medium">Preparing review branch</p>
               <p className="text-sm text-muted-foreground">
@@ -1091,7 +1105,7 @@ function ReviewCheckoutDialog({
         {notice && (
           <div className="grid gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
             <p className="break-words text-sm text-destructive">{notice}</p>
-            <a className="break-all text-sm text-blue-700 underline" href={resource.url} target="_blank" rel="noreferrer">
+            <a className="break-all text-sm text-blue-700 underline dark:text-blue-300" href={resource.url} target="_blank" rel="noreferrer">
               Open {parsed.provider === "github" ? "pull request" : "merge request"}
             </a>
           </div>
@@ -1130,6 +1144,7 @@ function ReviewDiffOverlay({
   const diffRequestGuardRef = useRef(null);
   const fileRequestGuardRef = useRef(null);
   const loadedSessionKeyRef = useRef("");
+  const reviewDiffRef = useRef(null);
   if (!draftRequestGuardRef.current) draftRequestGuardRef.current = createLatestRequestGuard();
   if (!diffRequestGuardRef.current) diffRequestGuardRef.current = createLatestRequestGuard();
   if (!fileRequestGuardRef.current) fileRequestGuardRef.current = createLatestRequestGuard();
@@ -1302,6 +1317,12 @@ function ReviewDiffOverlay({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [currentIndex, files.length, showFile]);
 
+  function handleEscapeKeyDown(event) {
+    if (reviewDiffRef.current?.cancelInteraction()) {
+      event.preventDefault();
+    }
+  }
+
   return (
     <Modal
       title={(
@@ -1315,6 +1336,7 @@ function ReviewDiffOverlay({
         </span>
       )}
       onClose={onClose}
+      onEscapeKeyDown={handleEscapeKeyDown}
       contentClassName="h-[calc(100dvh-3rem)] w-[calc(100vw-3rem)] max-w-[calc(100vw-3rem)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden sm:max-w-[calc(100vw-3rem)]"
     >
       <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)_auto] gap-4 overflow-hidden">
@@ -1373,6 +1395,7 @@ function ReviewDiffOverlay({
             </pre>
           ) : currentFile?.diff ? (
             <ReviewDiff
+              ref={reviewDiffRef}
               key={currentPath}
               path={currentPath}
               oldPath={currentFile.oldPath}
@@ -1393,10 +1416,10 @@ function ReviewDiffOverlay({
 
         <div className="grid gap-3 border-t pt-3">
           {hasStaleDrafts && (
-            <div className="grid gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-sm text-amber-950">
+            <div className="grid gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-sm text-amber-950 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
               <p>Some inline drafts belong to an older revision. Re-anchor or delete them before submitting.</p>
               {staleDrafts.map((draft) => (
-                <div key={draft.id} className="flex items-start gap-2 rounded border border-amber-300/70 bg-white/60 p-2">
+                <div key={draft.id} className="flex items-start gap-2 rounded border border-amber-300/70 bg-white/60 p-2 dark:border-amber-900/70 dark:bg-black/20">
                   <p className="min-w-0 flex-1">
                     <span className="font-mono text-xs">{draft.path}:{draft.side === "LEFT" ? draft.oldLine : draft.newLine}</span>
                     <span className="ml-2 break-words">{draft.body}</span>

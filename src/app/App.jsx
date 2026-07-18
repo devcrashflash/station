@@ -27,6 +27,7 @@ import {
 } from "@/lib/ocr";
 import { DEFAULT_PROJECT_COLOR } from "@/lib/projectAvatar";
 import { parseSmartInput } from "@/lib/smartInputParser";
+import { useTheme } from "@/lib/theme";
 import { InboxView } from "@/views/inbox/InboxView";
 import { ActivityView, useActivityData } from "@/views/activity/ActivityView";
 import { ProjectWorkspaceView } from "@/views/projects/ProjectWorkspaceView";
@@ -119,6 +120,7 @@ function FileDropPreview({ fileDrop }) {
 }
 
 function App() {
+  const { preference: themePreference, setPreference: setThemePreference } = useTheme();
   const [projects, setProjects] = useState([]);
   const [selectedProjectId, setSelectedProjectId] = useState(null);
   const [tasks, setTasks] = useState([]);
@@ -885,9 +887,11 @@ function App() {
           aiPrompts={aiPrompts}
           directories={directories}
           browserSettings={browserSettings}
+          themePreference={themePreference}
           calendarAccounts={calendarAccounts}
           initialSection={settingsInitialSection}
           onClose={() => setShowSettings(false)}
+          onThemePreferenceChange={setThemePreference}
           onSave={async (payload) => {
             await api.saveConnection(payload);
             setConnections(await api.listConnections());

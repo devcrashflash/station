@@ -394,7 +394,7 @@ export function ActivityView({
             ) : (
               <div id="timeline-summary-panel" role="tabpanel" aria-labelledby="timeline-summary-tab" className="grid gap-4">
                 {summaryContext.warnings.length > 0 && summaryContext.date === date && (
-                  <div className="grid gap-1 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+                  <div className="grid gap-1 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
                     {summaryContext.warnings.map((warning, index) => <p key={`${index}:${warning}`}>{warning}</p>)}
                   </div>
                 )}
@@ -777,7 +777,7 @@ function ActivityItem({ activity }) {
       </div>
       {openUrl && (
         <span
-          className="shrink-0 text-blue-700 hover:text-blue-800"
+          className="shrink-0 text-blue-700 hover:text-blue-800 dark:text-blue-300 dark:hover:text-blue-200"
           aria-hidden="true"
         >
           <ExternalLink className="size-4" />

@@ -68,7 +68,7 @@ function CommentBody({ comment, reply }) {
                   {timestamp && <time dateTime={comment.createdAt || comment.updatedAt}>{timestamp}</time>}
                   {comment.url && (
                     <a
-                      className="ml-auto inline-flex items-center gap-1 font-medium text-blue-700 hover:text-blue-900 hover:underline"
+                      className="ml-auto inline-flex items-center gap-1 font-medium text-blue-700 hover:text-blue-900 hover:underline dark:text-blue-300 dark:hover:text-blue-200"
                       href={comment.url}
                       target="_blank"
                       rel="noreferrer"

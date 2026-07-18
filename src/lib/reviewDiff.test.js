@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { Prism } from "./prism.js";
-import { classifyDiffLine, diffLanguageForPath, diffPaths, parseDiffLines, selectCommentRange } from "./reviewDiff.js";
+import { classifyDiffLine, diffLanguageForPath, diffPaths, parseDiffLines, selectCommentRange, selectedCodeText } from "./reviewDiff.js";
 
 test("classifies unified diff lines without treating file headers as changes", () => {
   assert.deepEqual(classifyDiffLine("diff --git a/app.js b/app.js"), {
@@ -142,4 +142,12 @@ test("clamps multiline ranges at hunk boundaries", () => {
   const lines = parseDiffLines("@@ -1 +1 @@\n-first\n+second\n@@ -10 +10 @@\n later");
   const range = selectCommentRange(lines, 1, lines.length - 1);
   assert.deepEqual([range.firstIndex, range.lastIndex], [1, 2]);
+});
+
+test("copies selected code without diff markers or line numbers", () => {
+  const lines = parseDiffLines("@@ -5,2 +5,2 @@\n const oldValue = 1;\n-  return oldValue;\n+  return newValue;");
+  const range = selectCommentRange(lines, 1, 3);
+
+  assert.equal(selectedCodeText(range), "const oldValue = 1;\n  return oldValue;\n  return newValue;");
+  assert.equal(selectedCodeText(null), "");
 });

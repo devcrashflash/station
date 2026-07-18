@@ -9,7 +9,7 @@ const markdownComponents = {
     return (
       <a
         className={cn(
-          "font-medium break-all text-blue-700 underline underline-offset-2 hover:text-blue-900",
+          "font-medium break-all text-blue-700 underline underline-offset-2 hover:text-blue-900 dark:text-blue-300 dark:hover:text-blue-200",
           className,
         )}
         target="_blank"

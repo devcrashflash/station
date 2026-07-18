@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { isProviderBackedTask } from "@/lib/taskStatus";
+import { isProviderBackedTask, taskStatusBadgeStyle } from "@/lib/taskStatus";
 
 const statusOptions = [
   { value: "open", label: "Open" },
@@ -19,6 +19,7 @@ export function TaskEditDialog({ task, onClose, onSave }) {
   const [body, setBody] = useState(task.body);
   const [status, setStatus] = useState(task.status);
   const isProviderBacked = isProviderBackedTask(task);
+  const statusBadgeStyle = taskStatusBadgeStyle(task);
 
   useEffect(() => {
     setTitle(task.title);
@@ -52,7 +53,13 @@ export function TaskEditDialog({ task, onClose, onSave }) {
         {isProviderBacked ? (
           <Field>
             <FieldLabel>Status</FieldLabel>
-            <Badge className="w-fit" variant="secondary">{task.status}</Badge>
+            <Badge
+              className={`w-fit${statusBadgeStyle ? " border-transparent" : ""}`}
+              variant={statusBadgeStyle ? "outline" : "secondary"}
+              style={statusBadgeStyle}
+            >
+              {task.status}
+            </Badge>
           </Field>
         ) : (
           <Field>

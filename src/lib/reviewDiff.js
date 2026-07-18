@@ -183,6 +183,10 @@ export function selectCommentRange(lines, startIndex, endIndex) {
   };
 }
 
+export function selectedCodeText(range) {
+  return range?.lines?.map((line) => line.content).join("\n") || "";
+}
+
 export function diffLanguageForPath(path) {
   const fileName = String(path || "").split(/[\\/]/).pop() || "";
   const extensionIndex = fileName.lastIndexOf(".");

@@ -103,7 +103,7 @@ export function TrelloTicketWizard({ task, boards, onClose, onLoadTemplates, onC
                 className="flex items-center gap-3 rounded-md border bg-card p-3 text-left hover:bg-accent"
                 onClick={() => loadBoardTemplates(item)}
               >
-                <SquareKanban className="size-5 shrink-0 text-blue-600" />
+                <SquareKanban className="size-5 shrink-0 text-blue-600 dark:text-blue-400" />
                 <span className="min-w-0">
                   <span className="block truncate text-sm font-medium">{item.name}</span>
                   <span className="block truncate text-xs text-muted-foreground">{item.url}</span>

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Pencil, Trash2 } from "lucide-react";
 import { Highlight } from "prism-react-renderer";
@@ -6,7 +6,7 @@ import { Highlight } from "prism-react-renderer";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Prism } from "@/lib/prism";
-import { diffLanguageForPath, parseDiffLines, selectCommentRange } from "@/lib/reviewDiff";
+import { diffLanguageForPath, parseDiffLines, selectCommentRange, selectedCodeText } from "@/lib/reviewDiff";
 
 const LINE_CLASS_NAMES = {
   addition: "bg-emerald-500/10",
@@ -55,7 +55,28 @@ function findDraftLineIndex(lines, draft, start) {
   return lines.findIndex((line) => line.commentable && line.side === side && anchorLine(line, side) === target);
 }
 
-export function ReviewDiff({
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Fall back for webviews that expose the Clipboard API without granting access.
+    }
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  document.body.removeChild(textarea);
+}
+
+export const ReviewDiff = forwardRef(function ReviewDiff({
   path,
   oldPath = path,
   newPath = path,
@@ -65,7 +86,7 @@ export function ReviewDiff({
   disabled = false,
   onSaveDraft,
   onDeleteDraft,
-}) {
+}, ref) {
   const language = diffLanguageForPath(path);
   const lines = useMemo(() => parseDiffLines(diff), [diff]);
   const containerRef = useRef(null);
@@ -99,6 +120,30 @@ export function ReviewDiff({
     setBody("");
     setKeyboardAnchor(null);
   }
+
+  function cancelInteraction() {
+    if (!drag && !selection && !editorOpen && keyboardAnchor === null) return false;
+    setDrag(null);
+    cancelEditor();
+    return true;
+  }
+
+  useImperativeHandle(ref, () => ({ cancelInteraction }));
+
+  useEffect(() => {
+    if (!drag || !selection) return undefined;
+
+    function handleCopyShortcut(event) {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.key.toLowerCase() !== "c") return;
+      const text = selectedCodeText(selection);
+      if (!text) return;
+      event.preventDefault();
+      void copyTextToClipboard(text);
+    }
+
+    window.addEventListener("keydown", handleCopyShortcut);
+    return () => window.removeEventListener("keydown", handleCopyShortcut);
+  }, [drag, selection]);
 
   function updateDrag(clientX, clientY) {
     const container = containerRef.current;
@@ -136,7 +181,8 @@ export function ReviewDiff({
   function handleLineKeyDown(event, index) {
     if (disabled) return;
     if (event.key === "Escape") {
-      cancelEditor();
+      event.preventDefault();
+      cancelInteraction();
       return;
     }
     if (event.key === " ") {
@@ -204,7 +250,7 @@ export function ReviewDiff({
       aria-label="Diff. Drag across lines with the crosshair to add a review comment."
       onPointerMove={(event) => updateDrag(event.clientX, event.clientY)}
       onPointerUp={handlePointerUp}
-      onPointerCancel={() => { setDrag(null); setSelection(null); setEditorOpen(false); }}
+      onPointerCancel={cancelInteraction}
       onPointerLeave={(event) => drag && updateDrag(event.clientX, event.clientY)}
     >
       {rectangle && createPortal(
@@ -237,7 +283,7 @@ export function ReviewDiff({
               </span>
             </div>
             {cards.filter(({ draft }) => !editorOpen || editingDraft?.id !== draft.id).map(({ draft, firstIndex, lastIndex }) => (
-              <div key={draft.id} className="mx-10 my-2 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-amber-950 dark:bg-amber-950/30 dark:text-amber-100">
+              <div key={draft.id} className="mx-10 my-2 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-amber-950 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
                 <div className="min-w-0 flex-1 font-sans text-sm">
                   <p className="mb-1 text-xs opacity-70">Lines {lines[firstIndex]?.oldLine || lines[firstIndex]?.newLine}–{lines[lastIndex]?.oldLine || lines[lastIndex]?.newLine}</p>
                   <p className="whitespace-pre-wrap">{draft.body}</p>
@@ -248,7 +294,7 @@ export function ReviewDiff({
               </div>
             ))}
             {showEditor && (
-              <div className="mx-10 my-2 grid gap-2 rounded-md border border-blue-300 bg-background p-3 font-sans">
+              <div className="mx-10 my-2 grid gap-2 rounded-md border border-blue-300 bg-background p-3 font-sans dark:border-blue-900">
                 <p className="text-xs text-muted-foreground">Comment on {selection.lines.length} line{selection.lines.length === 1 ? "" : "s"}</p>
                 <Textarea autoFocus className="min-h-20" value={body} placeholder="Draft a review comment…" disabled={disabled || saving} onChange={(event) => setBody(event.target.value)} />
                 <div className="flex justify-end gap-2">
@@ -262,4 +308,4 @@ export function ReviewDiff({
       })}
     </div>
   );
-}
+});

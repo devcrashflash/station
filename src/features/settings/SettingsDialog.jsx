@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AtSign, Bot, CalendarDays, FolderOpen, GitMerge, GitPullRequest, LoaderCircle, Monitor, Pencil, PlugZap, RefreshCw, RotateCcw, SquareKanban, Trash2, UserRound } from "lucide-react";
+import { AtSign, Bot, CalendarDays, FolderOpen, GitMerge, GitPullRequest, LoaderCircle, Monitor, Palette, Pencil, PlugZap, RefreshCw, RotateCcw, SquareKanban, Trash2, UserRound } from "lucide-react";
 
 import { EmptyState } from "@/components/common/EmptyState";
 import { Modal } from "@/components/common/Modal";
@@ -43,6 +43,12 @@ const aiAgentTypeOptions = [
   { value: "claude", label: "Claude" },
 ];
 
+const themeOptions = [
+  { value: "system", label: "System" },
+  { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
+];
+
 const permissionHints = {
   gitlab: "Use read_api or api. read_repository is not enough for issues and merge requests.",
   github: "Use Metadata read, Pull requests read, and Issues read for fine-grained tokens.",
@@ -54,6 +60,7 @@ const settingsSections = [
   { id: "accounts", label: "Accounts", description: "Connected services", icon: UserRound },
   { id: "ai-prompts", label: "AI Prompts", description: "Reusable AI instructions", icon: Bot },
   { id: "directories", label: "Directories", description: "Local source folders", icon: FolderOpen },
+  { id: "appearance", label: "Appearance", description: "Color theme", icon: Palette },
   { id: "browser", label: "Browser", description: "New tab behavior", icon: Monitor },
 ];
 
@@ -84,6 +91,7 @@ export function SettingsDialog({
   aiPrompts,
   directories,
   browserSettings,
+  themePreference = "system",
   calendarAccounts = [],
   initialSection = "accounts",
   onClose,
@@ -96,6 +104,7 @@ export function SettingsDialog({
   onSaveDirectory,
   onDeleteDirectory,
   onSaveBrowserSettings,
+  onThemePreferenceChange,
   onSaveCalendarSubscription,
   onSaveCalDavAccount,
   onConnectGoogleAccount,
@@ -346,6 +355,13 @@ export function SettingsDialog({
                 }}
               />
             )}
+
+            {activeTab === "appearance" && (
+              <AppearanceTab
+                themePreference={themePreference}
+                onThemePreferenceChange={onThemePreferenceChange}
+              />
+            )}
           </div>
         </main>
       </div>
@@ -544,7 +560,7 @@ function AccountsSettingsTab({ connections, calendarAccounts, onSaveConnection, 
                 <Field>
                   <FieldLabel>{editor.type === "trello" ? "API token" : "Token"}</FieldLabel>
                   <Input type="password" value={fields.token || ""} onChange={(event) => setField("token", event.target.value)} required />
-                  <div className="grid gap-1 text-xs text-muted-foreground"><p>{permissionHints[editor.type]}</p>{tokenUrl ? <a className="font-medium text-blue-700 underline-offset-2 hover:underline" href={tokenUrl} target="_blank" rel="noreferrer">Generate token</a> : editor.type === "trello" ? <span>Enter an API key to generate a token.</span> : null}</div>
+                  <div className="grid gap-1 text-xs text-muted-foreground"><p>{permissionHints[editor.type]}</p>{tokenUrl ? <a className="font-medium text-blue-700 underline-offset-2 hover:underline dark:text-blue-300" href={tokenUrl} target="_blank" rel="noreferrer">Generate token</a> : editor.type === "trello" ? <span>Enter an API key to generate a token.</span> : null}</div>
                 </Field>
                 <EditorFooter busy={busyKey === "editor"} submitLabel={editor.mode === "edit" ? "Update connection" : `Add ${providerOptions.find((item) => item.value === editor.type)?.label}`} error={editorError} onCancel={() => resetEditor()} />
               </form>
@@ -602,7 +618,7 @@ function AccountGroup({ group, busyKey, testResults, onEdit, onTest, onRefresh, 
   return <section className="grid gap-2"><div className="flex items-center gap-2"><Icon className="size-4 text-muted-foreground" /><h3 className="font-semibold">{group.label}</h3><Badge variant="secondary">{group.items.length}</Badge></div>{group.items.map((item) => {
     const isDeveloper = group.kind === "developer";
     const result = testResults[item.id];
-    return <div key={item.id} className="grid gap-3 rounded-md border p-4"><div className="flex min-w-0 items-start gap-2"><div className="min-w-0 flex-1"><p className="font-medium">{item.name}</p><p className="truncate text-xs text-muted-foreground">{isDeveloper ? (item.provider === "trello" ? "Cloud API" : item.baseUrl) : calendarTypeLabels[item.provider] || "Calendar"}</p>{result && <div className="mt-2 flex items-center gap-2"><Badge variant={result.ok === false ? "destructive" : "secondary"} className={cn(result.ok === true && "bg-green-100 text-green-800")}>{result.ok === null ? "Testing" : result.ok ? "Connected" : "Failed"}</Badge><span className="text-xs text-muted-foreground">{result.message}</span></div>}</div><Button size="icon-sm" variant="ghost" title={item.provider === "google" ? "Reconnect account" : "Edit account"} onClick={() => onEdit(item)}><Pencil /></Button><Button size="icon-sm" variant="ghost" title="Test account" disabled={Boolean(busyKey)} onClick={() => onTest(item)}>{busyKey === `test:${item.id}` ? <LoaderCircle className="animate-spin" /> : <PlugZap />}</Button>{!isDeveloper && <Button size="icon-sm" variant="ghost" title="Refresh calendars" disabled={Boolean(busyKey)} onClick={() => onRefresh(item)}><RefreshCw className={busyKey === `refresh:${item.id}` ? "animate-spin" : ""} /></Button>}<Button size="icon-sm" variant="ghost" title="Delete account" disabled={Boolean(busyKey)} onClick={() => onDelete(item)}><Trash2 /></Button></div>{item.provider === "google" && <label className="flex items-center gap-3 rounded-md border bg-muted/20 p-3"><Checkbox checked={item.calendarEnabled !== false} disabled={Boolean(busyKey)} onCheckedChange={(checked) => onUpdateService(item, checked === true)} /><div><p className="text-sm font-medium">Calendar</p><p className="text-xs text-muted-foreground">Show and sync calendars from this Google account.</p></div></label>}{!isDeveloper && item.provider === "google" && item.calendarEnabled !== false && <div className="grid gap-2">{(item.calendars || []).map((calendar) => <label key={calendar.id} className="flex items-center gap-3 rounded-md border bg-muted/20 p-3"><Checkbox checked={calendar.enabled} onCheckedChange={(checked) => onUpdateCollections([{ id: calendar.id, enabled: checked === true, color: calendar.color }]).catch((error) => setActionNotice(error?.message || String(error)))} /><input className="size-7 cursor-pointer rounded border bg-transparent p-0.5" type="color" value={calendar.color || "#64748b"} onChange={(event) => onUpdateCollections([{ id: calendar.id, enabled: calendar.enabled, color: event.target.value }]).catch((error) => setActionNotice(error?.message || String(error)))} /><span className="min-w-0 flex-1 truncate text-sm font-medium">{calendar.name}</span></label>)}{(item.calendars || []).length === 0 && <EmptyState text="No event calendars discovered." />}</div>}</div>;
+    return <div key={item.id} className="grid gap-3 rounded-md border p-4"><div className="flex min-w-0 items-start gap-2"><div className="min-w-0 flex-1"><p className="font-medium">{item.name}</p><p className="truncate text-xs text-muted-foreground">{isDeveloper ? (item.provider === "trello" ? "Cloud API" : item.baseUrl) : calendarTypeLabels[item.provider] || "Calendar"}</p>{result && <div className="mt-2 flex items-center gap-2"><Badge variant={result.ok === false ? "destructive" : "secondary"} className={cn(result.ok === true && "bg-green-100 text-green-800 dark:bg-green-950/50 dark:text-green-300")}>{result.ok === null ? "Testing" : result.ok ? "Connected" : "Failed"}</Badge><span className="text-xs text-muted-foreground">{result.message}</span></div>}</div><Button size="icon-sm" variant="ghost" title={item.provider === "google" ? "Reconnect account" : "Edit account"} onClick={() => onEdit(item)}><Pencil /></Button><Button size="icon-sm" variant="ghost" title="Test account" disabled={Boolean(busyKey)} onClick={() => onTest(item)}>{busyKey === `test:${item.id}` ? <LoaderCircle className="animate-spin" /> : <PlugZap />}</Button>{!isDeveloper && <Button size="icon-sm" variant="ghost" title="Refresh calendars" disabled={Boolean(busyKey)} onClick={() => onRefresh(item)}><RefreshCw className={busyKey === `refresh:${item.id}` ? "animate-spin" : ""} /></Button>}<Button size="icon-sm" variant="ghost" title="Delete account" disabled={Boolean(busyKey)} onClick={() => onDelete(item)}><Trash2 /></Button></div>{item.provider === "google" && <label className="flex items-center gap-3 rounded-md border bg-muted/20 p-3"><Checkbox checked={item.calendarEnabled !== false} disabled={Boolean(busyKey)} onCheckedChange={(checked) => onUpdateService(item, checked === true)} /><div><p className="text-sm font-medium">Calendar</p><p className="text-xs text-muted-foreground">Show and sync calendars from this Google account.</p></div></label>}{!isDeveloper && item.provider === "google" && item.calendarEnabled !== false && <div className="grid gap-2">{(item.calendars || []).map((calendar) => <label key={calendar.id} className="flex items-center gap-3 rounded-md border bg-muted/20 p-3"><Checkbox checked={calendar.enabled} onCheckedChange={(checked) => onUpdateCollections([{ id: calendar.id, enabled: checked === true, color: calendar.color }]).catch((error) => setActionNotice(error?.message || String(error)))} /><input className="size-7 cursor-pointer rounded border bg-transparent p-0.5" type="color" value={calendar.color || "#64748b"} onChange={(event) => onUpdateCollections([{ id: calendar.id, enabled: calendar.enabled, color: event.target.value }]).catch((error) => setActionNotice(error?.message || String(error)))} /><span className="min-w-0 flex-1 truncate text-sm font-medium">{calendar.name}</span></label>)}{(item.calendars || []).length === 0 && <EmptyState text="No event calendars discovered." />}</div>}</div>;
   })}</section>;
 }
 
@@ -663,7 +679,7 @@ function DirectoriesTab({ directories, isChoosing, notice, onChooseDirectory, on
             <div key={directory.id} className="flex min-w-0 items-center gap-2 rounded-md border p-3">
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium">{directory.name}</p>
-                <p className="truncate text-xs text-blue-700">{directory.path}</p>
+                <p className="truncate text-xs text-blue-700 dark:text-blue-300">{directory.path}</p>
               </div>
               <Button
                 className="shrink-0"
@@ -724,6 +740,28 @@ function BrowserTab({
           Use system default
         </Button>
       </div>
+    </div>
+  );
+}
+
+function AppearanceTab({ themePreference, onThemePreferenceChange }) {
+  return (
+    <div className="grid gap-4">
+      <div className="grid gap-1">
+        <p className="text-sm font-medium">Color theme</p>
+        <p className="text-xs text-muted-foreground">
+          System follows your operating system and updates automatically when it changes.
+        </p>
+      </div>
+      <Field>
+        <FieldLabel>Appearance</FieldLabel>
+        <SelectControl
+          value={themePreference}
+          onValueChange={onThemePreferenceChange}
+          options={themeOptions}
+          triggerClassName="w-full sm:max-w-xs"
+        />
+      </Field>
     </div>
   );
 }

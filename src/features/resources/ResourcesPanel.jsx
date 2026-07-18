@@ -43,7 +43,7 @@ function ResourceList({ resources }) {
             <p className="block min-w-0 max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-xs text-muted-foreground">
               {providerLabels[resource.provider] || resource.provider} · {resourceKindLabels.get(resource.kind) || resource.kind}
             </p>
-            <p className="block min-w-0 max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-xs text-blue-700">
+            <p className="block min-w-0 max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-xs text-blue-700 dark:text-blue-300">
               {resource.url}
             </p>
           </div>

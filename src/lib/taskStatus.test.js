@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { isProviderBackedTask, isTaskDone, taskStatusBadgeLabel } from "./taskStatus.js";
+import {
+  isProviderBackedTask,
+  isTaskDone,
+  taskStatusBadgeLabel,
+  taskStatusBadgeStyle,
+} from "./taskStatus.js";
 
 test("detects provider-backed task statuses", () => {
   assert.equal(isProviderBackedTask({ sourceProvider: "trello", sourceKind: "trello_card" }), true);
@@ -25,5 +30,32 @@ test("shows new badge for open tasks without provider state", () => {
   assert.equal(
     taskStatusBadgeLabel({ status: "open", sourceProvider: "github", sourceKind: "github_issue" }),
     "open",
+  );
+});
+
+test("uses readable Trello list colors only for Trello card badges", () => {
+  assert.deepEqual(
+    taskStatusBadgeStyle({
+      sourceProvider: "trello",
+      sourceKind: "trello_card",
+      statusColor: "#f2d600",
+    }),
+    { backgroundColor: "#f2d600", color: "#111827" },
+  );
+  assert.equal(
+    taskStatusBadgeStyle({
+      sourceProvider: "trello",
+      sourceKind: "trello_card",
+      statusColor: "not-a-color",
+    }),
+    undefined,
+  );
+  assert.equal(
+    taskStatusBadgeStyle({
+      sourceProvider: "github",
+      sourceKind: "github_issue",
+      statusColor: "#f2d600",
+    }),
+    undefined,
   );
 });

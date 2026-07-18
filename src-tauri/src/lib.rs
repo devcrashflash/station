@@ -318,6 +318,7 @@ struct Task {
     source_url: Option<String>,
     source_provider: Option<String>,
     source_kind: Option<String>,
+    status_color: Option<String>,
     created_at: i64,
     updated_at: i64,
 }
@@ -349,6 +350,7 @@ struct TaskLink {
     external_title: Option<String>,
     external_body: Option<String>,
     external_state: Option<String>,
+    external_state_color: Option<String>,
     target_branch: Option<String>,
     fetched_at: Option<i64>,
     files: Vec<TaskFile>,
@@ -377,6 +379,7 @@ struct TrelloTicketTemplate {
 struct TrelloBoardList {
     id: String,
     name: String,
+    color: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -849,6 +852,7 @@ struct ProviderMetadata {
     title: Option<String>,
     body: Option<String>,
     state: Option<String>,
+    state_color: Option<String>,
     target_branch: Option<String>,
     url: Option<String>,
     fetched_at: Option<i64>,
@@ -1195,6 +1199,7 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
             external_title TEXT,
             external_body TEXT,
             external_state TEXT,
+            external_state_color TEXT,
             target_branch TEXT,
             fetched_at INTEGER,
             files_json TEXT NOT NULL DEFAULT '[]',
@@ -1300,6 +1305,7 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
     add_column_if_missing(db, "task_links", "external_title", "TEXT")?;
     add_column_if_missing(db, "task_links", "external_body", "TEXT")?;
     add_column_if_missing(db, "task_links", "external_state", "TEXT")?;
+    add_column_if_missing(db, "task_links", "external_state_color", "TEXT")?;
     add_column_if_missing(db, "task_links", "target_branch", "TEXT")?;
     add_column_if_missing(db, "task_links", "fetched_at", "INTEGER")?;
     add_column_if_missing(db, "task_links", "files_json", "TEXT NOT NULL DEFAULT '[]'")?;
@@ -1641,6 +1647,7 @@ fn row_to_task_with_source(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         updated_at: row.get(7)?,
         source_provider: row.get(8)?,
         source_kind: row.get(9)?,
+        status_color: row.get(10)?,
     })
 }
 
@@ -1660,9 +1667,9 @@ fn row_to_smart_inbox_todo(row: &rusqlite::Row<'_>) -> rusqlite::Result<SmartInb
 }
 
 fn row_to_task_link(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskLink> {
-    let files_json = row.get::<_, Option<String>>(11)?;
-    let comments_json = row.get::<_, Option<String>>(12)?;
-    let labels_json = row.get::<_, Option<String>>(13)?;
+    let files_json = row.get::<_, Option<String>>(12)?;
+    let comments_json = row.get::<_, Option<String>>(13)?;
+    let labels_json = row.get::<_, Option<String>>(14)?;
     Ok(TaskLink {
         task_id: row.get(0)?,
         provider: row.get(1)?,
@@ -1673,8 +1680,9 @@ fn row_to_task_link(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskLink> {
         external_title: row.get(6)?,
         external_body: row.get(7)?,
         external_state: row.get(8)?,
-        target_branch: row.get(9)?,
-        fetched_at: row.get(10)?,
+        external_state_color: row.get(9)?,
+        target_branch: row.get(10)?,
+        fetched_at: row.get(11)?,
         files: task_files_from_json(files_json.as_deref()),
         comments: task_comments_from_json(comments_json.as_deref()),
         labels: external_labels_from_json(labels_json.as_deref()),
@@ -4661,7 +4669,7 @@ fn create_task_in_db(
 fn get_task(db: &SqliteConnection, id: &str) -> rusqlite::Result<Option<Task>> {
     db.query_row(
         "SELECT t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
-                l.provider, l.kind
+                l.provider, l.kind, l.external_state_color
          FROM tasks t
          LEFT JOIN task_links l ON l.task_id = t.id
          WHERE t.id = ?1",
@@ -4677,7 +4685,7 @@ fn get_task_by_source_url(
 ) -> rusqlite::Result<Option<Task>> {
     db.query_row(
         "SELECT t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
-                l.provider, l.kind
+                l.provider, l.kind, l.external_state_color
          FROM tasks t
          LEFT JOIN task_links l ON l.task_id = t.id
          WHERE t.source_url = ?1 LIMIT 1",
@@ -4695,7 +4703,7 @@ fn get_task_by_link(
 ) -> rusqlite::Result<Option<Task>> {
     db.query_row(
         "SELECT t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
-                l.provider, l.kind
+                l.provider, l.kind, l.external_state_color
          FROM tasks t
          INNER JOIN task_links l ON l.task_id = t.id
          WHERE l.provider = ?1 AND l.kind = ?2 AND l.external_id = ?3
@@ -4714,7 +4722,7 @@ fn get_latest_project_task_by_link(
 ) -> rusqlite::Result<Option<Task>> {
     db.query_row(
         "SELECT t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
-                l.provider, l.kind
+                l.provider, l.kind, l.external_state_color
          FROM tasks t
          INNER JOIN task_links l ON l.task_id = t.id
          WHERE l.provider = ?1 AND l.kind = ?2 AND l.external_id = ?3
@@ -4753,7 +4761,7 @@ fn get_task_relation_view(
     db.query_row(
         "SELECT r.id, r.source_task_id, r.target_task_id, r.relation_type, r.created_at,
                 t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
-                l.provider, l.kind
+                l.provider, l.kind, l.external_state_color
          FROM task_relations r
          INNER JOIN tasks t ON t.id = CASE WHEN r.source_task_id = ?2 THEN r.target_task_id ELSE r.source_task_id END
          LEFT JOIN task_links l ON l.task_id = t.id
@@ -4780,6 +4788,7 @@ fn row_to_task_relation_view(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRe
             source_url: row.get(10)?,
             source_provider: row.get(13)?,
             source_kind: row.get(14)?,
+            status_color: row.get(15)?,
             created_at: row.get(11)?,
             updated_at: row.get(12)?,
         },
@@ -4895,8 +4904,8 @@ fn link_task_resource_in_db(
     let labels_json = external_labels_to_json(&metadata.labels);
     db.execute(
         "INSERT INTO task_links
-            (task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, target_branch, fetched_at, files_json, comments_json, labels_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            (task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, external_state_color, target_branch, fetched_at, files_json, comments_json, labels_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(task_id) DO UPDATE SET
             provider = excluded.provider,
             kind = excluded.kind,
@@ -4906,6 +4915,7 @@ fn link_task_resource_in_db(
             external_title = excluded.external_title,
             external_body = excluded.external_body,
             external_state = excluded.external_state,
+            external_state_color = excluded.external_state_color,
             target_branch = excluded.target_branch,
             fetched_at = excluded.fetched_at,
             files_json = excluded.files_json,
@@ -4921,6 +4931,7 @@ fn link_task_resource_in_db(
             &metadata.title,
             &metadata.body,
             &metadata.state,
+            &metadata.state_color,
             &metadata.target_branch,
             &metadata.fetched_at,
             &files_json,
@@ -4937,7 +4948,7 @@ fn link_task_resource_in_db(
 
 fn list_task_links_in_db(db: &SqliteConnection, task_id: &str) -> rusqlite::Result<Vec<TaskLink>> {
     let mut statement = db.prepare(
-        "SELECT task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, target_branch, fetched_at, files_json, comments_json, labels_json
+        "SELECT task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, external_state_color, target_branch, fetched_at, files_json, comments_json, labels_json
          FROM task_links WHERE task_id = ?1 ORDER BY provider ASC, kind ASC",
     )?;
     let links = statement
@@ -5232,6 +5243,7 @@ fn migrate_pull_requests_into_tasks(db: &SqliteConnection) -> rusqlite::Result<(
                 .or_else(|| Some(pull_request.title.clone())),
             body: pull_request.external_body.clone(),
             state: pull_request.external_state.clone(),
+            state_color: None,
             target_branch: pull_request.target_branch.clone(),
             url: Some(pull_request.pr_url.clone()),
             fetched_at: pull_request.fetched_at,
@@ -5713,6 +5725,7 @@ impl ProviderMetadata {
             title: None,
             body: None,
             state: None,
+            state_color: None,
             target_branch: None,
             url: None,
             fetched_at: None,
@@ -6349,6 +6362,7 @@ fn trello_board_templates_from_json(cards: &Value, lists: &Value) -> TrelloBoard
             Some(TrelloBoardList {
                 id: json_string(list, "id")?,
                 name: json_string(list, "name").unwrap_or_else(|| "Untitled list".to_string()),
+                color: trello_color(json_string(list, "color")),
             })
         })
         .collect();
@@ -6367,7 +6381,7 @@ fn fetch_trello_board_templates(
         percent_encode(token)
     );
     let lists_url = format!(
-        "https://api.trello.com/1/boards/{}/lists/open?fields=id,name,closed&key={}&token={}",
+        "https://api.trello.com/1/boards/{}/lists/open?fields=id,name,closed,color&key={}&token={}",
         percent_encode(board_id),
         percent_encode(api_key),
         percent_encode(token)
@@ -7807,9 +7821,23 @@ fn normalize_external_labels(labels: Vec<ExternalLabel>) -> Vec<ExternalLabel> {
         .collect()
 }
 
-fn trello_label_color(value: Option<String>) -> Option<String> {
+fn trello_color(value: Option<String>) -> Option<String> {
     let value = value?;
-    let family = value.trim().split('_').next().unwrap_or_default();
+    let family = value.trim().split(['_', '-']).find(|part| {
+        matches!(
+            *part,
+            "green"
+                | "yellow"
+                | "orange"
+                | "red"
+                | "purple"
+                | "blue"
+                | "sky"
+                | "lime"
+                | "pink"
+                | "black"
+        )
+    })?;
     let color = match family {
         "green" => "#61bd4f",
         "yellow" => "#f2d600",
@@ -7835,7 +7863,7 @@ fn trello_labels(json: &Value) -> Vec<ExternalLabel> {
             .filter_map(|label| {
                 Some(ExternalLabel {
                     name: json_string(label, "name")?,
-                    color: trello_label_color(json_string(label, "color")),
+                    color: trello_color(json_string(label, "color")),
                 })
             })
             .collect(),
@@ -7929,7 +7957,7 @@ fn fetch_trello_card(
     let parent_resource = json_string(&json, "idBoard")
         .and_then(|board_id| fetch_trello_board_parent_resource(&board_id, api_key, token).ok());
     let list_url = format!(
-        "https://api.trello.com/1/cards/{}/list?key={}&token={}",
+        "https://api.trello.com/1/cards/{}/list?fields=name,color&key={}&token={}",
         percent_encode(id),
         percent_encode(api_key),
         percent_encode(token)
@@ -7948,6 +7976,7 @@ fn fetch_trello_card(
         title: json_string(&json, "name"),
         body: json_string(&json, "desc"),
         state: trello_list_state(&list_json),
+        state_color: trello_color(json_string(&list_json, "color")),
         url: card_url,
         files: trello_attachment_files(&attachments_json),
         comments,
@@ -9062,13 +9091,13 @@ fn list_tasks(
     let db = state.db.lock().map_err(db_error)?;
     let sql = if project_id.is_some() {
         "SELECT t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
-                l.provider, l.kind
+                l.provider, l.kind, l.external_state_color
          FROM tasks t
          LEFT JOIN task_links l ON l.task_id = t.id
          WHERE t.project_id = ?1 ORDER BY t.created_at DESC"
     } else {
         "SELECT t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
-                l.provider, l.kind
+                l.provider, l.kind, l.external_state_color
          FROM tasks t
          LEFT JOIN task_links l ON l.task_id = t.id
          ORDER BY t.created_at DESC"
@@ -9333,6 +9362,7 @@ async fn convert_task_to_trello_ticket(
             title: Some(title.clone()),
             body: Some(description.clone()),
             state: Some(destination_list.name.clone()),
+            state_color: destination_list.color.clone(),
             url: Some(card_url.clone()),
             fetched_at: Some(now_millis()),
             parent_resource: Some(ProviderResourceMetadata {
@@ -9430,7 +9460,7 @@ fn list_task_relations(
         .prepare(
             "SELECT r.id, r.source_task_id, r.target_task_id, r.relation_type, r.created_at,
                     t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
-                    l.provider, l.kind
+                    l.provider, l.kind, l.external_state_color
              FROM task_relations r
              INNER JOIN tasks t ON t.id = CASE WHEN r.source_task_id = ?1 THEN r.target_task_id ELSE r.source_task_id END
              LEFT JOIN task_links l ON l.task_id = t.id
@@ -11418,6 +11448,7 @@ mod tests {
             "sparkles"
         );
         assert!(column_exists(&db, "task_links", "connection_id"));
+        assert!(column_exists(&db, "task_links", "external_state_color"));
         assert!(column_exists(&db, "task_links", "target_branch"));
         assert!(column_exists(&db, "task_links", "files_json"));
         assert!(column_exists(&db, "task_links", "comments_json"));
@@ -13234,7 +13265,7 @@ mod tests {
 
         let mut statement = db
             .prepare(
-                "SELECT task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, target_branch, fetched_at, files_json, comments_json, labels_json
+                "SELECT task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, external_state_color, target_branch, fetched_at, files_json, comments_json, labels_json
                  FROM task_links WHERE task_id = ?1",
             )
             .expect("prepare task links query");
@@ -13591,6 +13622,7 @@ mod tests {
             title: Some("Fetched Trello title".to_string()),
             body: Some("Fetched Trello description".to_string()),
             state: Some("Doing".to_string()),
+            state_color: Some("#61bd4f".to_string()),
             target_branch: None,
             url: Some("https://trello.com/c/card123/fetched".to_string()),
             fetched_at: Some(123),
@@ -13623,6 +13655,11 @@ mod tests {
         assert_eq!(refreshed.status, "Doing");
         assert_eq!(refreshed.source_provider.as_deref(), Some("trello"));
         assert_eq!(refreshed.source_kind.as_deref(), Some("trello_card"));
+        assert_eq!(refreshed.status_color.as_deref(), Some("#61bd4f"));
+        assert_eq!(
+            serde_json::to_value(&refreshed).expect("serialize refreshed task")["statusColor"],
+            "#61bd4f"
+        );
         assert_eq!(
             links[0].external_title.as_deref(),
             Some("Fetched Trello title")
@@ -13632,6 +13669,7 @@ mod tests {
             Some("Fetched Trello description")
         );
         assert_eq!(links[0].external_state.as_deref(), Some("Doing"));
+        assert_eq!(links[0].external_state_color.as_deref(), Some("#61bd4f"));
         assert_eq!(links[0].fetched_at, Some(123));
         assert_eq!(links[0].files.len(), 1);
         assert_eq!(links[0].files[0].name, "Design spec.pdf");
@@ -13679,6 +13717,7 @@ mod tests {
                 title: Some("Fetched title".to_string()),
                 body: Some("Fetched body".to_string()),
                 state: Some("Done".to_string()),
+                state_color: None,
                 target_branch: None,
                 url: None,
                 fetched_at: Some(123),
@@ -14203,6 +14242,7 @@ mod tests {
             source_url: Some("https://trello.com/c/card123/fix-login".to_string()),
             source_provider: Some("trello".to_string()),
             source_kind: Some("trello_card".to_string()),
+            status_color: Some("#61bd4f".to_string()),
             created_at: 1,
             updated_at: 1,
         };
@@ -14258,6 +14298,7 @@ mod tests {
             source_url: None,
             source_provider: None,
             source_kind: None,
+            status_color: None,
             created_at: 1,
             updated_at: 1,
         };
@@ -14275,6 +14316,7 @@ mod tests {
             source_url: None,
             source_provider: None,
             source_kind: None,
+            status_color: None,
             created_at: 1,
             updated_at: 1,
         };
@@ -14643,11 +14685,21 @@ mod tests {
 
     #[test]
     fn maps_provider_metadata_status_values() {
-        let trello_list = serde_json::json!({ "name": "In Progress" });
+        let trello_list = serde_json::json!({ "name": "In Progress", "color": "green_dark" });
         assert_eq!(
             trello_list_state(&trello_list).as_deref(),
             Some("In Progress")
         );
+        assert_eq!(
+            trello_color(json_string(&trello_list, "color")).as_deref(),
+            Some("#61bd4f")
+        );
+        assert_eq!(
+            trello_color(Some("light-red".to_string())).as_deref(),
+            Some("#eb5a46")
+        );
+        assert_eq!(trello_color(None), None);
+        assert_eq!(trello_color(Some("unknown".to_string())), None);
 
         let github_issue = serde_json::json!({ "state": "closed" });
         assert_eq!(github_issue_state(&github_issue).as_deref(), Some("closed"));
@@ -14782,7 +14834,7 @@ mod tests {
             {"id": "regular", "name": "Ordinary card", "idList": "list-1", "isTemplate": false}
         ]);
         let lists = serde_json::json!([
-            {"id": "list-1", "name": "Todo", "closed": false},
+            {"id": "list-1", "name": "Todo", "color": "blue_light", "closed": false},
             {"id": "list-2", "name": "Archived", "closed": true}
         ]);
 
@@ -14796,6 +14848,7 @@ mod tests {
             vec![TrelloBoardList {
                 id: "list-1".to_string(),
                 name: "Todo".to_string(),
+                color: Some("#0079bf".to_string()),
             }]
         );
     }
@@ -14868,12 +14921,12 @@ mod tests {
             None,
         )
         .expect("related task");
-        save_task_relation_in_db(
+        let relation = save_task_relation_in_db(
             &db,
             TaskRelationInput {
                 id: None,
                 source_task_id: task.id.clone(),
-                target_task_id: related.id,
+                target_task_id: related.id.clone(),
                 relation_type: "related".to_string(),
             },
         )
@@ -14883,6 +14936,7 @@ mod tests {
             title: Some("Converted title".to_string()),
             body: Some("Converted body".to_string()),
             state: Some("Doing".to_string()),
+            state_color: Some("#0079bf".to_string()),
             url: Some("https://trello.com/c/card-1".to_string()),
             fetched_at: Some(now_millis()),
             ..ProviderMetadata::empty()
@@ -14904,7 +14958,15 @@ mod tests {
         assert_eq!(converted.task.title, "Converted title");
         assert_eq!(converted.task.body, "Converted body");
         assert_eq!(converted.task.status, "Doing");
+        assert_eq!(converted.task.status_color.as_deref(), Some("#0079bf"));
         assert_eq!(converted.task.source_kind.as_deref(), Some("trello_card"));
+        let related_view = get_task_relation_view(&db, &relation.id, &related.id)
+            .expect("load relation")
+            .expect("related view");
+        assert_eq!(
+            related_view.related_task.status_color.as_deref(),
+            Some("#0079bf")
+        );
         assert_eq!(
             db.query_row(
                 "SELECT COUNT(*) FROM task_relations WHERE source_task_id = ?1 OR target_task_id = ?1",

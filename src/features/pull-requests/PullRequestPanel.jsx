@@ -56,7 +56,7 @@ export function PullRequestItem({ pullRequest, onUpdatePullRequest }) {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <a
-            className="block min-w-0 max-w-full break-words font-medium text-blue-700 underline-offset-2 hover:underline"
+            className="block min-w-0 max-w-full break-words font-medium text-blue-700 underline-offset-2 hover:underline dark:text-blue-300"
             href={pullRequest.prUrl}
             target="_blank"
             rel="noreferrer"
