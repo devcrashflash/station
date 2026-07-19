@@ -3,7 +3,6 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { LoaderCircle } from "lucide-react";
 
-import "@/App.css";
 import { Modal } from "@/components/common/Modal";
 import { Button } from "@/components/ui/button";
 import { DialogDescription, DialogFooter } from "@/components/ui/dialog";
@@ -132,6 +131,13 @@ function App() {
     detectedBrowserBundleId: null,
     browserBundleId: null,
   });
+  const [terminalSettings, setTerminalSettings] = useState({
+    newTabDirectory: null,
+    newPaneDirectory: null,
+    inactivePaneOpacity: 0.65,
+    closeTerminalsOnAppExit: false,
+    profileDirectory: "~",
+  });
   const [quickCaptureShortcutSettings, setQuickCaptureShortcutSettings] = useState({
     shortcut: "CommandOrControl+Shift+Space",
     defaultShortcut: "CommandOrControl+Shift+Space",
@@ -242,15 +248,11 @@ function App() {
         setSelectedProjectId(null);
         setSmartInboxFocusRequestKey((current) => current + 1);
       }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "t") {
-        event.preventDefault();
-        api.openBlankBrowserTab().catch(reportError);
-      }
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [reportError]);
+  }, []);
 
   useEffect(() => {
     if (selectedProjectId) {
@@ -266,13 +268,14 @@ function App() {
   }, [selectedProjectId]);
 
   async function refreshShell() {
-    const [projectList, connectionList, calendarAccountList, aiPromptList, directoryList, browserSettingsResult, shortcutSettingsResult, recentFileList, todoList] = await Promise.all([
+    const [projectList, connectionList, calendarAccountList, aiPromptList, directoryList, browserSettingsResult, terminalSettingsResult, shortcutSettingsResult, recentFileList, todoList] = await Promise.all([
       api.listProjects(),
       api.listConnections(),
       api.listCalendarAccounts(),
       api.listAiPrompts(),
       api.listDirectories(),
       api.listBrowserSettings(),
+      api.listTerminalSettings(),
       api.quickCaptureShortcutSettings(),
       api.listRecentDirectoryFiles(),
       api.listSmartInboxTodos(),
@@ -283,6 +286,7 @@ function App() {
     setAiPrompts(aiPromptList);
     setDirectories(directoryList);
     setBrowserSettings(browserSettingsResult);
+    setTerminalSettings(terminalSettingsResult);
     setQuickCaptureShortcutSettings(shortcutSettingsResult);
     if (shortcutSettingsResult.error) showNotice(shortcutSettingsResult.error);
     setRecentDirectoryFiles(recentFileList);
@@ -925,6 +929,7 @@ function App() {
           aiPrompts={aiPrompts}
           directories={directories}
           browserSettings={browserSettings}
+          terminalSettings={terminalSettings}
           quickCaptureShortcutSettings={quickCaptureShortcutSettings}
           themePreference={themePreference}
           calendarAccounts={calendarAccounts}
@@ -997,6 +1002,12 @@ function App() {
             const nextBrowserSettings = await api.saveBrowserSettings(payload);
             setBrowserSettings(nextBrowserSettings);
             showNotice("Browser settings saved.");
+          }}
+          onSaveTerminalSettings={async (payload) => {
+            const nextTerminalSettings = await api.saveTerminalSettings(payload);
+            setTerminalSettings(nextTerminalSettings);
+            showNotice("Terminal settings saved.");
+            return nextTerminalSettings;
           }}
           onSaveQuickCaptureShortcut={async (payload) => {
             const settings = await api.saveQuickCaptureShortcut(payload);

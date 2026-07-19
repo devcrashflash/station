@@ -1,17 +1,28 @@
-import React from "react";
+import React, { lazy, Suspense } from "react";
 import ReactDOM from "react-dom/client";
-import App from "./app/App";
+import "./App.css";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
-import { QuickCapture } from "./features/smart-input/QuickCapture";
+import { WorkspaceShortcuts } from "./features/workspace/WorkspaceShortcuts";
 import { initializeTheme } from "./lib/theme";
+
+const App = lazy(() => import("./app/App"));
+const QuickCapture = lazy(() => import("./features/smart-input/QuickCapture").then((module) => ({ default: module.QuickCapture })));
+const TabBar = lazy(() => import("./features/workspace/TabBar").then((module) => ({ default: module.TabBar })));
+const TerminalSurface = lazy(() => import("./features/workspace/TerminalSurface").then((module) => ({ default: module.TerminalSurface })));
 
 initializeTheme();
 
+const searchParams = new URLSearchParams(window.location.search);
 const isQuickCapture = Boolean(window.__TAURI_INTERNALS__)
-  && new URLSearchParams(window.location.search).get("quick-capture") === "1";
+  && searchParams.get("quick-capture") === "1";
+const surface = searchParams.get("surface") || "main";
 
 if (isQuickCapture) {
   document.body.classList.add("quick-capture-window");
+} else if (surface === "tab-bar") {
+  document.body.classList.add("tab-bar-window");
+} else if (surface === "terminal") {
+  document.body.classList.add("terminal-window");
 }
 
 function RootErrorFallback({ error, reset }) {
@@ -38,10 +49,31 @@ function RootErrorFallback({ error, reset }) {
   );
 }
 
+const surfaceElement = isQuickCapture ? <QuickCapture /> : surface === "tab-bar" ? (
+  <>
+    <WorkspaceShortcuts />
+    <TabBar />
+  </>
+) : surface === "terminal" ? (
+  <>
+    <WorkspaceShortcuts />
+    <TerminalSurface tabId={searchParams.get("tab") || ""} />
+  </>
+) : (
+  <>
+    <WorkspaceShortcuts />
+    <App />
+  </>
+);
+
+const content = (
+  <ErrorBoundary fallback={({ error, reset }) => <RootErrorFallback error={error} reset={reset} />}>
+    <Suspense fallback={null}>{surfaceElement}</Suspense>
+  </ErrorBoundary>
+);
+
 ReactDOM.createRoot(document.getElementById("root")).render(
-  <React.StrictMode>
-    <ErrorBoundary fallback={({ error, reset }) => <RootErrorFallback error={error} reset={reset} />}>
-      {isQuickCapture ? <QuickCapture /> : <App />}
-    </ErrorBoundary>
-  </React.StrictMode>,
+  surface === "main" || isQuickCapture ? (
+    <React.StrictMode>{content}</React.StrictMode>
+  ) : content,
 );

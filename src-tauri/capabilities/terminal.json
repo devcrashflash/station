@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "terminal",
+  "description": "Allow isolated terminal webviews to use terminal IPC and external links.",
+  "webviews": ["terminal-*"],
+  "permissions": [
+    "core:default",
+    "opener:default"
+  ]
+}

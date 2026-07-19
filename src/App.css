@@ -142,6 +142,250 @@ body.quick-capture-window #root {
   background: transparent;
 }
 
+body.tab-bar-window,
+body.tab-bar-window #root,
+body.terminal-window,
+body.terminal-window #root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.tab-bar {
+  display: flex;
+  width: 100%;
+  height: 25px;
+  overflow: hidden;
+  border-top: 1px solid var(--border);
+  background: var(--sidebar);
+  color: var(--sidebar-foreground);
+  font: 11px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  user-select: none;
+}
+
+.tab-bar-items {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: stretch;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tab-bar-items::-webkit-scrollbar {
+  display: none;
+}
+
+.workspace-tab,
+.workspace-tab-add {
+  height: 24px;
+  flex: none;
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.workspace-tab {
+  display: flex;
+  width: min(180px, 28vw);
+  min-width: 82px;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px 0 0;
+}
+
+.workspace-tab-main {
+  width: 5rem;
+  min-width: 5rem;
+  background: color-mix(in oklch, var(--sidebar-accent) 45%, transparent);
+}
+
+.workspace-tab-main .workspace-tab-title {
+  font-weight: 600;
+}
+
+.workspace-tab:hover,
+.workspace-tab-add:hover {
+  background: color-mix(in oklch, var(--sidebar-accent) 75%, transparent);
+}
+
+.workspace-tab-active {
+  background: var(--background);
+  box-shadow: inset 0 2px 0 var(--primary);
+  color: var(--foreground);
+}
+
+.workspace-tab-main.workspace-tab-active {
+  background: color-mix(in oklch, var(--sidebar-accent) 72%, var(--background));
+}
+
+.workspace-tab-exited .workspace-tab-title {
+  opacity: 0.58;
+}
+
+.workspace-tab-title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-tab-shortcut {
+  flex: none;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.72;
+}
+
+.workspace-tab-select {
+  display: flex;
+  min-width: 0;
+  height: 100%;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  padding: 0 3px 0 8px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.workspace-tab-close {
+  display: grid;
+  width: 15px;
+  height: 15px;
+  flex: none;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 14px;
+}
+
+.workspace-tab-close:hover {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.workspace-tab-add {
+  width: 28px;
+  font-size: 17px;
+}
+
+.terminal-surface {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--background);
+}
+
+.terminal-pane {
+  position: absolute;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  opacity: var(--inactive-pane-opacity, 0.65);
+  outline: 1px solid transparent;
+  outline-offset: -1px;
+  transition: opacity 120ms ease-out;
+}
+
+.terminal-pane-focused {
+  opacity: 1;
+  outline-color: color-mix(in srgb, var(--primary) 55%, transparent);
+}
+
+.terminal-divider {
+  position: absolute;
+  z-index: 2;
+  touch-action: none;
+  background: var(--border);
+}
+
+.terminal-divider:hover,
+.terminal-divider:active {
+  background: var(--primary);
+}
+
+.terminal-divider-columns {
+  width: 5px;
+  transform: translateX(-2.5px);
+  cursor: col-resize;
+}
+
+.terminal-divider-rows {
+  height: 5px;
+  transform: translateY(-2.5px);
+  cursor: row-resize;
+}
+
+.terminal-host {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  padding: 6px 7px;
+}
+
+/*
+ * Safari/WebKit 26.2–26.3 can leak color-font paint state into later DOM
+ * content. xterm.js uses a DOM renderer and terminal output can contain
+ * fallback glyphs (for example powerline symbols), so isolate its paint
+ * layers until the WebKit fix available in 26.4 is ubiquitous.
+ */
+.terminal-host .xterm,
+.terminal-host .xterm-rows > div {
+  isolation: isolate;
+}
+
+.terminal-host .xterm {
+  height: 100%;
+}
+
+.terminal-exit-banner {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 24px);
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--card-foreground);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 14%);
+  font-size: 12px;
+}
+
+.terminal-exit-banner span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-exit-banner button {
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font: inherit;
+}
+
 @layer components {
   .review-diff {
     padding-block: 0.75rem;

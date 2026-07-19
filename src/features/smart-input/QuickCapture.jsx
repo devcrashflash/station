@@ -3,7 +3,6 @@ import { emit } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { CheckCircle2, LoaderCircle, Plus, Sparkles } from "lucide-react";
 
-import "@/App.css";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
 import { Textarea } from "@/components/ui/textarea";

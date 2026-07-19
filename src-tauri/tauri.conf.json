@@ -13,12 +13,6 @@
     "macOSPrivateApi": true,
     "windows": [
       {
-        "label": "main",
-        "title": "Dev Crash Flash AI Studio",
-        "width": 1400,
-        "height": 900
-      },
-      {
         "label": "quick-capture",
         "title": "Quick Capture",
         "url": "index.html?quick-capture=1",

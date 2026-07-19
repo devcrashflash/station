@@ -23,6 +23,7 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Modifiers, Shortcut, Short
 use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication, NSWorkspace};
 
 mod calendar;
+mod terminal_tabs;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static GOOGLE_OAUTH_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -1053,6 +1054,9 @@ pub fn run() {
             let db_path = app_dir.join("studio.sqlite");
             let db = SqliteConnection::open(&db_path)?;
             init_database(&db)?;
+            terminal_tabs::init_terminal_schema(&db)?;
+            let terminal_tabs_state =
+                terminal_tabs::initialize_state(&db).map_err(std::io::Error::other)?;
 
             #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
             let quick_capture_shortcut = {
@@ -1084,6 +1088,10 @@ pub fn run() {
                 quick_capture_shortcut: Mutex::new(quick_capture_shortcut),
                 quick_capture_previous_app_pid: Mutex::new(None),
             });
+            app.manage(terminal_tabs_state);
+            #[cfg(target_os = "macos")]
+            install_workspace_menu(app)?;
+            terminal_tabs::setup_workspace_window(app)?;
             #[cfg(not(target_os = "macos"))]
             let app_handle = app.handle().clone();
             #[cfg(not(target_os = "macos"))]
@@ -1100,6 +1108,25 @@ pub fn run() {
             quick_capture_shortcut_settings,
             save_quick_capture_shortcut,
             hide_quick_capture,
+            terminal_tabs::list_workspace_tabs,
+            terminal_tabs::list_terminal_settings,
+            terminal_tabs::save_terminal_settings,
+            terminal_tabs::get_terminal_layout,
+            terminal_tabs::create_terminal_tab,
+            terminal_tabs::activate_tab,
+            terminal_tabs::reorder_tabs,
+            terminal_tabs::close_terminal_tab,
+            terminal_tabs::close_terminal_pane,
+            terminal_tabs::close_active_terminal_pane,
+            terminal_tabs::split_active_terminal,
+            terminal_tabs::focus_terminal_pane,
+            terminal_tabs::resize_terminal_split,
+            terminal_tabs::restart_terminal,
+            terminal_tabs::terminal_attach,
+            terminal_tabs::terminal_write,
+            terminal_tabs::terminal_resize,
+            terminal_tabs::terminal_set_title,
+            terminal_tabs::terminal_set_cwd,
             list_projects,
             create_project,
             update_project,
@@ -1180,6 +1207,66 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(target_os = "macos")]
+const CLOSE_TAB_MENU_ID: &str = "workspace_close_tab";
+
+#[cfg(target_os = "macos")]
+fn install_workspace_menu(app: &mut tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItemBuilder, MenuItemKind};
+
+    let menu = Menu::default(app.handle())?;
+    let close_tab = MenuItemBuilder::with_id(CLOSE_TAB_MENU_ID, "Close Tab")
+        .accelerator("CmdOrCtrl+W")
+        .build(app.handle())?;
+
+    for item in menu.items()? {
+        let MenuItemKind::Submenu(submenu) = item else {
+            continue;
+        };
+        let is_file_menu = submenu.text()?.replace('&', "") == "File";
+        let items = submenu.items()?;
+        let mut first_close_position = None;
+        for (position, child) in items.iter().enumerate().rev() {
+            let MenuItemKind::Predefined(predefined) = child else {
+                continue;
+            };
+            if predefined.text()?.replace('&', "") == "Close Window" {
+                first_close_position = Some(position);
+                submenu.remove_at(position)?;
+            }
+        }
+        if is_file_menu {
+            submenu.insert(&close_tab, first_close_position.unwrap_or(0))?;
+        }
+    }
+
+    app.set_menu(menu)?;
+    app.on_menu_event(|app, event| {
+        if event.id() == CLOSE_TAB_MENU_ID {
+            let workspace_is_focused = app
+                .get_window("main")
+                .and_then(|window| window.is_focused().ok())
+                .unwrap_or(false);
+            if workspace_is_focused {
+                if let Err(error) = terminal_tabs::close_active_terminal(app) {
+                    eprintln!("Could not close active terminal tab: {error}");
+                }
+                return;
+            }
+
+            for window in app.windows().into_values() {
+                if window.is_focused().unwrap_or(false) {
+                    if let Err(error) = window.close() {
+                        eprintln!("Could not close focused window: {error}");
+                    }
+                    break;
+                }
+            }
+        }
+    });
+    Ok(())
 }
 
 fn db_error(error: impl std::fmt::Display) -> String {

@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "tab-bar",
+  "description": "Allow the isolated workspace tab bar to receive tab events.",
+  "webviews": ["tab-bar"],
+  "permissions": [
+    "core:default"
+  ]
+}

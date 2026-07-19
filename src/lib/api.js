@@ -34,10 +34,16 @@ const defaultState = {
     detectedBrowserBundleId: null,
     browserBundleId: null,
   },
+  terminalSettings: {
+    newTabDirectory: null,
+    newPaneDirectory: null,
+    inactivePaneOpacity: 0.65,
+    closeTerminalsOnAppExit: false,
+    profileDirectory: "~",
+  },
 };
 
 export const api = {
-  openBlankBrowserTab: () => call("open_blank_browser_tab", {}, () => null),
   quickCaptureShortcutSettings: () => call("quick_capture_shortcut_settings", {}, () => ({
     shortcut: "CommandOrControl+Shift+Space",
     defaultShortcut: "CommandOrControl+Shift+Space",
@@ -57,6 +63,9 @@ export const api = {
   listBrowserSettings: () => call("list_browser_settings", {}, local.listBrowserSettings),
   saveBrowserSettings: (payload) =>
     call("save_browser_settings", { input: payload }, () => local.saveBrowserSettings(payload)),
+  listTerminalSettings: () => call("list_terminal_settings", {}, local.listTerminalSettings),
+  saveTerminalSettings: (payload) =>
+    call("save_terminal_settings", { input: payload }, () => local.saveTerminalSettings(payload)),
   listProjects: () => call("list_projects", {}, local.listProjects),
   createProject: (payload) => call("create_project", payload, () => local.createProject(payload)),
   updateProject: (payload) => call("update_project", payload, () => local.updateProject(payload)),
@@ -256,6 +265,7 @@ function freshDefaultState() {
     calendarEvents: [],
     calendarSyncRuns: [],
     browserSettings: { ...defaultState.browserSettings },
+    terminalSettings: { ...defaultState.terminalSettings },
   };
 }
 
@@ -695,6 +705,28 @@ function localCalendarResult(state, { date, startAt, endAt }) {
 }
 
 const local = {
+  listTerminalSettings() {
+    return { ...defaultState.terminalSettings, ...readState().terminalSettings };
+  },
+
+  saveTerminalSettings(input) {
+    const state = readState();
+    const requestedOpacity = Number(input.inactivePaneOpacity);
+    state.terminalSettings = {
+      newTabDirectory: input.newTabDirectory?.trim() || null,
+      newPaneDirectory: input.newPaneDirectory?.trim() || null,
+      inactivePaneOpacity: Number.isFinite(requestedOpacity)
+        ? Math.min(0.95, Math.max(0.2, requestedOpacity))
+        : 0.65,
+      closeTerminalsOnAppExit: input.closeTerminalsOnAppExit
+        ?? state.terminalSettings?.closeTerminalsOnAppExit
+        ?? false,
+      profileDirectory: state.terminalSettings?.profileDirectory || "~",
+    };
+    writeState(state);
+    return state.terminalSettings;
+  },
+
   listBrowserSettings() {
     return {
       detectedBrowserBundleId: null,

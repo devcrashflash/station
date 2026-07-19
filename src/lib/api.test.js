@@ -146,6 +146,41 @@ test("local fallback migrates legacy AI Agents into AI Prompts", async () => {
   assert.equal(JSON.parse(stored).aiAgents, undefined);
 });
 
+test("local fallback stores terminal directory overrides and restores defaults", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => { stored = value; },
+  };
+
+  assert.deepEqual(await api.listTerminalSettings(), {
+    newTabDirectory: null,
+    newPaneDirectory: null,
+    inactivePaneOpacity: 0.65,
+    closeTerminalsOnAppExit: false,
+    profileDirectory: "~",
+  });
+  assert.deepEqual(await api.saveTerminalSettings({
+    newTabDirectory: " /projects/app ",
+    newPaneDirectory: " /projects/tests ",
+    inactivePaneOpacity: 0.5,
+    closeTerminalsOnAppExit: true,
+  }), {
+    newTabDirectory: "/projects/app",
+    newPaneDirectory: "/projects/tests",
+    inactivePaneOpacity: 0.5,
+    closeTerminalsOnAppExit: true,
+    profileDirectory: "~",
+  });
+  assert.deepEqual(await api.saveTerminalSettings({ newTabDirectory: "", newPaneDirectory: "", inactivePaneOpacity: 0.65, closeTerminalsOnAppExit: false }), {
+    newTabDirectory: null,
+    newPaneDirectory: null,
+    inactivePaneOpacity: 0.65,
+    closeTerminalsOnAppExit: false,
+    profileDirectory: "~",
+  });
+});
+
 test("normalizes base urls without a scheme", () => {
   assert.equal(normalizeBaseUrl("gitlab.example.org"), "https://gitlab.example.org");
   assert.equal(normalizeBaseUrl("https://gitlab.example.org/"), "https://gitlab.example.org");

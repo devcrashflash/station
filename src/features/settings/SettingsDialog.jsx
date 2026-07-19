@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AtSign, Bot, CalendarDays, FolderOpen, GitMerge, GitPullRequest, Keyboard, LoaderCircle, Monitor, Palette, Pencil, PlugZap, RefreshCw, RotateCcw, SquareKanban, Trash2, UserRound } from "lucide-react";
+import { AtSign, Bot, CalendarDays, FolderOpen, GitMerge, GitPullRequest, Keyboard, LoaderCircle, Monitor, Palette, Pencil, PlugZap, RefreshCw, RotateCcw, SquareKanban, SquareTerminal, Trash2, UserRound } from "lucide-react";
 
 import { EmptyState } from "@/components/common/EmptyState";
 import { Modal } from "@/components/common/Modal";
@@ -64,6 +64,7 @@ const settingsSections = [
   { id: "directories", label: "Directories", description: "Local source folders", icon: FolderOpen },
   { id: "shortcuts", label: "Shortcuts", description: "Global quick capture", icon: Keyboard },
   { id: "appearance", label: "Appearance", description: "Color theme", icon: Palette },
+  { id: "terminal", label: "Terminal", description: "Start directories", icon: SquareTerminal },
   { id: "browser", label: "Browser", description: "New tab behavior", icon: Monitor },
 ];
 
@@ -94,6 +95,7 @@ export function SettingsDialog({
   aiPrompts,
   directories,
   browserSettings,
+  terminalSettings,
   quickCaptureShortcutSettings,
   themePreference = "system",
   calendarAccounts = [],
@@ -108,6 +110,7 @@ export function SettingsDialog({
   onSaveDirectory,
   onDeleteDirectory,
   onSaveBrowserSettings,
+  onSaveTerminalSettings,
   onSaveQuickCaptureShortcut,
   onThemePreferenceChange,
   onSaveCalendarSubscription,
@@ -358,6 +361,14 @@ export function SettingsDialog({
                     setBrowserNotice(error?.message || String(error));
                   }
                 }}
+              />
+            )}
+
+            {activeTab === "terminal" && (
+              <TerminalTab
+                settings={terminalSettings}
+                onChooseDirectory={onChooseDirectory}
+                onSave={onSaveTerminalSettings}
               />
             )}
 
@@ -884,6 +895,135 @@ function BrowserTab({
         <Button type="button" variant="outline" onClick={onReset}>
           <RotateCcw className="size-4" />
           Use system default
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function TerminalTab({ settings, onChooseDirectory, onSave }) {
+  const [newTabDirectory, setNewTabDirectory] = useState(settings?.newTabDirectory || "");
+  const [newPaneDirectory, setNewPaneDirectory] = useState(settings?.newPaneDirectory || "");
+  const [inactivePaneOpacity, setInactivePaneOpacity] = useState(settings?.inactivePaneOpacity ?? 0.65);
+  const [closeTerminalsOnAppExit, setCloseTerminalsOnAppExit] = useState(settings?.closeTerminalsOnAppExit ?? false);
+  const [notice, setNotice] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
+  const [choosingFor, setChoosingFor] = useState(null);
+
+  useEffect(() => {
+    setNewTabDirectory(settings?.newTabDirectory || "");
+    setNewPaneDirectory(settings?.newPaneDirectory || "");
+    setInactivePaneOpacity(settings?.inactivePaneOpacity ?? 0.65);
+    setCloseTerminalsOnAppExit(settings?.closeTerminalsOnAppExit ?? false);
+  }, [settings?.newTabDirectory, settings?.newPaneDirectory, settings?.inactivePaneOpacity, settings?.closeTerminalsOnAppExit]);
+
+  async function choose(setValue, target) {
+    setChoosingFor(target);
+    setNotice("");
+    try {
+      const path = await onChooseDirectory();
+      if (path) setValue(path);
+    } catch (error) {
+      setNotice(error?.message || String(error));
+    } finally {
+      setChoosingFor(null);
+    }
+  }
+
+  async function save() {
+    setIsSaving(true);
+    setNotice("");
+    try {
+      await onSave({ newTabDirectory, newPaneDirectory, inactivePaneOpacity, closeTerminalsOnAppExit });
+      setNotice("Terminal settings saved.");
+    } catch (error) {
+      setNotice(error?.message || String(error));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <div className="grid gap-5">
+      <div className="grid gap-1">
+        <p className="text-sm font-medium">Terminal start directories</p>
+        <p className="text-xs text-muted-foreground">
+          These defaults apply when creating new terminal tabs and panes. Existing terminals keep their current directory.
+        </p>
+      </div>
+
+      <Field>
+        <FieldLabel>New tabs</FieldLabel>
+        <div className="flex gap-2">
+          <Input
+            value={newTabDirectory}
+            placeholder={settings?.profileDirectory || "~"}
+            onChange={(event) => setNewTabDirectory(event.target.value)}
+          />
+          <Button type="button" variant="outline" disabled={choosingFor !== null} onClick={() => choose(setNewTabDirectory, "tab")}>
+            {choosingFor === "tab" ? <LoaderCircle className="animate-spin" /> : <FolderOpen />}
+            Choose
+          </Button>
+        </div>
+        <p className="text-xs text-muted-foreground">Leave empty to start in the profile directory (~).</p>
+      </Field>
+
+      <Field>
+        <FieldLabel>New panes</FieldLabel>
+        <div className="flex gap-2">
+          <Input
+            value={newPaneDirectory}
+            placeholder="Current directory"
+            onChange={(event) => setNewPaneDirectory(event.target.value)}
+          />
+          <Button type="button" variant="outline" disabled={choosingFor !== null} onClick={() => choose(setNewPaneDirectory, "pane")}>
+            {choosingFor === "pane" ? <LoaderCircle className="animate-spin" /> : <FolderOpen />}
+            Choose
+          </Button>
+        </div>
+        <p className="text-xs text-muted-foreground">Leave empty to inherit the focused pane's current directory.</p>
+      </Field>
+
+      <Field>
+        <div className="flex items-center justify-between gap-3">
+          <FieldLabel>Inactive pane opacity</FieldLabel>
+          <span className="text-xs tabular-nums text-muted-foreground">{Math.round(inactivePaneOpacity * 100)}%</span>
+        </div>
+        <input
+          type="range"
+          min="0.2"
+          max="0.95"
+          step="0.05"
+          value={inactivePaneOpacity}
+          className="w-full accent-primary"
+          onChange={(event) => setInactivePaneOpacity(Number(event.target.value))}
+        />
+        <p className="text-xs text-muted-foreground">Controls how strongly terminal panes without focus are dimmed.</p>
+      </Field>
+
+      <label className="flex items-start gap-3 rounded-md border bg-muted/20 p-3">
+        <Checkbox
+          checked={closeTerminalsOnAppExit}
+          onCheckedChange={(checked) => setCloseTerminalsOnAppExit(checked === true)}
+        />
+        <div>
+          <p className="text-sm font-medium">Close terminal tabs when quitting</p>
+          <p className="text-xs text-muted-foreground">
+            Discard saved terminal tabs and pane layouts so every app launch starts on Main with no terminals.
+          </p>
+        </div>
+      </label>
+
+      {notice && <p className="text-sm text-muted-foreground">{notice}</p>}
+
+      <div className="flex flex-wrap gap-2">
+        <Button type="button" disabled={isSaving} onClick={save}>
+          {isSaving && <LoaderCircle className="animate-spin" />}
+          Save terminal
+        </Button>
+        <Button type="button" variant="outline" onClick={() => { setNewTabDirectory(""); setNewPaneDirectory(""); setInactivePaneOpacity(0.65); setCloseTerminalsOnAppExit(false); }}>
+          <RotateCcw className="size-4" />
+          Restore defaults
         </Button>
       </div>
     </div>
