@@ -38,6 +38,22 @@ const defaultState = {
 
 export const api = {
   openBlankBrowserTab: () => call("open_blank_browser_tab", {}, () => null),
+  quickCaptureShortcutSettings: () => call("quick_capture_shortcut_settings", {}, () => ({
+    shortcut: "CommandOrControl+Shift+Space",
+    defaultShortcut: "CommandOrControl+Shift+Space",
+    supported: false,
+    registered: false,
+    error: null,
+  })),
+  saveQuickCaptureShortcut: (payload) => call("save_quick_capture_shortcut", { input: payload }, () => ({
+    shortcut: "CommandOrControl+Shift+Space",
+    defaultShortcut: "CommandOrControl+Shift+Space",
+    supported: false,
+    registered: false,
+    error: "Global shortcuts require the desktop app.",
+  })),
+  hideQuickCapture: ({ restoreFocus = false } = {}) =>
+    call("hide_quick_capture", { restoreFocus }, () => null),
   listBrowserSettings: () => call("list_browser_settings", {}, local.listBrowserSettings),
   saveBrowserSettings: (payload) =>
     call("save_browser_settings", { input: payload }, () => local.saveBrowserSettings(payload)),

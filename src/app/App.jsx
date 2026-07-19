@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { LoaderCircle } from "lucide-react";
 
 import "@/App.css";
@@ -26,6 +27,7 @@ import {
   UNSUPPORTED_OCR_FILE_MESSAGE,
 } from "@/lib/ocr";
 import { DEFAULT_PROJECT_COLOR } from "@/lib/projectAvatar";
+import { quickCaptureTitle } from "@/lib/quickCapture";
 import { parseSmartInput } from "@/lib/smartInputParser";
 import { useTheme } from "@/lib/theme";
 import { InboxView } from "@/views/inbox/InboxView";
@@ -47,10 +49,6 @@ function upsertProject(projects, project) {
 
 function fileDropName(fileDrop) {
   return fileDrop?.name || fileDrop?.file?.name || fileDrop?.path?.split(/[\\/]/).filter(Boolean).at(-1) || "file";
-}
-
-function titleFromRawInput(input) {
-  return String(input || "").split(/\r?\n/).find((line) => line.trim())?.trim() || "Untitled todo";
 }
 
 function filePathFromTodo(todo) {
@@ -134,6 +132,13 @@ function App() {
     detectedBrowserBundleId: null,
     browserBundleId: null,
   });
+  const [quickCaptureShortcutSettings, setQuickCaptureShortcutSettings] = useState({
+    shortcut: "CommandOrControl+Shift+Space",
+    defaultShortcut: "CommandOrControl+Shift+Space",
+    supported: false,
+    registered: false,
+    error: null,
+  });
   const [recentDirectoryFiles, setRecentDirectoryFiles] = useState([]);
   const [smartInboxTodos, setSmartInboxTodos] = useState([]);
   const [editingSmartInboxTodo, setEditingSmartInboxTodo] = useState(null);
@@ -199,6 +204,36 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!isDesktopApp()) return undefined;
+
+    let active = true;
+    let unlisten = null;
+    listen("smart-inbox-updated", async () => {
+        try {
+          const todos = await api.listSmartInboxTodos();
+          if (active) setSmartInboxTodos(todos);
+        } catch (error) {
+          if (active) showNotice(error?.message || String(error));
+        }
+      })
+      .then((cleanup) => {
+        if (!active) {
+          cleanup();
+        } else {
+          unlisten = cleanup;
+        }
+      })
+      .catch((error) => {
+        if (active) showNotice(error?.message || String(error));
+      });
+
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [showNotice]);
+
+  useEffect(() => {
     function handleKeyDown(event) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
@@ -231,13 +266,14 @@ function App() {
   }, [selectedProjectId]);
 
   async function refreshShell() {
-    const [projectList, connectionList, calendarAccountList, aiPromptList, directoryList, browserSettingsResult, recentFileList, todoList] = await Promise.all([
+    const [projectList, connectionList, calendarAccountList, aiPromptList, directoryList, browserSettingsResult, shortcutSettingsResult, recentFileList, todoList] = await Promise.all([
       api.listProjects(),
       api.listConnections(),
       api.listCalendarAccounts(),
       api.listAiPrompts(),
       api.listDirectories(),
       api.listBrowserSettings(),
+      api.quickCaptureShortcutSettings(),
       api.listRecentDirectoryFiles(),
       api.listSmartInboxTodos(),
     ]);
@@ -247,6 +283,8 @@ function App() {
     setAiPrompts(aiPromptList);
     setDirectories(directoryList);
     setBrowserSettings(browserSettingsResult);
+    setQuickCaptureShortcutSettings(shortcutSettingsResult);
+    if (shortcutSettingsResult.error) showNotice(shortcutSettingsResult.error);
     setRecentDirectoryFiles(recentFileList);
     setSmartInboxTodos(todoList);
     await api.listTasks({ projectId: selectedProjectId }).then(setTasks);
@@ -326,7 +364,7 @@ function App() {
   async function captureSmartInboxText(input) {
     await api.createSmartInboxTodo({
       kind: "text",
-      title: titleFromRawInput(input),
+      title: quickCaptureTitle(input),
       rawText: input,
       filePath: null,
       fileName: null,
@@ -887,6 +925,7 @@ function App() {
           aiPrompts={aiPrompts}
           directories={directories}
           browserSettings={browserSettings}
+          quickCaptureShortcutSettings={quickCaptureShortcutSettings}
           themePreference={themePreference}
           calendarAccounts={calendarAccounts}
           initialSection={settingsInitialSection}
@@ -958,6 +997,12 @@ function App() {
             const nextBrowserSettings = await api.saveBrowserSettings(payload);
             setBrowserSettings(nextBrowserSettings);
             showNotice("Browser settings saved.");
+          }}
+          onSaveQuickCaptureShortcut={async (payload) => {
+            const settings = await api.saveQuickCaptureShortcut(payload);
+            setQuickCaptureShortcutSettings(settings);
+            showNotice("Quick capture shortcut saved.");
+            return settings;
           }}
           onSaveCalendarSubscription={async (payload) => {
             const account = await api.saveCalendarSubscription(payload);

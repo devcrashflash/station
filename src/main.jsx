@@ -2,9 +2,17 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./app/App";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
+import { QuickCapture } from "./features/smart-input/QuickCapture";
 import { initializeTheme } from "./lib/theme";
 
 initializeTheme();
+
+const isQuickCapture = Boolean(window.__TAURI_INTERNALS__)
+  && new URLSearchParams(window.location.search).get("quick-capture") === "1";
+
+if (isQuickCapture) {
+  document.body.classList.add("quick-capture-window");
+}
 
 function RootErrorFallback({ error, reset }) {
   return (
@@ -33,7 +41,7 @@ function RootErrorFallback({ error, reset }) {
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
     <ErrorBoundary fallback={({ error, reset }) => <RootErrorFallback error={error} reset={reset} />}>
-      <App />
+      {isQuickCapture ? <QuickCapture /> : <App />}
     </ErrorBoundary>
   </React.StrictMode>,
 );

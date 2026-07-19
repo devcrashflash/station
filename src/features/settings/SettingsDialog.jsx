@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AtSign, Bot, CalendarDays, FolderOpen, GitMerge, GitPullRequest, LoaderCircle, Monitor, Palette, Pencil, PlugZap, RefreshCw, RotateCcw, SquareKanban, Trash2, UserRound } from "lucide-react";
+import { AtSign, Bot, CalendarDays, FolderOpen, GitMerge, GitPullRequest, Keyboard, LoaderCircle, Monitor, Palette, Pencil, PlugZap, RefreshCw, RotateCcw, SquareKanban, Trash2, UserRound } from "lucide-react";
 
 import { EmptyState } from "@/components/common/EmptyState";
 import { Modal } from "@/components/common/Modal";
@@ -9,8 +9,10 @@ import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { Kbd } from "@/components/ui/kbd";
 import { Textarea } from "@/components/ui/textarea";
 import { aiPromptIconFor, aiPromptIconOptions } from "@/lib/aiPromptIcons";
+import { formatShortcut, shortcutFromKeyboardEvent } from "@/lib/keyboardShortcut";
 import { cn } from "@/lib/utils";
 
 const providerOptions = [
@@ -60,6 +62,7 @@ const settingsSections = [
   { id: "accounts", label: "Accounts", description: "Connected services", icon: UserRound },
   { id: "ai-prompts", label: "AI Prompts", description: "Reusable AI instructions", icon: Bot },
   { id: "directories", label: "Directories", description: "Local source folders", icon: FolderOpen },
+  { id: "shortcuts", label: "Shortcuts", description: "Global quick capture", icon: Keyboard },
   { id: "appearance", label: "Appearance", description: "Color theme", icon: Palette },
   { id: "browser", label: "Browser", description: "New tab behavior", icon: Monitor },
 ];
@@ -91,6 +94,7 @@ export function SettingsDialog({
   aiPrompts,
   directories,
   browserSettings,
+  quickCaptureShortcutSettings,
   themePreference = "system",
   calendarAccounts = [],
   initialSection = "accounts",
@@ -104,6 +108,7 @@ export function SettingsDialog({
   onSaveDirectory,
   onDeleteDirectory,
   onSaveBrowserSettings,
+  onSaveQuickCaptureShortcut,
   onThemePreferenceChange,
   onSaveCalendarSubscription,
   onSaveCalDavAccount,
@@ -356,6 +361,13 @@ export function SettingsDialog({
               />
             )}
 
+            {activeTab === "shortcuts" && (
+              <ShortcutsTab
+                settings={quickCaptureShortcutSettings}
+                onSave={onSaveQuickCaptureShortcut}
+              />
+            )}
+
             {activeTab === "appearance" && (
               <AppearanceTab
                 themePreference={themePreference}
@@ -366,6 +378,140 @@ export function SettingsDialog({
         </main>
       </div>
     </Modal>
+  );
+}
+
+function ShortcutsTab({ settings, onSave }) {
+  const [candidate, setCandidate] = useState(settings?.shortcut || "CommandOrControl+Shift+Space");
+  const [isRecording, setIsRecording] = useState(false);
+  const [notice, setNotice] = useState(settings?.error || "");
+  const [noticeIsError, setNoticeIsError] = useState(Boolean(settings?.error));
+  const [isSaving, setIsSaving] = useState(false);
+  const supported = settings?.supported === true;
+
+  useEffect(() => {
+    setCandidate(settings?.shortcut || settings?.defaultShortcut || "CommandOrControl+Shift+Space");
+    setNotice(settings?.error || "");
+    setNoticeIsError(Boolean(settings?.error));
+  }, [settings]);
+
+  function handleRecorderKeyDown(event) {
+    if (!isRecording) return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    const result = shortcutFromKeyboardEvent(event);
+    if (result.status === "cancel") {
+      setIsRecording(false);
+      setNotice("Recording cancelled.");
+      setNoticeIsError(false);
+      return;
+    }
+    if (result.status === "recording") {
+      setNotice("Press a non-modifier key to finish the shortcut.");
+      setNoticeIsError(false);
+      return;
+    }
+    if (result.status === "error") {
+      setNotice(result.error);
+      setNoticeIsError(true);
+      return;
+    }
+
+    setCandidate(result.shortcut);
+    setIsRecording(false);
+    setNotice("Shortcut recorded. Save to activate it.");
+    setNoticeIsError(false);
+  }
+
+  async function save(shortcut) {
+    setIsSaving(true);
+    setNotice("");
+    setNoticeIsError(false);
+    try {
+      const nextSettings = await onSave({ shortcut });
+      setCandidate(nextSettings.shortcut);
+      setNotice(shortcut === null ? "Default shortcut restored." : "Shortcut saved and active.");
+      setNoticeIsError(false);
+    } catch (error) {
+      setNotice(error?.message || String(error));
+      setNoticeIsError(true);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <div className="grid gap-5">
+      <div className="grid gap-1">
+        <p className="text-sm font-medium">Quick capture overlay</p>
+        <p className="text-xs text-muted-foreground">
+          Open the capture overlay from any application while Studio is running.
+        </p>
+      </div>
+
+      {!supported ? (
+        <p className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
+          Global shortcut configuration requires the desktop app.
+        </p>
+      ) : (
+        <>
+          <div className="grid gap-3 rounded-lg border p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="grid gap-1">
+                <span className="text-xs text-muted-foreground">Current shortcut</span>
+                <div className="flex items-center gap-2">
+                  <Kbd className="h-7 px-2 text-sm">{formatShortcut(settings.shortcut)}</Kbd>
+                  <Badge variant={settings.registered ? "secondary" : "destructive"}>
+                    {settings.registered ? "Active" : "Unavailable"}
+                  </Badge>
+                </div>
+              </div>
+              <div className="grid justify-items-end gap-1">
+                <span className="text-xs text-muted-foreground">New shortcut</span>
+                <Kbd className="h-7 px-2 text-sm">{formatShortcut(candidate)}</Kbd>
+              </div>
+            </div>
+
+            <Button
+              type="button"
+              variant={isRecording ? "secondary" : "outline"}
+              disabled={isSaving}
+              onClick={() => {
+                setIsRecording(true);
+                setNotice("Press the new shortcut. Escape cancels.");
+                setNoticeIsError(false);
+              }}
+              onKeyDown={handleRecorderKeyDown}
+              onBlur={() => setIsRecording(false)}
+            >
+              <Keyboard />
+              {isRecording ? "Press shortcut…" : "Record shortcut"}
+            </Button>
+          </div>
+
+          <p className="text-xs text-muted-foreground">
+            Include Command, Control, Option, or Alt with another key. Shift can be added as an extra modifier.
+          </p>
+          {notice && (
+            <p className={cn("text-sm text-muted-foreground", noticeIsError && "text-destructive")} role="status">
+              {notice}
+            </p>
+          )}
+
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" disabled={isSaving || isRecording} onClick={() => save(candidate)}>
+              {isSaving && <LoaderCircle className="animate-spin" />}
+              Save shortcut
+            </Button>
+            <Button type="button" variant="outline" disabled={isSaving || isRecording} onClick={() => save(null)}>
+              <RotateCcw />
+              Restore default
+            </Button>
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 

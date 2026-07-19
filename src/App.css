@@ -137,6 +137,11 @@
     }
 }
 
+body.quick-capture-window,
+body.quick-capture-window #root {
+  background: transparent;
+}
+
 @layer components {
   .review-diff {
     padding-block: 0.75rem;
