@@ -20,21 +20,38 @@ export function QuickCapture() {
   useEffect(() => {
     const currentWindow = getCurrentWindow();
     let active = true;
-    let unlisten = null;
+    const unlisteners = [];
+
+    function handleFocusChanged(focused) {
+      if (focused) {
+        const focusInput = () => inputRef.current?.focus({ preventScroll: true });
+        window.requestAnimationFrame(focusInput);
+        window.setTimeout(focusInput, 50);
+      } else {
+        setValue("");
+        setError("");
+      }
+    }
 
     currentWindow.onFocusChanged(({ payload: focused }) => {
-      if (focused) {
-        window.requestAnimationFrame(() => inputRef.current?.focus());
-      } else {
-        api.hideQuickCapture({ restoreFocus: false }).catch((hideError) => {
-          if (active) setError(hideError?.message || String(hideError));
-        });
-      }
+      handleFocusChanged(focused);
     }).then((cleanup) => {
       if (!active) {
         cleanup();
       } else {
-        unlisten = cleanup;
+        unlisteners.push(cleanup);
+      }
+    }).catch((focusError) => {
+      if (active) setError(focusError?.message || String(focusError));
+    });
+
+    currentWindow.listen("quick-capture-focus-changed", ({ payload: focused }) => {
+      handleFocusChanged(Boolean(focused));
+    }).then((cleanup) => {
+      if (!active) {
+        cleanup();
+      } else {
+        unlisteners.push(cleanup);
       }
     }).catch((focusError) => {
       if (active) setError(focusError?.message || String(focusError));
@@ -43,7 +60,7 @@ export function QuickCapture() {
     inputRef.current?.focus();
     return () => {
       active = false;
-      unlisten?.();
+      unlisteners.forEach((cleanup) => cleanup());
     };
   }, []);
 

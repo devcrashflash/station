@@ -13,6 +13,8 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
+#[cfg(target_os = "macos")]
+use tauri::Emitter;
 use tauri::Manager;
 use tauri_plugin_opener::OpenerExt;
 
@@ -20,7 +22,9 @@ use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 #[cfg(target_os = "macos")]
-use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication, NSWorkspace};
+use objc2_app_kit::NSScreen;
+#[cfg(target_os = "macos")]
+use tauri_nspanel::{tauri_panel, ManagerExt as PanelManagerExt, StyleMask, WebviewWindowExt};
 
 mod calendar;
 mod terminal_tabs;
@@ -38,6 +42,22 @@ const OCR_DETECTION_MODEL_URL: &str =
     "https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.rten";
 const OCR_RECOGNITION_MODEL_URL: &str =
     "https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten";
+
+#[cfg(target_os = "macos")]
+tauri_panel! {
+    panel!(QuickCapturePanel {
+        config: {
+            can_become_key_window: true,
+            can_become_main_window: false,
+            is_floating_panel: true
+        }
+    })
+
+    panel_event!(QuickCapturePanelEventHandler {
+        window_did_become_key(notification: &NSNotification) -> (),
+        window_did_resign_key(notification: &NSNotification) -> ()
+    })
+}
 
 #[cfg(target_os = "macos")]
 fn macos_extract_launch_services_bundle_id(entry: &str) -> Option<String> {
@@ -148,7 +168,6 @@ struct AppState {
     db_path: PathBuf,
     ocr_engine: Mutex<Option<ocrs::OcrEngine>>,
     quick_capture_shortcut: Mutex<QuickCaptureShortcutRuntime>,
-    quick_capture_previous_app_pid: Mutex<Option<i32>>,
 }
 
 #[derive(Debug, Clone)]
@@ -194,7 +213,21 @@ fn quick_capture_shortcut_settings(
     Ok(quick_capture_shortcut_settings_from_runtime(&runtime))
 }
 
-#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+fn centered_origin(
+    work_x: f64,
+    work_y: f64,
+    work_width: f64,
+    work_height: f64,
+    window_width: f64,
+    window_height: f64,
+) -> (f64, f64) {
+    (
+        work_x + (work_width - window_width).max(0.0) / 2.0,
+        work_y + (work_height - window_height).max(0.0) / 2.0,
+    )
+}
+
+#[cfg(all(any(windows, target_os = "linux"), not(target_os = "macos")))]
 fn center_quick_capture_on_cursor_monitor(
     app: &tauri::AppHandle,
     window: &tauri::WebviewWindow,
@@ -210,74 +243,106 @@ fn center_quick_capture_on_cursor_monitor(
 
     let window_size = window.outer_size().map_err(|error| error.to_string())?;
     let work_area = monitor.work_area();
-    let x_offset = work_area.size.width.saturating_sub(window_size.width) / 2;
-    let y_offset = work_area.size.height.saturating_sub(window_size.height) / 2;
+    let (x, y) = centered_origin(
+        f64::from(work_area.position.x),
+        f64::from(work_area.position.y),
+        f64::from(work_area.size.width),
+        f64::from(work_area.size.height),
+        f64::from(window_size.width),
+        f64::from(window_size.height),
+    );
     window
         .set_position(tauri::PhysicalPosition::new(
-            work_area.position.x + x_offset as i32,
-            work_area.position.y + y_offset as i32,
+            x.round() as i32,
+            y.round() as i32,
         ))
         .map_err(|error| error.to_string())
 }
 
 #[cfg(target_os = "macos")]
-fn frontmost_application_pid() -> Option<i32> {
-    let application = NSWorkspace::sharedWorkspace().frontmostApplication()?;
-    let pid = application.processIdentifier();
-    (pid > 0).then_some(pid)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn frontmost_application_pid() -> Option<i32> {
-    None
-}
-
-#[cfg(target_os = "macos")]
-fn activate_application(pid: i32) -> bool {
-    if let Some(application) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
-        return application.activateWithOptions(NSApplicationActivationOptions::empty());
-    }
-
-    false
-}
-
-#[cfg(not(target_os = "macos"))]
-fn activate_application(_pid: i32) -> bool {
-    false
+fn center_quick_capture_on_focused_monitor(
+    panel: &tauri_nspanel::PanelHandle<tauri::Wry>,
+) -> Result<(), String> {
+    let mtm = objc2::MainThreadMarker::new()
+        .ok_or_else(|| "Quick capture must be positioned on the main thread.".to_string())?;
+    let Some(screen) = NSScreen::mainScreen(mtm) else {
+        return Ok(());
+    };
+    let work_area = screen.visibleFrame();
+    let window_frame = panel.as_panel().frame();
+    let (x, y) = centered_origin(
+        work_area.origin.x,
+        work_area.origin.y,
+        work_area.size.width,
+        work_area.size.height,
+        window_frame.size.width,
+        window_frame.size.height,
+    );
+    panel
+        .as_panel()
+        .setFrameOrigin(objc2_foundation::NSPoint::new(x, y));
+    Ok(())
 }
 
 fn hide_quick_capture_window(app: &tauri::AppHandle, restore_focus: bool) -> Result<(), String> {
+    // A non-activating NSPanel leaves the previous application active, so macOS
+    // restores keyboard input naturally when the panel is hidden.
+    let _ = restore_focus;
+
+    #[cfg(target_os = "macos")]
+    {
+        let panel = app
+            .get_webview_panel("quick-capture")
+            .map_err(|_| "Quick capture panel is unavailable.".to_string())?;
+        panel.hide();
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "macos"))]
     let window = app
         .get_webview_window("quick-capture")
         .ok_or_else(|| "Quick capture window is unavailable.".to_string())?;
-
-    if restore_focus {
-        let state = app.state::<AppState>();
-        let previous_app_pid = {
-            let mut previous_app_pid = state
-                .quick_capture_previous_app_pid
-                .lock()
-                .map_err(db_error)?;
-            previous_app_pid.take()
-        };
-        if let Some(pid) = previous_app_pid {
-            if activate_application(pid) {
-                // Keep the always-on-top launcher visible while macOS completes the
-                // focus handoff, so the Studio window cannot flash underneath it.
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-        }
-    }
-
-    window.hide().map_err(|error| error.to_string())
+    #[cfg(not(target_os = "macos"))]
+    return window.hide().map_err(|error| error.to_string());
 }
 
 #[tauri::command]
 fn hide_quick_capture(app: tauri::AppHandle, restore_focus: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = restore_focus;
+        let panel = app
+            .get_webview_panel("quick-capture")
+            .map_err(|_| "Quick capture panel is unavailable.".to_string())?;
+        return app
+            .run_on_main_thread(move || panel.hide())
+            .map_err(|error| error.to_string());
+    }
+
+    #[cfg(not(target_os = "macos"))]
     hide_quick_capture_window(&app, restore_focus)
 }
 
-#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn toggle_quick_capture(app: &tauri::AppHandle) -> Result<(), String> {
+    let panel = app
+        .get_webview_panel("quick-capture")
+        .map_err(|_| "Quick capture panel is unavailable.".to_string())?;
+
+    if panel.is_visible() {
+        return hide_quick_capture_window(app, true);
+    }
+
+    center_quick_capture_on_focused_monitor(&panel)?;
+    panel.show_and_make_key();
+    app.get_webview("quick-capture")
+        .ok_or_else(|| "Quick capture webview is unavailable.".to_string())?
+        .set_focus()
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[cfg(any(windows, target_os = "linux"))]
 fn toggle_quick_capture(app: &tauri::AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("quick-capture")
@@ -287,14 +352,67 @@ fn toggle_quick_capture(app: &tauri::AppHandle) -> Result<(), String> {
         return hide_quick_capture_window(app, true);
     }
 
-    let state = app.state::<AppState>();
-    *state
-        .quick_capture_previous_app_pid
-        .lock()
-        .map_err(db_error)? = frontmost_application_pid();
     center_quick_capture_on_cursor_monitor(app, &window)?;
     window.show().map_err(|error| error.to_string())?;
     window.set_focus().map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn setup_quick_capture_panel(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let window = app
+        .get_webview_window("quick-capture")
+        .ok_or_else(|| std::io::Error::other("Quick capture window is unavailable."))?;
+    let panel = window.to_panel::<QuickCapturePanel>()?;
+    panel.set_style_mask(StyleMask::empty().nonactivating_panel().value());
+    panel.set_floating_panel(true);
+    panel.set_becomes_key_only_if_needed(false);
+    panel.set_hides_on_deactivate(false);
+
+    let handler = QuickCapturePanelEventHandler::new();
+    let focus_app_handle = app.handle().clone();
+    handler.window_did_become_key(move |_| {
+        if let Some(webview) = focus_app_handle.get_webview("quick-capture") {
+            if let Err(error) = webview.set_focus() {
+                eprintln!("Could not focus quick capture webview: {error}");
+            }
+        }
+        if let Err(error) =
+            focus_app_handle.emit_to("quick-capture", "quick-capture-focus-changed", true)
+        {
+            eprintln!("Could not notify quick capture about focus: {error}");
+        }
+    });
+    let blur_app_handle = app.handle().clone();
+    handler.window_did_resign_key(move |_| {
+        if let Err(error) =
+            blur_app_handle.emit_to("quick-capture", "quick-capture-focus-changed", false)
+        {
+            eprintln!("Could not notify quick capture about focus loss: {error}");
+        }
+        if let Ok(panel) = blur_app_handle.get_webview_panel("quick-capture") {
+            panel.hide();
+        }
+    });
+    panel.set_event_handler(Some(handler.as_ref()));
+    Ok(())
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn setup_quick_capture_focus_handler(
+    app: &mut tauri::App,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let window = app
+        .get_webview_window("quick-capture")
+        .ok_or_else(|| std::io::Error::other("Quick capture window is unavailable."))?;
+    let hide_window = window.clone();
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Focused(false)) {
+            if let Err(error) = hide_window.hide() {
+                eprintln!("Could not hide quick capture after focus loss: {error}");
+            }
+        }
+    });
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -1032,7 +1150,11 @@ struct ProviderResourceMetadata {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_nspanel::init());
+
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -1041,6 +1163,18 @@ pub fn run() {
                 tauri_plugin_global_shortcut::Builder::new()
                     .with_handler(|app, _shortcut, event| {
                         if event.state() == ShortcutState::Pressed {
+                            #[cfg(target_os = "macos")]
+                            {
+                                let app_handle = app.clone();
+                                if let Err(error) = app.run_on_main_thread(move || {
+                                    if let Err(error) = toggle_quick_capture(&app_handle) {
+                                        eprintln!("Could not toggle quick capture: {error}");
+                                    }
+                                }) {
+                                    eprintln!("Could not schedule quick capture toggle: {error}");
+                                }
+                            }
+                            #[cfg(any(windows, target_os = "linux"))]
                             if let Err(error) = toggle_quick_capture(app) {
                                 eprintln!("Could not toggle quick capture: {error}");
                             }
@@ -1086,9 +1220,12 @@ pub fn run() {
                 db_path,
                 ocr_engine: Mutex::new(None),
                 quick_capture_shortcut: Mutex::new(quick_capture_shortcut),
-                quick_capture_previous_app_pid: Mutex::new(None),
             });
             app.manage(terminal_tabs_state);
+            #[cfg(target_os = "macos")]
+            setup_quick_capture_panel(app)?;
+            #[cfg(any(windows, target_os = "linux"))]
+            setup_quick_capture_focus_handler(app)?;
             #[cfg(target_os = "macos")]
             install_workspace_menu(app)?;
             terminal_tabs::setup_workspace_window(app)?;
@@ -10576,6 +10713,22 @@ mod tests {
         let db = SqliteConnection::open_in_memory().expect("open in-memory database");
         init_database(&db).expect("initialize database");
         db
+    }
+
+    #[test]
+    fn quick_capture_centers_on_a_secondary_monitor_with_negative_coordinates() {
+        assert_eq!(
+            centered_origin(-1920.0, 24.0, 1920.0, 1056.0, 640.0, 180.0),
+            (-1280.0, 462.0)
+        );
+    }
+
+    #[test]
+    fn quick_capture_uses_work_area_origin_when_window_is_larger() {
+        assert_eq!(
+            centered_origin(-800.0, -200.0, 500.0, 120.0, 640.0, 180.0),
+            (-800.0, -200.0)
+        );
     }
 
     #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
