@@ -5,7 +5,13 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 
-import { clampSplitRatio, flattenPaneLayout, isTerminalClearShortcut, parseOsc7Cwd } from "@/lib/terminalPanes";
+import {
+  clampSplitRatio,
+  flattenPaneLayout,
+  isTerminalClearShortcut,
+  parseOsc7Cwd,
+  terminalPaneDropTarget,
+} from "@/lib/terminalPanes";
 import { terminalCellLetterSpacing } from "@/lib/terminalFonts";
 
 const DARK_TERMINAL_THEME = {
@@ -93,10 +99,25 @@ function measureTerminalCharacterWidth(host, fontFamily, fontWeight, fontStyle, 
   return width;
 }
 
-function TerminalPane({ tabId, pane, focused, titled, bounds, fontFamily, fontWeight, fontStyle, fontSize, lineHeight, horizontalSpacing }) {
+function TerminalPane({
+  tabId,
+  pane,
+  focused,
+  titled,
+  bounds,
+  dragging,
+  onMoveStart,
+  fontFamily,
+  fontWeight,
+  fontStyle,
+  fontSize,
+  lineHeight,
+  horizontalSpacing,
+}) {
   const hostRef = useRef(null);
   const terminalRef = useRef(null);
   const fitRef = useRef(null);
+  const startupReadyTimerRef = useRef(0);
   const [lifecycle, setLifecycle] = useState({ running: true, exitCode: null, error: "" });
 
   const attach = useCallback(async (command = "terminal_attach") => {
@@ -104,7 +125,17 @@ function TerminalPane({ tabId, pane, focused, titled, bounds, fontFamily, fontWe
     const fit = fitRef.current;
     if (!terminal || !fit) return;
     fit.fit();
-    const onOutput = new Channel((payload) => terminal.write(bytesFromChannel(payload)));
+    let receivedOutput = false;
+    const scheduleStartupReady = (delay) => {
+      clearTimeout(startupReadyTimerRef.current);
+      startupReadyTimerRef.current = window.setTimeout(() => {
+        invoke("terminal_surface_ready", { tabId, paneId: pane.paneId }).catch(() => {});
+      }, delay);
+    };
+    const onOutput = new Channel((payload) => {
+      receivedOutput = true;
+      terminal.write(bytesFromChannel(payload), () => scheduleStartupReady(50));
+    });
     const onEvent = new Channel((event) => {
       if (event.type === "exited") {
         setLifecycle({ running: false, exitCode: event.exitCode, error: "" });
@@ -121,6 +152,9 @@ function TerminalPane({ tabId, pane, focused, titled, bounds, fontFamily, fontWe
       onOutput,
       onEvent,
     });
+    // Interactive shells normally print a prompt. Keep a fallback for custom
+    // shells with an empty prompt so a deferred terminal can still activate.
+    if (!receivedOutput) scheduleStartupReady(1000);
   }, [pane.paneId, tabId]);
 
   useEffect(() => {
@@ -179,6 +213,7 @@ function TerminalPane({ tabId, pane, focused, titled, bounds, fontFamily, fontWe
     attach().catch((error) => setLifecycle({ running: false, exitCode: null, error: error?.message || String(error) }));
 
     return () => {
+      clearTimeout(startupReadyTimerRef.current);
       resizeObserver.disconnect();
       dataDisposable.dispose();
       titleDisposable.dispose();
@@ -240,7 +275,7 @@ function TerminalPane({ tabId, pane, focused, titled, bounds, fontFamily, fontWe
 
   return (
     <section
-      className={`terminal-pane ${titled ? "terminal-pane-titled" : ""} ${focused ? "terminal-pane-focused" : ""}`}
+      className={`terminal-pane ${titled ? "terminal-pane-titled" : ""} ${focused ? "terminal-pane-focused" : ""} ${dragging ? "terminal-pane-drag-source" : ""}`}
       onPointerDown={focus}
       data-pane-id={pane.paneId}
       style={{
@@ -251,7 +286,11 @@ function TerminalPane({ tabId, pane, focused, titled, bounds, fontFamily, fontWe
       }}
     >
       {titled && (
-        <div className="terminal-pane-title" title={pane.title}>
+        <div
+          className="terminal-pane-title"
+          title={`${pane.title} — drag to move pane`}
+          onPointerDown={(event) => onMoveStart(event, pane.paneId)}
+        >
           {pane.title}
         </div>
       )}
@@ -342,11 +381,9 @@ function TerminalDivider({ tabId, split, surfaceRef, onPreview }) {
   );
 }
 
-export function TerminalSurface({ tabId }) {
-  const [layout, setLayout] = useState(null);
-  const [ratioOverrides, setRatioOverrides] = useState({});
-  const [inactivePaneOpacity, setInactivePaneOpacity] = useState(0.65);
-  const [typography, setTypography] = useState({
+const DEFAULT_TERMINAL_SETTINGS = {
+  inactivePaneOpacity: 0.65,
+  typography: {
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
     fontFace: null,
     fontWeight: 400,
@@ -354,82 +391,154 @@ export function TerminalSurface({ tabId }) {
     fontSize: 13,
     lineHeight: 100,
     horizontalSpacing: 100,
-  });
+  },
+};
+
+function normalizeTerminalSettings(settings = {}) {
+  return {
+    inactivePaneOpacity: settings.inactivePaneOpacity ?? 0.65,
+    typography: {
+      fontFamily: settings.fontFamily || DEFAULT_TERMINAL_SETTINGS.typography.fontFamily,
+      fontFace: settings.fontFace || null,
+      fontWeight: settings.fontWeight ?? 400,
+      fontStyle: settings.fontStyle || "normal",
+      fontSize: settings.fontSize ?? 13,
+      lineHeight: settings.lineHeight ?? 100,
+      horizontalSpacing: settings.horizontalSpacing ?? 100,
+    },
+  };
+}
+
+function TerminalTabSurface({ tabId, layout, active, inactivePaneOpacity, typography }) {
+  const [ratioOverrides, setRatioOverrides] = useState({});
+  const [paneDrag, setPaneDrag] = useState(null);
   const surfaceRef = useRef(null);
 
-  useEffect(() => {
-    let disposed = false;
-    let unlisten = null;
-    listen("terminal-settings-changed", ({ payload }) => {
-      if (!disposed) {
-        setInactivePaneOpacity(payload.inactivePaneOpacity ?? 0.65);
-        setTypography({
-          fontFamily: payload.fontFamily || "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-          fontFace: payload.fontFace || null,
-          fontWeight: payload.fontWeight ?? 400,
-          fontStyle: payload.fontStyle || "normal",
-          fontSize: payload.fontSize ?? 13,
-          lineHeight: payload.lineHeight ?? 100,
-          horizontalSpacing: payload.horizontalSpacing ?? 100,
-        });
-      }
-    }).then((dispose) => {
-      if (disposed) {
-        dispose();
-        return;
-      }
-      unlisten = dispose;
-      invoke("list_terminal_settings").then((settings) => {
-        if (!disposed) {
-          setInactivePaneOpacity(settings.inactivePaneOpacity ?? 0.65);
-          setTypography({
-            fontFamily: settings.fontFamily || "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-            fontFace: settings.fontFace || null,
-            fontWeight: settings.fontWeight ?? 400,
-            fontStyle: settings.fontStyle || "normal",
-            fontSize: settings.fontSize ?? 13,
-            lineHeight: settings.lineHeight ?? 100,
-            horizontalSpacing: settings.horizontalSpacing ?? 100,
-          });
-        }
-      }).catch(console.error);
-    }).catch(console.error);
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, []);
-
-  useEffect(() => {
-    let disposed = false;
-    let unlisten = null;
-    listen("terminal-layout-changed", ({ payload }) => {
-      if (!disposed && payload.tabId === tabId) setLayout(payload);
-    }).then((dispose) => {
-      if (disposed) {
-        dispose();
-        return;
-      }
-      unlisten = dispose;
-      invoke("get_terminal_layout", { tabId }).then((next) => {
-        if (!disposed) setLayout(next);
-      }).catch(console.error);
-    }).catch(console.error);
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, [tabId]);
-
-  if (!layout) return <main className="terminal-surface" />;
+  if (!layout) {
+    return <main className={`terminal-surface ${active ? "terminal-surface-active" : "terminal-surface-inactive"}`} />;
+  }
 
   const flattened = flattenPaneLayout(layout.root, ratioOverrides);
   const panesAreSplit = flattened.panes.length > 1;
+  const previewPane = paneDrag?.targetPaneId
+    ? flattened.panes.find(({ pane }) => pane.paneId === paneDrag.targetPaneId)
+    : null;
+  let previewBounds = previewPane ? {
+    left: previewPane.left,
+    top: previewPane.top,
+    width: previewPane.width,
+    height: previewPane.height,
+  } : null;
+  if (previewBounds && paneDrag.position === "left") {
+    previewBounds.width /= 2;
+  } else if (previewBounds && paneDrag.position === "right") {
+    previewBounds.left += previewBounds.width / 2;
+    previewBounds.width /= 2;
+  } else if (previewBounds && paneDrag.position === "top") {
+    previewBounds.height /= 2;
+  } else if (previewBounds && paneDrag.position === "bottom") {
+    previewBounds.top += previewBounds.height / 2;
+    previewBounds.height /= 2;
+  }
+
+  function startPaneMove(event, sourcePaneId) {
+    if (event.button !== 0 || !surfaceRef.current) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const pointerId = event.pointerId;
+    const dragHandle = event.currentTarget;
+    let started = false;
+    let currentDrop = null;
+    try {
+      dragHandle.setPointerCapture(pointerId);
+    } catch {
+      // Window-level listeners still provide a fallback when capture is unavailable.
+    }
+
+    function dropAt(pointerEvent) {
+      const surface = surfaceRef.current;
+      if (!surface) return null;
+      const target = Array.from(surface.querySelectorAll(".terminal-pane")).find((element) => {
+        if (element.dataset.paneId === sourcePaneId) return false;
+        const rect = element.getBoundingClientRect();
+        return pointerEvent.clientX >= rect.left
+          && pointerEvent.clientX <= rect.right
+          && pointerEvent.clientY >= rect.top
+          && pointerEvent.clientY <= rect.bottom;
+      });
+      if (!target) return null;
+      return terminalPaneDropTarget(
+        sourcePaneId,
+        target.dataset.paneId,
+        target.getBoundingClientRect(),
+        pointerEvent.clientX,
+        pointerEvent.clientY,
+      );
+    }
+
+    function move(pointerEvent) {
+      if (!started && Math.hypot(pointerEvent.clientX - startX, pointerEvent.clientY - startY) < 5) return;
+      started = true;
+      pointerEvent.preventDefault();
+      currentDrop = dropAt(pointerEvent);
+      setPaneDrag((current) => {
+        const next = { sourcePaneId, ...currentDrop };
+        return current?.sourcePaneId === next.sourcePaneId
+          && current?.targetPaneId === next.targetPaneId
+          && current?.position === next.position
+          ? current
+          : next;
+      });
+    }
+
+    function cleanup() {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", cancel);
+      window.removeEventListener("keydown", keydown, true);
+      try {
+        if (dragHandle.hasPointerCapture(pointerId)) dragHandle.releasePointerCapture(pointerId);
+      } catch {
+        // Pointer capture may already have been released by the browser.
+      }
+      setPaneDrag(null);
+    }
+
+    function finish(pointerEvent) {
+      if (started) currentDrop = dropAt(pointerEvent);
+      cleanup();
+      if (!started || !currentDrop) return;
+      invoke("move_terminal_pane", {
+        tabId,
+        paneId: sourcePaneId,
+        targetPaneId: currentDrop.targetPaneId,
+        position: currentDrop.position,
+      }).catch(console.error);
+    }
+
+    function cancel() {
+      cleanup();
+    }
+
+    function keydown(keyEvent) {
+      if (!started || keyEvent.key !== "Escape") return;
+      keyEvent.preventDefault();
+      keyEvent.stopPropagation();
+      cancel();
+    }
+
+    window.addEventListener("pointermove", move, { passive: false });
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", cancel);
+    window.addEventListener("keydown", keydown, true);
+  }
 
   return (
     <main
       ref={surfaceRef}
-      className="terminal-surface"
+      className={`terminal-surface ${active ? "terminal-surface-active" : "terminal-surface-inactive"} ${paneDrag ? "terminal-surface-pane-dragging" : ""}`}
+      aria-hidden={!active}
       style={{ "--inactive-pane-opacity": inactivePaneOpacity }}
     >
       {flattened.panes.map(({ pane, ...bounds }) => (
@@ -438,11 +547,24 @@ export function TerminalSurface({ tabId }) {
           tabId={tabId}
           pane={pane}
           bounds={bounds}
-          focused={pane.paneId === layout.focusedPaneId}
+          focused={active && pane.paneId === layout.focusedPaneId}
           titled={panesAreSplit}
+          dragging={pane.paneId === paneDrag?.sourcePaneId}
+          onMoveStart={startPaneMove}
           {...typography}
         />
       ))}
+      {previewBounds && (
+        <div
+          className="terminal-pane-drop-preview"
+          style={{
+            left: percent(previewBounds.left),
+            top: percent(previewBounds.top),
+            width: percent(previewBounds.width),
+            height: percent(previewBounds.height),
+          }}
+        />
+      )}
       {flattened.splits.map((split) => (
         <TerminalDivider
           key={split.splitId}
@@ -453,5 +575,98 @@ export function TerminalSurface({ tabId }) {
         />
       ))}
     </main>
+  );
+}
+
+export function TerminalWorkspace() {
+  const [snapshot, setSnapshot] = useState({ tabs: [], activeTabId: "main" });
+  const [layouts, setLayouts] = useState({});
+  const [settings, setSettings] = useState(DEFAULT_TERMINAL_SETTINGS);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten = null;
+    async function subscribe() {
+      unlisten = await listen("workspace-tabs-changed", ({ payload }) => {
+        if (!disposed) setSnapshot(payload);
+      });
+      const next = await invoke("list_workspace_tabs");
+      if (!disposed) setSnapshot(next);
+    }
+    subscribe().catch(console.error);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten = null;
+    listen("terminal-layout-changed", ({ payload }) => {
+      if (!disposed) {
+        setLayouts((current) => ({ ...current, [payload.tabId]: payload }));
+      }
+    }).then((dispose) => {
+      if (disposed) dispose();
+      else unlisten = dispose;
+    }).catch(console.error);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten = null;
+    async function subscribe() {
+      unlisten = await listen("terminal-settings-changed", ({ payload }) => {
+        if (!disposed) setSettings(normalizeTerminalSettings(payload));
+      });
+      const next = await invoke("list_terminal_settings");
+      if (!disposed) setSettings(normalizeTerminalSettings(next));
+    }
+    subscribe().catch(console.error);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const terminalTabs = snapshot.tabs.filter((tab) => tab.kind === "terminal");
+  const terminalTabIds = terminalTabs.map((tab) => tab.id);
+  const terminalTabKey = terminalTabIds.join("\0");
+
+  useEffect(() => {
+    let disposed = false;
+    const activeIds = new Set(terminalTabIds);
+    setLayouts((current) => Object.fromEntries(
+      Object.entries(current).filter(([tabId]) => activeIds.has(tabId)),
+    ));
+    Promise.all(terminalTabIds.map((tabId) => invoke("get_terminal_layout", { tabId })))
+      .then((nextLayouts) => {
+        if (disposed) return;
+        setLayouts((current) => ({
+          ...current,
+          ...Object.fromEntries(nextLayouts.map((layout) => [layout.tabId, layout])),
+        }));
+      })
+      .catch(console.error);
+    return () => { disposed = true; };
+  }, [terminalTabKey]);
+
+  return (
+    <div className="terminal-workspace">
+      {terminalTabs.map((tab) => (
+        <TerminalTabSurface
+          key={tab.id}
+          tabId={tab.id}
+          layout={layouts[tab.id] || null}
+          active={tab.id === snapshot.activeTabId}
+          {...settings}
+        />
+      ))}
+    </div>
   );
 }

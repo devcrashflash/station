@@ -1,7 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { clampSplitRatio, flattenPaneLayout, isTerminalClearShortcut, paneIds, parseOsc7Cwd } from "./terminalPanes.js";
+import {
+  clampSplitRatio,
+  flattenPaneLayout,
+  isTerminalClearShortcut,
+  paneDropPosition,
+  paneIds,
+  parseOsc7Cwd,
+  terminalPaneDropTarget,
+} from "./terminalPanes.js";
 
 test("clamps persisted and dragged split ratios", () => {
   assert.equal(clampSplitRatio(0.5), 0.5);
@@ -55,6 +63,26 @@ test("walks nested pane layouts in visible order", () => {
     [0.5, 0, 0.5, 0.25],
     [0.5, 0.25, 0.5, 0.75],
   ]);
+});
+
+test("chooses a pane drop position from the nearest normalized edge", () => {
+  const bounds = { left: 100, top: 50, width: 400, height: 200 };
+  assert.equal(paneDropPosition(bounds, 110, 150), "left");
+  assert.equal(paneDropPosition(bounds, 490, 150), "right");
+  assert.equal(paneDropPosition(bounds, 300, 55), "top");
+  assert.equal(paneDropPosition(bounds, 300, 245), "bottom");
+  assert.equal(paneDropPosition(bounds, 99, 150), null);
+  assert.equal(paneDropPosition({ ...bounds, width: 0 }, 100, 50), null);
+});
+
+test("rejects terminal pane drops onto the source or outside the target", () => {
+  const bounds = { left: 0, top: 0, width: 100, height: 100 };
+  assert.equal(terminalPaneDropTarget("one", "one", bounds, 5, 50), null);
+  assert.equal(terminalPaneDropTarget("one", "two", bounds, 101, 50), null);
+  assert.deepEqual(terminalPaneDropTarget("one", "two", bounds, 5, 50), {
+    targetPaneId: "two",
+    position: "left",
+  });
 });
 
 test("parses OSC 7 file URLs without accepting other URL forms", () => {

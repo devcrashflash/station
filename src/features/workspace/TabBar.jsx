@@ -96,7 +96,7 @@ export function TabBar() {
           className="workspace-tab-add"
           title="New terminal (Cmd/Ctrl+T)"
           aria-label="New terminal"
-          onClick={() => workspaceTabsApi.createTerminal().then(setSnapshot)}
+          onClick={() => window.dispatchEvent(new Event("workspace-create-terminal"))}
         >
           +
         </button>

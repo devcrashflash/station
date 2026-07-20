@@ -18,7 +18,7 @@ use super::{db_error, get_app_setting, now_millis, set_app_setting, AppState};
 pub const MAIN_TAB_ID: &str = "main";
 const MAIN_WEBVIEW_LABEL: &str = "main-content";
 const TAB_BAR_WEBVIEW_LABEL: &str = "tab-bar";
-const TERMINAL_WEBVIEW_PREFIX: &str = "terminal-";
+const TERMINAL_WEBVIEW_LABEL: &str = "terminal-workspace";
 const TAB_BAR_HEIGHT: f64 = 25.0;
 const DEFAULT_TERMINAL_TITLE: &str = "~";
 const NEW_TAB_DIRECTORY_SETTING_KEY: &str = "terminal_new_tab_directory";
@@ -199,6 +199,8 @@ struct TerminalTabsRuntime {
     tabs: Vec<TerminalTab>,
     active_tab_id: String,
     sessions: HashMap<String, TerminalSession>,
+    pending_input: HashMap<String, Vec<u8>>,
+    startup_input_gates: HashSet<String>,
     next_generation: u64,
 }
 
@@ -318,6 +320,71 @@ impl PaneNode {
                 }
             }
         }
+    }
+
+    fn insert_pane_beside(
+        &mut self,
+        target: &str,
+        split_id: String,
+        axis: SplitAxis,
+        insert_first: bool,
+        pane: PaneNode,
+    ) -> bool {
+        match self {
+            Self::Pane { pane_id, .. } if pane_id == target => {
+                let target_pane = self.clone();
+                let (first, second) = if insert_first {
+                    (pane, target_pane)
+                } else {
+                    (target_pane, pane)
+                };
+                *self = Self::Split {
+                    split_id,
+                    axis,
+                    ratio: 0.5,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                };
+                true
+            }
+            Self::Pane { .. } => false,
+            Self::Split { first, second, .. } => {
+                if first.contains_pane(target) {
+                    first.insert_pane_beside(target, split_id, axis, insert_first, pane)
+                } else {
+                    second.insert_pane_beside(target, split_id, axis, insert_first, pane)
+                }
+            }
+        }
+    }
+
+    fn move_pane(
+        &mut self,
+        source: &str,
+        target: &str,
+        split_id: String,
+        axis: SplitAxis,
+        insert_first: bool,
+    ) -> Result<(), String> {
+        if source == target {
+            return Err("Source and target terminal panes must be different.".to_string());
+        }
+        let pane = self
+            .find_pane(source)
+            .cloned()
+            .ok_or_else(|| "Unknown source terminal pane.".to_string())?;
+        if !self.contains_pane(target) {
+            return Err("Unknown target terminal pane.".to_string());
+        }
+
+        let (next_root, _) = self.clone().remove_pane(source);
+        let mut next_root =
+            next_root.ok_or_else(|| "Cannot move the final terminal pane.".to_string())?;
+        if !next_root.insert_pane_beside(target, split_id, axis, insert_first, pane) {
+            return Err("The target terminal pane no longer exists.".to_string());
+        }
+        *self = next_root;
+        Ok(())
     }
 
     fn remove_pane(self, target: &str) -> (Option<PaneNode>, Option<String>) {
@@ -532,6 +599,8 @@ fn load_runtime(db: &SqliteConnection) -> Result<TerminalTabsRuntime, String> {
         tabs,
         active_tab_id: MAIN_TAB_ID.to_string(),
         sessions: HashMap::new(),
+        pending_input: HashMap::new(),
+        startup_input_gates: HashSet::new(),
         next_generation: 1,
     })
 }
@@ -544,10 +613,6 @@ pub fn initialize_state(db: &SqliteConnection) -> Result<TerminalTabsState, Stri
     Ok(TerminalTabsState {
         runtime: Mutex::new(load_runtime(db)?),
     })
-}
-
-fn terminal_webview_label(tab_id: &str) -> String {
-    format!("{TERMINAL_WEBVIEW_PREFIX}{tab_id}")
 }
 
 fn content_size(window: &Window) -> Result<LogicalSize<f64>, String> {
@@ -595,31 +660,6 @@ fn layout_webviews(window: &Window) -> Result<(), String> {
     Ok(())
 }
 
-fn add_terminal_webview(window: &Window, tab_id: &str) -> Result<(), String> {
-    let label = terminal_webview_label(tab_id);
-    if window
-        .webviews()
-        .iter()
-        .any(|webview| webview.label() == label)
-    {
-        return Ok(());
-    }
-    let size = content_size(window)?;
-    let url = WebviewUrl::App(
-        format!("index.html?surface=terminal&tab={tab_id}")
-            .parse()
-            .map_err(db_error)?,
-    );
-    let webview = window
-        .add_child(
-            tauri::webview::WebviewBuilder::new(label, url),
-            LogicalPosition::new(0.0, 0.0),
-            size,
-        )
-        .map_err(db_error)?;
-    webview.hide().map_err(db_error)
-}
-
 pub fn setup_workspace_window(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let window = tauri::window::WindowBuilder::new(app, "main")
         .title("Dev Crash Flash AI Studio")
@@ -637,27 +677,25 @@ pub fn setup_workspace_window(app: &mut tauri::App) -> Result<(), Box<dyn std::e
     )?;
     window.add_child(
         tauri::webview::WebviewBuilder::new(
+            TERMINAL_WEBVIEW_LABEL,
+            WebviewUrl::App("index.html?surface=terminal".into()),
+        ),
+        LogicalPosition::new(0.0, 0.0),
+        size,
+    )?;
+    window.add_child(
+        tauri::webview::WebviewBuilder::new(
             TAB_BAR_WEBVIEW_LABEL,
             WebviewUrl::App("index.html?surface=tab-bar".into()),
         ),
         LogicalPosition::new(0.0, size.height),
         LogicalSize::new(size.width, TAB_BAR_HEIGHT),
     )?;
-    let (terminal_ids, active_tab_id) = {
+    let active_tab_id = {
         let state = app.state::<TerminalTabsState>();
         let runtime = state.runtime.lock().map_err(db_error)?;
-        (
-            runtime
-                .tabs
-                .iter()
-                .map(|tab| tab.id.clone())
-                .collect::<Vec<_>>(),
-            runtime.active_tab_id.clone(),
-        )
+        runtime.active_tab_id.clone()
     };
-    for tab_id in terminal_ids {
-        add_terminal_webview(&window, &tab_id).map_err(std::io::Error::other)?;
-    }
     apply_active_webview(app.handle(), &active_tab_id).map_err(std::io::Error::other)?;
     layout_webviews(&window).map_err(std::io::Error::other)?;
 
@@ -694,16 +732,14 @@ fn validate_management_caller(webview: &Webview) -> Result<(), String> {
 }
 
 fn management_label_allowed(label: &str) -> bool {
-    label == MAIN_WEBVIEW_LABEL
-        || label == TAB_BAR_WEBVIEW_LABEL
-        || label.starts_with(TERMINAL_WEBVIEW_PREFIX)
+    label == MAIN_WEBVIEW_LABEL || label == TAB_BAR_WEBVIEW_LABEL || label == TERMINAL_WEBVIEW_LABEL
 }
 
-fn validate_terminal_caller(webview: &Webview, tab_id: &str) -> Result<(), String> {
-    if terminal_label_matches(webview.label(), tab_id) {
+fn validate_terminal_caller(webview: &Webview, _tab_id: &str) -> Result<(), String> {
+    if webview.label() == TERMINAL_WEBVIEW_LABEL {
         Ok(())
     } else {
-        Err("Terminal commands must target the calling terminal tab.".to_string())
+        Err("Terminal commands must originate from the terminal workspace.".to_string())
     }
 }
 
@@ -718,10 +754,6 @@ fn validate_pane(runtime: &TerminalTabsRuntime, tab_id: &str, pane_id: &str) -> 
     } else {
         Err("Unknown terminal pane.".to_string())
     }
-}
-
-fn terminal_label_matches(label: &str, tab_id: &str) -> bool {
-    label == terminal_webview_label(tab_id)
 }
 
 fn persist_tabs(app: &tauri::AppHandle, runtime: &TerminalTabsRuntime) -> Result<(), String> {
@@ -745,25 +777,26 @@ fn persist_tabs(app: &tauri::AppHandle, runtime: &TerminalTabsRuntime) -> Result
 
 fn emit_snapshot(app: &tauri::AppHandle, snapshot: &WorkspaceTabsSnapshot) {
     let _ = app.emit_to(TAB_BAR_WEBVIEW_LABEL, "workspace-tabs-changed", snapshot);
+    let _ = app.emit_to(TERMINAL_WEBVIEW_LABEL, "workspace-tabs-changed", snapshot);
 }
 
 fn emit_layout(app: &tauri::AppHandle, layout: &TerminalLayout) {
-    let _ = app.emit_to(
-        terminal_webview_label(&layout.tab_id),
-        "terminal-layout-changed",
-        layout,
-    );
+    let _ = app.emit_to(TERMINAL_WEBVIEW_LABEL, "terminal-layout-changed", layout);
+}
+
+fn active_content_webview_label(tab_id: &str) -> &'static str {
+    if tab_id == MAIN_TAB_ID {
+        MAIN_WEBVIEW_LABEL
+    } else {
+        TERMINAL_WEBVIEW_LABEL
+    }
 }
 
 fn apply_active_webview(app: &tauri::AppHandle, tab_id: &str) -> Result<(), String> {
     let window = app
         .get_window("main")
         .ok_or_else(|| "The main window is unavailable.".to_string())?;
-    let active_label = if tab_id == MAIN_TAB_ID {
-        MAIN_WEBVIEW_LABEL.to_string()
-    } else {
-        terminal_webview_label(tab_id)
-    };
+    let active_label = active_content_webview_label(tab_id);
     for webview in window.webviews() {
         if webview.label() == TAB_BAR_WEBVIEW_LABEL {
             continue;
@@ -808,6 +841,7 @@ pub async fn create_terminal_tab(
     app: tauri::AppHandle,
     webview: Webview,
     state: tauri::State<'_, TerminalTabsState>,
+    defer_input: bool,
 ) -> Result<WorkspaceTabsSnapshot, String> {
     validate_management_caller(&webview)?;
     let new_tab_directory = configured_terminal_directories(&app)?.0;
@@ -819,21 +853,16 @@ pub async fn create_terminal_tab(
             DEFAULT_TERMINAL_TITLE.to_string(),
             new_tab_directory,
         ));
+        if defer_input {
+            runtime.startup_input_gates.insert(tab_id.clone());
+        }
         runtime.active_tab_id = tab_id.clone();
         persist_tabs(&app, &runtime)?;
         (tab_id, snapshot_from_runtime(&runtime))
     };
-    let window = app
-        .get_window("main")
-        .ok_or_else(|| "The main window is unavailable.".to_string())?;
-    if let Err(error) = add_terminal_webview(&window, &tab_id) {
-        let mut runtime = state.runtime.lock().map_err(db_error)?;
-        runtime.tabs.retain(|tab| tab.id != tab_id);
-        runtime.active_tab_id = MAIN_TAB_ID.to_string();
-        let _ = persist_tabs(&app, &runtime);
-        return Err(error);
+    if !defer_input {
+        apply_active_webview(&app, &tab_id)?;
     }
-    apply_active_webview(&app, &tab_id)?;
     emit_snapshot(&app, &snapshot);
     Ok(snapshot)
 }
@@ -935,6 +964,7 @@ fn close_terminal_tab_inner(
             .position(|tab| tab.id == tab_id)
             .ok_or_else(|| "Unknown terminal tab.".to_string())?;
         terminate_tab_sessions(&mut runtime, tab_id);
+        runtime.startup_input_gates.remove(tab_id);
         runtime.tabs.remove(index);
         if runtime.active_tab_id == tab_id {
             runtime.active_tab_id = active_after_close(&runtime.tabs, index);
@@ -945,9 +975,6 @@ fn close_terminal_tab_inner(
             snapshot_from_runtime(&runtime),
         )
     };
-    if let Some(webview) = app.get_webview(&terminal_webview_label(tab_id)) {
-        webview.close().map_err(db_error)?;
-    }
     apply_active_webview(app, &next_active)?;
     emit_snapshot(app, &snapshot);
     Ok(snapshot)
@@ -978,6 +1005,7 @@ fn close_terminal_pane_inner(
     let (layout, snapshot) = {
         let mut runtime = state.runtime.lock().map_err(db_error)?;
         terminate_session(&mut runtime, pane_id);
+        runtime.pending_input.remove(pane_id);
         let tab = runtime
             .tabs
             .iter_mut()
@@ -1081,6 +1109,16 @@ fn parse_split_axis(axis: &str) -> Result<SplitAxis, String> {
         "columns" => Ok(SplitAxis::Columns),
         "rows" => Ok(SplitAxis::Rows),
         _ => Err("Split axis must be columns or rows.".to_string()),
+    }
+}
+
+fn parse_pane_position(position: &str) -> Result<(SplitAxis, bool), String> {
+    match position {
+        "left" => Ok((SplitAxis::Columns, true)),
+        "right" => Ok((SplitAxis::Columns, false)),
+        "top" => Ok((SplitAxis::Rows, true)),
+        "bottom" => Ok((SplitAxis::Rows, false)),
+        _ => Err("Pane position must be left, right, top, or bottom.".to_string()),
     }
 }
 
@@ -1246,6 +1284,42 @@ pub fn resize_terminal_split(
         layout
     };
     emit_layout(&app, &layout);
+    Ok(layout)
+}
+
+#[tauri::command]
+pub fn move_terminal_pane(
+    app: tauri::AppHandle,
+    webview: Webview,
+    state: tauri::State<'_, TerminalTabsState>,
+    tab_id: String,
+    pane_id: String,
+    target_pane_id: String,
+    position: String,
+) -> Result<TerminalLayout, String> {
+    validate_terminal_caller(&webview, &tab_id)?;
+    let (axis, insert_first) = parse_pane_position(&position)?;
+    let (layout, snapshot) = {
+        let mut runtime = state.runtime.lock().map_err(db_error)?;
+        let tab = runtime
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == tab_id)
+            .ok_or_else(|| "Unknown terminal tab.".to_string())?;
+        tab.root.move_pane(
+            &pane_id,
+            &target_pane_id,
+            super::new_id("terminal_split"),
+            axis,
+            insert_first,
+        )?;
+        tab.focused_pane_id = pane_id;
+        let layout = tab.layout();
+        persist_tabs(&app, &runtime)?;
+        (layout, snapshot_from_runtime(&runtime))
+    };
+    emit_layout(&app, &layout);
+    emit_snapshot(&app, &snapshot);
     Ok(layout)
 }
 
@@ -1806,6 +1880,13 @@ fn spawn_terminal_session(
                 killer,
             },
         );
+        if !runtime.startup_input_gates.contains(tab_id) {
+            if let Some(data) = runtime.pending_input.remove(pane_id) {
+                let session = runtime.sessions.get_mut(pane_id).unwrap();
+                session.writer.write_all(&data).map_err(db_error)?;
+                session.writer.flush().map_err(db_error)?;
+            }
+        }
         let tab = runtime
             .tabs
             .iter_mut()
@@ -1956,6 +2037,15 @@ pub fn terminal_write(
     validate_terminal_caller(&webview, &tab_id)?;
     let mut runtime = state.runtime.lock().map_err(db_error)?;
     validate_pane(&runtime, &tab_id, &pane_id)?;
+    if runtime.startup_input_gates.contains(&tab_id) || runtime.pending_input.contains_key(&pane_id)
+    {
+        runtime
+            .pending_input
+            .entry(pane_id)
+            .or_default()
+            .extend_from_slice(data.as_bytes());
+        return Ok(());
+    }
     let session = runtime
         .sessions
         .get_mut(&pane_id)
@@ -1965,6 +2055,74 @@ pub fn terminal_write(
         .write_all(data.as_bytes())
         .map_err(db_error)?;
     session.writer.flush().map_err(db_error)
+}
+
+#[tauri::command]
+pub fn complete_terminal_startup_input(
+    app: tauri::AppHandle,
+    webview: Webview,
+    state: tauri::State<'_, TerminalTabsState>,
+    tab_id: String,
+    data: String,
+) -> Result<(), String> {
+    validate_management_caller(&webview)?;
+    {
+        let mut runtime = state.runtime.lock().map_err(db_error)?;
+        let pane_id = runtime
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .map(|tab| tab.focused_pane_id.clone())
+            .ok_or_else(|| "Unknown terminal tab.".to_string())?;
+        if !runtime.startup_input_gates.remove(&tab_id) {
+            return Err("The terminal tab is not waiting for startup input.".to_string());
+        }
+
+        let mut ordered_input = data.into_bytes();
+        if let Some(suffix) = runtime.pending_input.remove(&pane_id) {
+            ordered_input.extend_from_slice(&suffix);
+        }
+        if let Some(session) = runtime.sessions.get_mut(&pane_id) {
+            if !ordered_input.is_empty() {
+                session.writer.write_all(&ordered_input).map_err(db_error)?;
+                session.writer.flush().map_err(db_error)?;
+            }
+        } else {
+            // Keep an empty entry as a startup marker so input arriving between
+            // this handoff and terminal_attach is still queued instead of lost.
+            runtime.pending_input.insert(pane_id, ordered_input);
+        }
+    }
+    apply_active_webview(&app, &tab_id)
+}
+
+#[tauri::command]
+pub fn terminal_surface_ready(
+    app: tauri::AppHandle,
+    webview: Webview,
+    state: tauri::State<'_, TerminalTabsState>,
+    tab_id: String,
+    pane_id: String,
+) -> Result<(), String> {
+    validate_terminal_caller(&webview, &tab_id)?;
+    let ready = {
+        let runtime = state.runtime.lock().map_err(db_error)?;
+        validate_pane(&runtime, &tab_id, &pane_id)?;
+        runtime.startup_input_gates.contains(&tab_id)
+            && runtime.sessions.contains_key(&pane_id)
+            && runtime
+                .tabs
+                .iter()
+                .any(|tab| tab.id == tab_id && tab.focused_pane_id == pane_id)
+    };
+    if ready {
+        app.emit(
+            "terminal-startup-ready",
+            serde_json::json!({ "tabId": tab_id }),
+        )
+        .map_err(db_error)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2085,6 +2243,8 @@ mod tests {
                 .collect(),
             active_tab_id: active.to_string(),
             sessions: HashMap::new(),
+            pending_input: HashMap::new(),
+            startup_input_gates: HashSet::new(),
             next_generation: 1,
         }
     }
@@ -2098,14 +2258,17 @@ mod tests {
     }
 
     #[test]
-    fn terminal_webview_labels_are_stable_and_scoped() {
-        assert_eq!(terminal_webview_label("tab-42"), "terminal-tab-42");
+    fn terminal_workspace_label_is_stable_and_scoped() {
         assert!(management_label_allowed("main-content"));
         assert!(management_label_allowed("tab-bar"));
-        assert!(management_label_allowed("terminal-tab-42"));
+        assert!(management_label_allowed("terminal-workspace"));
+        assert!(!management_label_allowed("terminal-tab-42"));
         assert!(!management_label_allowed("quick-capture"));
-        assert!(terminal_label_matches("terminal-tab-42", "tab-42"));
-        assert!(!terminal_label_matches("terminal-tab-41", "tab-42"));
+        assert_eq!(active_content_webview_label(MAIN_TAB_ID), "main-content");
+        assert_eq!(
+            active_content_webview_label("terminal-tab-42"),
+            "terminal-workspace"
+        );
     }
 
     #[test]
@@ -2150,6 +2313,120 @@ mod tests {
         let root = root.unwrap();
         assert_eq!(root.pane_count(), 2);
         assert_eq!(focus.as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn moves_panes_to_each_side_of_a_nested_target() {
+        for (position, expected_axis, source_first) in [
+            ("left", SplitAxis::Columns, true),
+            ("right", SplitAxis::Columns, false),
+            ("top", SplitAxis::Rows, true),
+            ("bottom", SplitAxis::Rows, false),
+        ] {
+            let mut root = PaneNode::pane("one", "One", None);
+            root.replace_pane_with_split(
+                "one",
+                "outer".into(),
+                SplitAxis::Columns,
+                PaneNode::pane("two", "Two", None),
+            );
+            root.replace_pane_with_split(
+                "two",
+                "inner".into(),
+                SplitAxis::Rows,
+                PaneNode::pane("three", "Three", None),
+            );
+
+            let (axis, insert_first) = parse_pane_position(position).unwrap();
+            root.move_pane("one", "three", "moved".into(), axis, insert_first)
+                .unwrap();
+
+            assert_eq!(root.pane_count(), 3);
+            let PaneNode::Split { second, .. } = &root else {
+                panic!("the surviving inner split should become the root")
+            };
+            let PaneNode::Split {
+                split_id,
+                axis,
+                ratio,
+                first,
+                second,
+            } = second.as_ref()
+            else {
+                panic!("the source should be inserted beside the target")
+            };
+            assert_eq!(split_id, "moved");
+            assert_eq!(*axis, expected_axis);
+            assert_eq!(*ratio, 0.5);
+            let mut ids = Vec::new();
+            first.pane_ids(&mut ids);
+            second.pane_ids(&mut ids);
+            assert_eq!(
+                ids,
+                if source_first {
+                    vec!["one".to_string(), "three".to_string()]
+                } else {
+                    vec!["three".to_string(), "one".to_string()]
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn moving_a_sibling_can_reverse_the_split_order() {
+        let mut root = PaneNode::pane("one", "One", None);
+        root.replace_pane_with_split(
+            "one",
+            "original".into(),
+            SplitAxis::Columns,
+            PaneNode::pane("two", "Two", None),
+        );
+        root.move_pane("one", "two", "reversed".into(), SplitAxis::Columns, false)
+            .unwrap();
+        let mut ids = Vec::new();
+        root.pane_ids(&mut ids);
+        assert_eq!(ids, vec!["two", "one"]);
+    }
+
+    #[test]
+    fn pane_moves_reject_invalid_sources_and_targets() {
+        let mut root = PaneNode::pane("one", "One", None);
+        root.replace_pane_with_split(
+            "one",
+            "split".into(),
+            SplitAxis::Columns,
+            PaneNode::pane("two", "Two", None),
+        );
+        assert!(root
+            .move_pane("one", "one", "new".into(), SplitAxis::Rows, true)
+            .is_err());
+        assert!(root
+            .move_pane("missing", "two", "new".into(), SplitAxis::Rows, true)
+            .is_err());
+        assert!(root
+            .move_pane("one", "missing", "new".into(), SplitAxis::Rows, true)
+            .is_err());
+        assert!(parse_pane_position("center").is_err());
+    }
+
+    #[test]
+    fn moved_layout_round_trips_through_persistence_json() {
+        let mut tab = TerminalTab::new("tab".into(), "First".into());
+        tab.root.replace_pane_with_split(
+            "tab",
+            "split".into(),
+            SplitAxis::Columns,
+            PaneNode::pane("second", "Second", Some("/tmp".into())),
+        );
+        tab.root
+            .move_pane("tab", "second", "moved".into(), SplitAxis::Rows, false)
+            .unwrap();
+        tab.focused_pane_id = "tab".into();
+        let layout = tab.layout();
+        let restored: TerminalLayout =
+            serde_json::from_str(&serde_json::to_string(&layout).unwrap()).unwrap();
+        assert_eq!(restored, layout);
+        assert_eq!(restored.focused_pane_id, "tab");
     }
 
     #[test]

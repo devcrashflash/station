@@ -8,7 +8,7 @@ import { initializeTheme } from "./lib/theme";
 const App = lazy(() => import("./app/App"));
 const QuickCapture = lazy(() => import("./features/smart-input/QuickCapture").then((module) => ({ default: module.QuickCapture })));
 const TabBar = lazy(() => import("./features/workspace/TabBar").then((module) => ({ default: module.TabBar })));
-const TerminalSurface = lazy(() => import("./features/workspace/TerminalSurface").then((module) => ({ default: module.TerminalSurface })));
+const TerminalWorkspace = lazy(() => import("./features/workspace/TerminalSurface").then((module) => ({ default: module.TerminalWorkspace })));
 
 initializeTheme();
 
@@ -57,7 +57,7 @@ const surfaceElement = isQuickCapture ? <QuickCapture /> : surface === "tab-bar"
 ) : surface === "terminal" ? (
   <>
     <WorkspaceShortcuts />
-    <TerminalSurface tabId={searchParams.get("tab") || ""} />
+    <TerminalWorkspace />
   </>
 ) : (
   <>

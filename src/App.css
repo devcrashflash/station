@@ -281,12 +281,29 @@ body.terminal-window #root {
   font-size: 17px;
 }
 
+.terminal-workspace,
 .terminal-surface {
   position: relative;
   width: 100vw;
   height: 100vh;
   overflow: hidden;
   background: var(--background);
+}
+
+.terminal-surface {
+  position: absolute;
+  inset: 0;
+}
+
+.terminal-surface-active {
+  z-index: 1;
+  visibility: visible;
+}
+
+.terminal-surface-inactive {
+  z-index: 0;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .terminal-pane {
@@ -325,8 +342,28 @@ body.terminal-window #root {
   font: 11px/23px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   text-overflow: ellipsis;
   white-space: nowrap;
-  pointer-events: none;
+  cursor: grab;
+  touch-action: none;
   user-select: none;
+}
+
+.terminal-pane-title:active,
+.terminal-surface-pane-dragging .terminal-pane-title {
+  cursor: grabbing;
+}
+
+.terminal-pane-drag-source {
+  opacity: 1;
+  outline-color: var(--primary);
+}
+
+.terminal-pane-drop-preview {
+  position: absolute;
+  z-index: 3;
+  box-sizing: border-box;
+  border: 2px solid var(--primary);
+  background: color-mix(in srgb, var(--primary) 22%, transparent);
+  pointer-events: none;
 }
 
 .dark .terminal-surface,

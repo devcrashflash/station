@@ -44,6 +44,27 @@ export function flattenPaneLayout(node, ratioOverrides = {}, bounds = { left: 0,
   };
 }
 
+export function paneDropPosition(bounds, clientX, clientY) {
+  if (!bounds || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+  const { left, top, width, height } = bounds;
+  if (![left, top, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null;
+  if (clientX < left || clientX > left + width || clientY < top || clientY > top + height) return null;
+
+  const distances = [
+    ["left", (clientX - left) / width],
+    ["right", (left + width - clientX) / width],
+    ["top", (clientY - top) / height],
+    ["bottom", (top + height - clientY) / height],
+  ];
+  return distances.reduce((nearest, candidate) => candidate[1] < nearest[1] ? candidate : nearest)[0];
+}
+
+export function terminalPaneDropTarget(sourcePaneId, targetPaneId, bounds, clientX, clientY) {
+  if (!sourcePaneId || !targetPaneId || sourcePaneId === targetPaneId) return null;
+  const position = paneDropPosition(bounds, clientX, clientY);
+  return position ? { targetPaneId, position } : null;
+}
+
 export function parseOsc7Cwd(data, platform = globalThis.navigator?.platform || "") {
   try {
     const url = new URL(data);
