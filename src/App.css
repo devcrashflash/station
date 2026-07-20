@@ -308,6 +308,33 @@ body.terminal-window #root {
   outline-color: color-mix(in srgb, var(--primary) 55%, transparent);
 }
 
+.terminal-pane-titled {
+  display: flex;
+  flex-direction: column;
+}
+
+.terminal-pane-title {
+  box-sizing: border-box;
+  height: 24px;
+  flex: none;
+  overflow: hidden;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font: 11px/23px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+}
+
+.dark .terminal-surface,
+.dark .terminal-pane,
+.dark .terminal-host {
+  background: #000;
+}
+
 .terminal-divider {
   position: absolute;
   z-index: 2;
@@ -337,6 +364,12 @@ body.terminal-window #root {
   width: 100%;
   height: 100%;
   padding: 6px 7px;
+}
+
+.terminal-pane-titled .terminal-host {
+  height: auto;
+  min-height: 0;
+  flex: 1;
 }
 
 /*

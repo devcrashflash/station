@@ -5,7 +5,37 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 
-import { clampSplitRatio, flattenPaneLayout, parseOsc7Cwd } from "@/lib/terminalPanes";
+import { clampSplitRatio, flattenPaneLayout, isTerminalClearShortcut, parseOsc7Cwd } from "@/lib/terminalPanes";
+import { terminalCellLetterSpacing } from "@/lib/terminalFonts";
+
+const DARK_TERMINAL_THEME = {
+  background: "#000000",
+  foreground: "#f5f5f5",
+  cursor: "#ffffff",
+  cursorAccent: "#000000",
+  black: "#000000",
+  red: "#bb0000",
+  green: "#00bb00",
+  yellow: "#bbbb00",
+  blue: "#0000bb",
+  magenta: "#bb00bb",
+  cyan: "#00bbbb",
+  white: "#bbbbbb",
+  brightBlack: "#555555",
+  brightRed: "#ff5555",
+  brightGreen: "#55ff55",
+  brightYellow: "#ffff55",
+  brightBlue: "#5555ff",
+  brightMagenta: "#ff55ff",
+  brightCyan: "#55ffff",
+  brightWhite: "#ffffff",
+};
+
+const LIGHT_TERMINAL_THEME = {
+  background: "#fffefa",
+  foreground: "#202124",
+  cursor: "#202124",
+};
 
 function bytesFromChannel(payload) {
   if (payload instanceof ArrayBuffer) return new Uint8Array(payload);
@@ -17,7 +47,53 @@ function percent(value) {
   return `${value * 100}%`;
 }
 
-function TerminalPane({ tabId, pane, focused, bounds, fontFamily, fontSize, lineHeight }) {
+function openTerminalWithConsistentFontMeasurement(terminal, host) {
+  const isWebKit = /AppleWebKit/i.test(navigator.userAgent)
+    && !/(Chrome|Chromium|Edg)/i.test(navigator.userAgent);
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "OffscreenCanvas");
+  if (!isWebKit || !descriptor?.configurable) {
+    terminal.open(host);
+    return;
+  }
+
+  // xterm 6 prefers OffscreenCanvas for cell sizing, but WebKit can resolve a
+  // different local font there than in xterm's DOM renderer. Temporarily hide
+  // the API while xterm opens so its supported DOM measurement fallback is
+  // selected; restore it immediately after the synchronous initialization.
+  try {
+    Object.defineProperty(globalThis, "OffscreenCanvas", {
+      configurable: true,
+      value: undefined,
+      writable: true,
+    });
+    terminal.open(host);
+  } finally {
+    Object.defineProperty(globalThis, "OffscreenCanvas", descriptor);
+  }
+}
+
+function measureTerminalCharacterWidth(host, fontFamily, fontWeight, fontStyle, fontSize) {
+  const probe = document.createElement("span");
+  probe.textContent = "W".repeat(32);
+  Object.assign(probe.style, {
+    position: "absolute",
+    visibility: "hidden",
+    whiteSpace: "pre",
+    letterSpacing: "0",
+    fontFamily,
+    fontWeight: String(fontWeight),
+    fontStyle,
+    fontSize: `${fontSize}px`,
+    fontKerning: "none",
+    fontVariantLigatures: "none",
+  });
+  host.appendChild(probe);
+  const width = probe.getBoundingClientRect().width / 32;
+  probe.remove();
+  return width;
+}
+
+function TerminalPane({ tabId, pane, focused, titled, bounds, fontFamily, fontWeight, fontStyle, fontSize, lineHeight, horizontalSpacing }) {
   const hostRef = useRef(null);
   const terminalRef = useRef(null);
   const fitRef = useRef(null);
@@ -52,18 +128,31 @@ function TerminalPane({ tabId, pane, focused, bounds, fontFamily, fontSize, line
       allowProposedApi: false,
       cursorBlink: true,
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+      fontWeight: 400,
+      fontWeightBold: 700,
       fontSize: 13,
+      minimumContrastRatio: 4.5,
       scrollback: 10_000,
       theme: document.documentElement.classList.contains("dark")
-        ? { background: "#171717", foreground: "#f5f5f5", cursor: "#f5f5f5" }
-        : { background: "#fffefa", foreground: "#202124", cursor: "#202124" },
+        ? DARK_TERMINAL_THEME
+        : LIGHT_TERMINAL_THEME,
     });
     const fit = new FitAddon();
     terminal.loadAddon(fit);
-    terminal.open(hostRef.current);
+    openTerminalWithConsistentFontMeasurement(terminal, hostRef.current);
+    terminal.element.style.fontStyle = "normal";
     terminalRef.current = terminal;
     fitRef.current = fit;
     fit.fit();
+
+    terminal.attachCustomKeyEventHandler((event) => {
+      if (!isTerminalClearShortcut(event)) return true;
+      event.preventDefault();
+      event.stopPropagation();
+      terminal.clear();
+      terminal.focus();
+      return false;
+    });
 
     const dataDisposable = terminal.onData((data) => {
       invoke("terminal_write", { tabId, paneId: pane.paneId, data }).catch(() => {});
@@ -104,17 +193,33 @@ function TerminalPane({ tabId, pane, focused, bounds, fontFamily, fontSize, line
     const terminal = terminalRef.current;
     const fit = fitRef.current;
     if (!terminal || !fit) return;
+    terminal.element.style.fontStyle = fontStyle;
+    hostRef.current.style.fontStyle = fontStyle;
+    // Keep this value identical to the former CSS font-family input path.
+    // WebKit's OffscreenCanvas can measure a different fallback when the
+    // installed family is wrapped in an app-defined alias or extra quoting.
     terminal.options.fontFamily = fontFamily;
+    terminal.options.fontWeight = fontWeight;
+    terminal.options.fontWeightBold = fontWeight < 700 ? 700 : 900;
     terminal.options.fontSize = fontSize;
-    terminal.options.lineHeight = lineHeight;
+    terminal.options.lineHeight = lineHeight / 100;
+    const characterWidth = measureTerminalCharacterWidth(
+      hostRef.current,
+      fontFamily,
+      fontWeight,
+      fontStyle,
+      fontSize,
+    );
+    terminal.options.letterSpacing = terminalCellLetterSpacing(characterWidth, horizontalSpacing);
     fit.fit();
+    terminal.refresh(0, terminal.rows - 1);
     invoke("terminal_resize", {
       tabId,
       paneId: pane.paneId,
       cols: terminal.cols,
       rows: terminal.rows,
     }).catch(() => {});
-  }, [fontFamily, fontSize, lineHeight, pane.paneId, tabId]);
+  }, [fontFamily, fontWeight, fontStyle, fontSize, lineHeight, horizontalSpacing, pane.paneId, tabId]);
 
   useEffect(() => {
     if (focused) terminalRef.current?.focus();
@@ -135,7 +240,7 @@ function TerminalPane({ tabId, pane, focused, bounds, fontFamily, fontSize, line
 
   return (
     <section
-      className={`terminal-pane ${focused ? "terminal-pane-focused" : ""}`}
+      className={`terminal-pane ${titled ? "terminal-pane-titled" : ""} ${focused ? "terminal-pane-focused" : ""}`}
       onPointerDown={focus}
       data-pane-id={pane.paneId}
       style={{
@@ -145,6 +250,11 @@ function TerminalPane({ tabId, pane, focused, bounds, fontFamily, fontSize, line
         height: percent(bounds.height),
       }}
     >
+      {titled && (
+        <div className="terminal-pane-title" title={pane.title}>
+          {pane.title}
+        </div>
+      )}
       <div ref={hostRef} className="terminal-host" />
       {!lifecycle.running && (
         <div className="terminal-exit-banner" role="status">
@@ -238,8 +348,12 @@ export function TerminalSurface({ tabId }) {
   const [inactivePaneOpacity, setInactivePaneOpacity] = useState(0.65);
   const [typography, setTypography] = useState({
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+    fontFace: null,
+    fontWeight: 400,
+    fontStyle: "normal",
     fontSize: 13,
-    lineHeight: 1,
+    lineHeight: 100,
+    horizontalSpacing: 100,
   });
   const surfaceRef = useRef(null);
 
@@ -251,8 +365,12 @@ export function TerminalSurface({ tabId }) {
         setInactivePaneOpacity(payload.inactivePaneOpacity ?? 0.65);
         setTypography({
           fontFamily: payload.fontFamily || "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+          fontFace: payload.fontFace || null,
+          fontWeight: payload.fontWeight ?? 400,
+          fontStyle: payload.fontStyle || "normal",
           fontSize: payload.fontSize ?? 13,
-          lineHeight: payload.lineHeight ?? 1,
+          lineHeight: payload.lineHeight ?? 100,
+          horizontalSpacing: payload.horizontalSpacing ?? 100,
         });
       }
     }).then((dispose) => {
@@ -266,8 +384,12 @@ export function TerminalSurface({ tabId }) {
           setInactivePaneOpacity(settings.inactivePaneOpacity ?? 0.65);
           setTypography({
             fontFamily: settings.fontFamily || "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+            fontFace: settings.fontFace || null,
+            fontWeight: settings.fontWeight ?? 400,
+            fontStyle: settings.fontStyle || "normal",
             fontSize: settings.fontSize ?? 13,
-            lineHeight: settings.lineHeight ?? 1,
+            lineHeight: settings.lineHeight ?? 100,
+            horizontalSpacing: settings.horizontalSpacing ?? 100,
           });
         }
       }).catch(console.error);
@@ -302,6 +424,7 @@ export function TerminalSurface({ tabId }) {
   if (!layout) return <main className="terminal-surface" />;
 
   const flattened = flattenPaneLayout(layout.root, ratioOverrides);
+  const panesAreSplit = flattened.panes.length > 1;
 
   return (
     <main
@@ -316,6 +439,7 @@ export function TerminalSurface({ tabId }) {
           pane={pane}
           bounds={bounds}
           focused={pane.paneId === layout.focusedPaneId}
+          titled={panesAreSplit}
           {...typography}
         />
       ))}

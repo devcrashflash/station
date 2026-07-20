@@ -2,10 +2,10 @@ use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, Pt
 use rusqlite::{params, Connection as SqliteConnection};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, OnceLock},
     thread,
 };
 use tauri::{
@@ -26,13 +26,59 @@ const NEW_PANE_DIRECTORY_SETTING_KEY: &str = "terminal_new_pane_directory";
 const INACTIVE_PANE_OPACITY_SETTING_KEY: &str = "terminal_inactive_pane_opacity";
 const CLOSE_TERMINALS_ON_APP_EXIT_SETTING_KEY: &str = "terminal_close_on_app_exit";
 const FONT_FAMILY_SETTING_KEY: &str = "terminal_font_family";
+const FONT_WEIGHT_SETTING_KEY: &str = "terminal_font_weight";
+const FONT_STYLE_SETTING_KEY: &str = "terminal_font_style";
 const FONT_SIZE_SETTING_KEY: &str = "terminal_font_size";
 const LINE_HEIGHT_SETTING_KEY: &str = "terminal_line_height";
+const HORIZONTAL_SPACING_SETTING_KEY: &str = "terminal_horizontal_spacing";
 const DEFAULT_INACTIVE_PANE_OPACITY: f64 = 0.65;
 const DEFAULT_FONT_FAMILY: &str =
     "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
 const DEFAULT_FONT_SIZE: f64 = 13.0;
-const DEFAULT_LINE_HEIGHT: f64 = 1.0;
+const DEFAULT_LINE_HEIGHT: f64 = 100.0;
+const DEFAULT_HORIZONTAL_SPACING: f64 = 100.0;
+const DEFAULT_FONT_WEIGHT: u16 = 400;
+const DEFAULT_FONT_STYLE: &str = "normal";
+const PREFERRED_FONT_FAMILIES: [&str; 5] = [
+    "SF Mono",
+    "Menlo",
+    "Consolas",
+    "DejaVu Sans Mono",
+    "Liberation Mono",
+];
+
+static TERMINAL_FONT_CATALOG: OnceLock<Vec<TerminalFontFamily>> = OnceLock::new();
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalFontStyle {
+    id: String,
+    label: String,
+    weight: u16,
+    italic: bool,
+    postscript_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalFontFamily {
+    family: String,
+    styles: Vec<TerminalFontStyle>,
+}
+
+#[derive(Debug, Clone)]
+struct FontFaceCandidate {
+    family: String,
+    postscript_name: String,
+    weight: u16,
+    italic: bool,
+    monospaced: bool,
+}
+
+#[cfg(target_os = "macos")]
+const TERMINAL_BASE_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+#[cfg(target_os = "linux")]
+const TERMINAL_BASE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,8 +88,12 @@ pub struct TerminalSettings {
     inactive_pane_opacity: f64,
     close_terminals_on_app_exit: bool,
     font_family: String,
+    font_face: Option<String>,
+    font_weight: u16,
+    font_style: String,
     font_size: f64,
     line_height: f64,
+    horizontal_spacing: f64,
     profile_directory: String,
 }
 
@@ -55,8 +105,11 @@ pub struct TerminalSettingsInput {
     inactive_pane_opacity: Option<f64>,
     close_terminals_on_app_exit: Option<bool>,
     font_family: Option<String>,
+    font_weight: Option<u16>,
+    font_style: Option<String>,
     font_size: Option<f64>,
     line_height: Option<f64>,
+    horizontal_spacing: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1197,6 +1250,30 @@ pub fn resize_terminal_split(
 }
 
 fn configure_terminal_environment(command: &mut CommandBuilder) {
+    // A terminal shell must not inherit command precedence or terminal identity
+    // from whichever terminal or IDE launched the desktop app. Start Unix
+    // shells from a stable system path and let their startup files add user
+    // package managers and tools. Without SHELL, portable-pty resolves the
+    // account's configured login shell from the OS user database.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        command.env("PATH", TERMINAL_BASE_PATH);
+        command.env_remove("SHELL");
+
+        for variable in [
+            "TERM_PROGRAM",
+            "TERM_PROGRAM_VERSION",
+            "TERM_SESSION_ID",
+            "COLORFGBG",
+            "LC_TERMINAL",
+            "LC_TERMINAL_VERSION",
+            "ITERM_SESSION_ID",
+            "ITERM_PROFILE",
+        ] {
+            command.env_remove(variable);
+        }
+    }
+
     // The desktop app can be launched from a non-interactive parent that opts
     // out of color globally. A PTY is interactive, so do not pass those
     // suppression flags through to terminal applications.
@@ -1261,12 +1338,198 @@ fn close_terminals_on_app_exit(db: &SqliteConnection) -> bool {
         .is_some_and(|value| value == "true")
 }
 
-fn terminal_font_family(db: &SqliteConnection) -> String {
-    get_app_setting(db, FONT_FAMILY_SETTING_KEY)
-        .ok()
-        .flatten()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_FONT_FAMILY.to_string())
+fn font_style_label(weight: u16, italic: bool) -> String {
+    let weight_label = match weight {
+        100 => "Thin".to_string(),
+        200 => "Extra Light".to_string(),
+        300 => "Light".to_string(),
+        400 => "Regular".to_string(),
+        500 => "Medium".to_string(),
+        600 => "Semi Bold".to_string(),
+        700 => "Bold".to_string(),
+        800 => "Extra Bold".to_string(),
+        900 => "Black".to_string(),
+        value => format!("Weight {value}"),
+    };
+    if italic {
+        if weight == DEFAULT_FONT_WEIGHT {
+            "Italic".to_string()
+        } else {
+            format!("{weight_label} Italic")
+        }
+    } else {
+        weight_label
+    }
+}
+
+fn font_catalog_from_candidates(
+    candidates: impl IntoIterator<Item = FontFaceCandidate>,
+) -> Vec<TerminalFontFamily> {
+    let mut families: BTreeMap<String, (String, BTreeMap<(u16, bool), TerminalFontStyle>)> =
+        BTreeMap::new();
+    for candidate in candidates {
+        if !candidate.monospaced || candidate.family.trim().is_empty() {
+            continue;
+        }
+        let family = candidate.family.trim().to_string();
+        let weight = candidate.weight.clamp(100, 900);
+        let family_entry = families
+            .entry(family.to_lowercase())
+            .or_insert_with(|| (family, BTreeMap::new()));
+        family_entry
+            .1
+            .entry((weight, candidate.italic))
+            .or_insert_with(|| TerminalFontStyle {
+                id: format!(
+                    "{weight}-{}",
+                    if candidate.italic { "italic" } else { "normal" }
+                ),
+                label: font_style_label(weight, candidate.italic),
+                weight,
+                italic: candidate.italic,
+                postscript_name: candidate.postscript_name,
+            });
+    }
+
+    families
+        .into_values()
+        .map(|(family, styles)| {
+            let mut styles = styles.into_values().collect::<Vec<_>>();
+            styles.sort_by_key(|style| {
+                (
+                    !(style.weight == DEFAULT_FONT_WEIGHT && !style.italic),
+                    style.weight,
+                    style.italic,
+                )
+            });
+            TerminalFontFamily { family, styles }
+        })
+        .collect()
+}
+
+fn load_terminal_font_catalog() -> Vec<TerminalFontFamily> {
+    let mut database = fontdb::Database::new();
+    database.load_system_fonts();
+    font_catalog_from_candidates(database.faces().filter_map(|face| {
+        let family = face.families.first()?.0.clone();
+        Some(FontFaceCandidate {
+            family,
+            postscript_name: face.post_script_name.clone(),
+            weight: face.weight.0,
+            italic: matches!(face.style, fontdb::Style::Italic | fontdb::Style::Oblique),
+            monospaced: face.monospaced,
+        })
+    }))
+}
+
+fn terminal_font_catalog() -> &'static [TerminalFontFamily] {
+    TERMINAL_FONT_CATALOG
+        .get_or_init(load_terminal_font_catalog)
+        .as_slice()
+}
+
+fn catalog_family<'a>(
+    catalog: &'a [TerminalFontFamily],
+    requested: &str,
+) -> Option<&'a TerminalFontFamily> {
+    catalog
+        .iter()
+        .find(|entry| entry.family.eq_ignore_ascii_case(requested.trim()))
+}
+
+fn fallback_font_family(catalog: &[TerminalFontFamily]) -> Option<&TerminalFontFamily> {
+    PREFERRED_FONT_FAMILIES
+        .iter()
+        .find_map(|preferred| catalog_family(catalog, preferred))
+        .or_else(|| catalog.first())
+}
+
+fn resolve_font_selection(
+    catalog: &[TerminalFontFamily],
+    requested_family: Option<&str>,
+    requested_weight: Option<u16>,
+    requested_style: Option<&str>,
+) -> (String, Option<String>, u16, String) {
+    if catalog.is_empty() {
+        return (
+            requested_family
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(DEFAULT_FONT_FAMILY)
+                .to_string(),
+            None,
+            requested_weight
+                .unwrap_or(DEFAULT_FONT_WEIGHT)
+                .clamp(100, 900),
+            if requested_style == Some("italic") {
+                "italic"
+            } else {
+                DEFAULT_FONT_STYLE
+            }
+            .to_string(),
+        );
+    }
+
+    let family = requested_family
+        .into_iter()
+        .flat_map(|value| value.split(','))
+        .map(|value| value.trim().trim_matches(['\'', '"']))
+        .find_map(|candidate| catalog_family(catalog, candidate))
+        .or_else(|| fallback_font_family(catalog))
+        .expect("non-empty font catalog must have a fallback");
+    let requested_italic = requested_style == Some("italic");
+    let style = family
+        .styles
+        .iter()
+        .find(|style| {
+            style.weight == requested_weight.unwrap_or(DEFAULT_FONT_WEIGHT)
+                && style.italic == requested_italic
+        })
+        .or_else(|| {
+            family
+                .styles
+                .iter()
+                .find(|style| style.weight == DEFAULT_FONT_WEIGHT && !style.italic)
+        })
+        .or_else(|| family.styles.first())
+        .expect("font families must contain at least one style");
+    (
+        family.family.clone(),
+        Some(style.postscript_name.clone()),
+        style.weight,
+        if style.italic { "italic" } else { "normal" }.to_string(),
+    )
+}
+
+fn validate_font_selection(
+    catalog: &[TerminalFontFamily],
+    requested_family: &str,
+    requested_weight: u16,
+    requested_style: &str,
+) -> Result<(String, Option<String>, u16, String), String> {
+    if requested_style != "normal" && requested_style != "italic" {
+        return Err("Terminal font style must be normal or italic.".to_string());
+    }
+    let family = catalog_family(catalog, requested_family).ok_or_else(|| {
+        "The selected terminal font is not an installed monospaced font.".to_string()
+    })?;
+    let selected_style = family
+        .styles
+        .iter()
+        .find(|style| {
+            style.weight == requested_weight && style.italic == (requested_style == "italic")
+        })
+        .ok_or_else(|| "The selected terminal font style is not installed.".to_string())?;
+    Ok((
+        family.family.clone(),
+        Some(selected_style.postscript_name.clone()),
+        selected_style.weight,
+        if selected_style.italic {
+            "italic"
+        } else {
+            "normal"
+        }
+        .to_string(),
+    ))
 }
 
 fn terminal_number_setting(
@@ -1285,6 +1548,34 @@ fn terminal_number_setting(
         .unwrap_or(default)
 }
 
+fn terminal_percentage_setting(db: &SqliteConnection, key: &str, default: f64) -> f64 {
+    get_app_setting(db, key)
+        .ok()
+        .flatten()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite())
+        .map(|value| if value <= 2.0 { value * 100.0 } else { value })
+        .map(|value| value.clamp(100.0, 200.0).round())
+        .unwrap_or(default)
+}
+
+fn terminal_line_height(db: &SqliteConnection) -> f64 {
+    terminal_percentage_setting(db, LINE_HEIGHT_SETTING_KEY, DEFAULT_LINE_HEIGHT)
+}
+
+fn terminal_horizontal_spacing(db: &SqliteConnection) -> f64 {
+    terminal_percentage_setting(
+        db,
+        HORIZONTAL_SPACING_SETTING_KEY,
+        DEFAULT_HORIZONTAL_SPACING,
+    )
+}
+
+#[tauri::command]
+pub fn list_terminal_fonts() -> Vec<TerminalFontFamily> {
+    terminal_font_catalog().to_vec()
+}
+
 #[tauri::command]
 pub fn list_terminal_settings(
     app: tauri::AppHandle,
@@ -1292,13 +1583,27 @@ pub fn list_terminal_settings(
 ) -> Result<TerminalSettings, String> {
     let profile_directory = app.path().home_dir().map_err(db_error)?;
     let db = state.db.lock().map_err(db_error)?;
+    let stored_font_family = get_app_setting(&db, FONT_FAMILY_SETTING_KEY).map_err(db_error)?;
+    let stored_font_weight = get_app_setting(&db, FONT_WEIGHT_SETTING_KEY)
+        .map_err(db_error)?
+        .and_then(|value| value.parse::<u16>().ok());
+    let stored_font_style = get_app_setting(&db, FONT_STYLE_SETTING_KEY).map_err(db_error)?;
+    let (font_family, font_face, font_weight, font_style) = resolve_font_selection(
+        terminal_font_catalog(),
+        stored_font_family.as_deref(),
+        stored_font_weight,
+        stored_font_style.as_deref(),
+    );
     Ok(TerminalSettings {
         new_tab_directory: get_app_setting(&db, NEW_TAB_DIRECTORY_SETTING_KEY).map_err(db_error)?,
         new_pane_directory: get_app_setting(&db, NEW_PANE_DIRECTORY_SETTING_KEY)
             .map_err(db_error)?,
         inactive_pane_opacity: inactive_pane_opacity(&db),
         close_terminals_on_app_exit: close_terminals_on_app_exit(&db),
-        font_family: terminal_font_family(&db),
+        font_family,
+        font_face,
+        font_weight,
+        font_style,
         font_size: terminal_number_setting(
             &db,
             FONT_SIZE_SETTING_KEY,
@@ -1306,13 +1611,8 @@ pub fn list_terminal_settings(
             8.0,
             32.0,
         ),
-        line_height: terminal_number_setting(
-            &db,
-            LINE_HEIGHT_SETTING_KEY,
-            DEFAULT_LINE_HEIGHT,
-            1.0,
-            2.0,
-        ),
+        line_height: terminal_line_height(&db),
+        horizontal_spacing: terminal_horizontal_spacing(&db),
         profile_directory: profile_directory.to_string_lossy().into_owned(),
     })
 }
@@ -1333,18 +1633,47 @@ pub fn save_terminal_settings(
         return Err("Inactive pane opacity must be a finite number.".to_string());
     }
     let inactive_pane_opacity = requested_opacity.clamp(0.2, 0.95);
-    let font_family = input
+    let requested_font_family = input
         .font_family
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| DEFAULT_FONT_FAMILY.to_string());
+    let requested_font_weight = input.font_weight.unwrap_or(DEFAULT_FONT_WEIGHT);
+    let requested_font_style = input
+        .font_style
+        .unwrap_or_else(|| DEFAULT_FONT_STYLE.to_string());
+    let (font_family, _font_face, font_weight, font_style) = validate_font_selection(
+        terminal_font_catalog(),
+        &requested_font_family,
+        requested_font_weight,
+        &requested_font_style,
+    )?;
     let requested_font_size = input.font_size.unwrap_or(DEFAULT_FONT_SIZE);
     let requested_line_height = input.line_height.unwrap_or(DEFAULT_LINE_HEIGHT);
-    if !requested_font_size.is_finite() || !requested_line_height.is_finite() {
-        return Err("Terminal font size and line height must be finite numbers.".to_string());
+    let requested_horizontal_spacing = input
+        .horizontal_spacing
+        .unwrap_or(DEFAULT_HORIZONTAL_SPACING);
+    if !requested_font_size.is_finite()
+        || !requested_line_height.is_finite()
+        || !requested_horizontal_spacing.is_finite()
+    {
+        return Err("Terminal font size and spacing must be finite numbers.".to_string());
     }
     let font_size = requested_font_size.clamp(8.0, 32.0);
-    let line_height = requested_line_height.clamp(1.0, 2.0);
+    let line_height = if requested_line_height <= 2.0 {
+        requested_line_height * 100.0
+    } else {
+        requested_line_height
+    }
+    .clamp(100.0, 200.0)
+    .round();
+    let horizontal_spacing = if requested_horizontal_spacing <= 2.0 {
+        requested_horizontal_spacing * 100.0
+    } else {
+        requested_horizontal_spacing
+    }
+    .clamp(100.0, 200.0)
+    .round();
     {
         let db = state.db.lock().map_err(db_error)?;
         let close_terminals_on_app_exit = input
@@ -1380,10 +1709,19 @@ pub fn save_terminal_settings(
         )
         .map_err(db_error)?;
         set_app_setting(&db, FONT_FAMILY_SETTING_KEY, Some(&font_family)).map_err(db_error)?;
+        set_app_setting(&db, FONT_WEIGHT_SETTING_KEY, Some(&font_weight.to_string()))
+            .map_err(db_error)?;
+        set_app_setting(&db, FONT_STYLE_SETTING_KEY, Some(&font_style)).map_err(db_error)?;
         set_app_setting(&db, FONT_SIZE_SETTING_KEY, Some(&font_size.to_string()))
             .map_err(db_error)?;
         set_app_setting(&db, LINE_HEIGHT_SETTING_KEY, Some(&line_height.to_string()))
             .map_err(db_error)?;
+        set_app_setting(
+            &db,
+            HORIZONTAL_SPACING_SETTING_KEY,
+            Some(&horizontal_spacing.to_string()),
+        )
+        .map_err(db_error)?;
     }
     let settings = list_terminal_settings(app.clone(), state)?;
     let _ = app.emit("terminal-settings-changed", &settings);
@@ -1835,9 +2173,30 @@ mod tests {
     }
 
     #[test]
-    fn terminal_environment_advertises_256_colors_and_truecolor() {
+    fn terminal_environment_is_normalized_without_dropping_unrelated_values() {
         let mut command = CommandBuilder::new_default_prog();
+        command.env("PATH", "/parent/terminal/bin:/usr/bin");
+        command.env("SHELL", "/parent/terminal/shell");
+        command.env("SSH_AUTH_SOCK", "/tmp/example-agent.sock");
+        for variable in [
+            "NO_COLOR",
+            "CLICOLOR",
+            "CLICOLOR_FORCE",
+            "FORCE_COLOR",
+            "TERM_PROGRAM",
+            "TERM_PROGRAM_VERSION",
+            "TERM_SESSION_ID",
+            "COLORFGBG",
+            "LC_TERMINAL",
+            "LC_TERMINAL_VERSION",
+            "ITERM_SESSION_ID",
+            "ITERM_PROFILE",
+        ] {
+            command.env(variable, "inherited");
+        }
+
         configure_terminal_environment(&mut command);
+
         assert_eq!(
             command.get_env("TERM"),
             Some(std::ffi::OsStr::new("xterm-256color"))
@@ -1850,6 +2209,43 @@ mod tests {
         assert_eq!(command.get_env("CLICOLOR"), None);
         assert_eq!(command.get_env("CLICOLOR_FORCE"), None);
         assert_eq!(command.get_env("FORCE_COLOR"), None);
+        assert_eq!(
+            command.get_env("SSH_AUTH_SOCK"),
+            Some(std::ffi::OsStr::new("/tmp/example-agent.sock"))
+        );
+
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            assert_eq!(
+                command.get_env("PATH"),
+                Some(std::ffi::OsStr::new(TERMINAL_BASE_PATH))
+            );
+            assert_eq!(command.get_env("SHELL"), None);
+            for variable in [
+                "TERM_PROGRAM",
+                "TERM_PROGRAM_VERSION",
+                "TERM_SESSION_ID",
+                "COLORFGBG",
+                "LC_TERMINAL",
+                "LC_TERMINAL_VERSION",
+                "ITERM_SESSION_ID",
+                "ITERM_PROFILE",
+            ] {
+                assert_eq!(command.get_env(variable), None, "{variable} was preserved");
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                command.get_env("PATH"),
+                Some(std::ffi::OsStr::new("/parent/terminal/bin:/usr/bin"))
+            );
+            assert_eq!(
+                command.get_env("SHELL"),
+                Some(std::ffi::OsStr::new("/parent/terminal/shell"))
+            );
+        }
     }
 
     #[test]
@@ -1907,27 +2303,116 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(terminal_font_family(&db), DEFAULT_FONT_FAMILY);
         assert_eq!(
             terminal_number_setting(&db, FONT_SIZE_SETTING_KEY, DEFAULT_FONT_SIZE, 8.0, 32.0),
             DEFAULT_FONT_SIZE
         );
-        assert_eq!(
-            terminal_number_setting(&db, LINE_HEIGHT_SETTING_KEY, DEFAULT_LINE_HEIGHT, 1.0, 2.0),
-            DEFAULT_LINE_HEIGHT
-        );
+        assert_eq!(terminal_line_height(&db), DEFAULT_LINE_HEIGHT);
+        assert_eq!(terminal_horizontal_spacing(&db), DEFAULT_HORIZONTAL_SPACING);
 
         set_app_setting(&db, FONT_FAMILY_SETTING_KEY, Some("JetBrains Mono")).unwrap();
         set_app_setting(&db, FONT_SIZE_SETTING_KEY, Some("48")).unwrap();
-        set_app_setting(&db, LINE_HEIGHT_SETTING_KEY, Some("0.5")).unwrap();
-        assert_eq!(terminal_font_family(&db), "JetBrains Mono");
+        set_app_setting(&db, LINE_HEIGHT_SETTING_KEY, Some("1.2")).unwrap();
+        set_app_setting(&db, HORIZONTAL_SPACING_SETTING_KEY, Some("1.2")).unwrap();
         assert_eq!(
             terminal_number_setting(&db, FONT_SIZE_SETTING_KEY, DEFAULT_FONT_SIZE, 8.0, 32.0),
             32.0
         );
+        assert_eq!(terminal_line_height(&db), 120.0);
+        assert_eq!(terminal_horizontal_spacing(&db), 120.0);
+        set_app_setting(&db, LINE_HEIGHT_SETTING_KEY, Some("175")).unwrap();
+        assert_eq!(terminal_line_height(&db), 175.0);
+    }
+
+    fn font_candidate(
+        family: &str,
+        weight: u16,
+        italic: bool,
+        monospaced: bool,
+    ) -> FontFaceCandidate {
+        FontFaceCandidate {
+            family: family.to_string(),
+            postscript_name: format!(
+                "{family}-{weight}-{}",
+                if italic { "Italic" } else { "Normal" }
+            ),
+            weight,
+            italic,
+            monospaced,
+        }
+    }
+
+    #[test]
+    fn terminal_font_catalog_filters_groups_deduplicates_and_orders_styles() {
+        let catalog = font_catalog_from_candidates([
+            font_candidate("Proportional", 400, false, false),
+            font_candidate("Example Mono", 100, true, true),
+            font_candidate("Example Mono", 100, false, true),
+            font_candidate("Example Mono", 400, false, true),
+            font_candidate("Example Mono", 400, false, true),
+            font_candidate("Alpha Mono", 700, false, true),
+        ]);
+
+        assert_eq!(catalog.len(), 2);
+        assert_eq!(catalog[0].family, "Alpha Mono");
+        assert_eq!(catalog[1].family, "Example Mono");
+        assert_eq!(catalog[1].styles.len(), 3);
+        assert_eq!(catalog[1].styles[0].label, "Regular");
+        assert_eq!(catalog[1].styles[1].label, "Thin");
+        assert_eq!(catalog[1].styles[2].label, "Thin Italic");
+    }
+
+    #[test]
+    fn terminal_font_selection_migrates_legacy_lists_and_falls_back_safely() {
+        let catalog = font_catalog_from_candidates([
+            font_candidate("Alpha Mono", 300, false, true),
+            font_candidate("Menlo", 400, false, true),
+            font_candidate("Menlo", 700, true, true),
+        ]);
+
         assert_eq!(
-            terminal_number_setting(&db, LINE_HEIGHT_SETTING_KEY, DEFAULT_LINE_HEIGHT, 1.0, 2.0),
-            1.0
+            resolve_font_selection(
+                &catalog,
+                Some("Missing, 'Menlo', monospace"),
+                Some(700),
+                Some("italic"),
+            ),
+            (
+                "Menlo".to_string(),
+                Some("Menlo-700-Italic".to_string()),
+                700,
+                "italic".to_string()
+            )
+        );
+        assert_eq!(
+            resolve_font_selection(&catalog, Some("Removed Mono"), Some(900), Some("normal")),
+            (
+                "Menlo".to_string(),
+                Some("Menlo-400-Normal".to_string()),
+                400,
+                "normal".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn terminal_font_validation_rejects_unavailable_families_and_styles() {
+        let catalog = font_catalog_from_candidates([
+            font_candidate("Example Mono", 400, false, true),
+            font_candidate("Example Mono", 100, true, true),
+        ]);
+
+        assert!(validate_font_selection(&catalog, "Missing", 400, "normal").is_err());
+        assert!(validate_font_selection(&catalog, "Example Mono", 100, "normal").is_err());
+        assert!(validate_font_selection(&catalog, "Example Mono", 100, "oblique").is_err());
+        assert_eq!(
+            validate_font_selection(&catalog, "Example Mono", 100, "italic").unwrap(),
+            (
+                "Example Mono".to_string(),
+                Some("Example Mono-100-Italic".to_string()),
+                100,
+                "italic".to_string(),
+            )
         );
     }
 

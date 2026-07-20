@@ -3,6 +3,16 @@ export function clampSplitRatio(ratio) {
   return Math.min(0.9, Math.max(0.1, ratio));
 }
 
+export function isTerminalClearShortcut(event, platform = globalThis.navigator?.platform || "") {
+  return platform.toLowerCase().startsWith("mac")
+    && event.type === "keydown"
+    && event.metaKey
+    && !event.ctrlKey
+    && !event.altKey
+    && !event.shiftKey
+    && event.key.toLowerCase() === "k";
+}
+
 export function paneIds(node) {
   if (!node) return [];
   if (node.type === "pane") return [node.paneId];

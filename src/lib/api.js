@@ -40,8 +40,12 @@ const defaultState = {
     inactivePaneOpacity: 0.65,
     closeTerminalsOnAppExit: false,
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+    fontFace: null,
+    fontWeight: 400,
+    fontStyle: "normal",
     fontSize: 13,
-    lineHeight: 1,
+    lineHeight: 100,
+    horizontalSpacing: 100,
     profileDirectory: "~",
   },
 };
@@ -67,6 +71,7 @@ export const api = {
   saveBrowserSettings: (payload) =>
     call("save_browser_settings", { input: payload }, () => local.saveBrowserSettings(payload)),
   listTerminalSettings: () => call("list_terminal_settings", {}, local.listTerminalSettings),
+  listTerminalFonts: () => call("list_terminal_fonts", {}, local.listTerminalFonts),
   saveTerminalSettings: (payload) =>
     call("save_terminal_settings", { input: payload }, () => local.saveTerminalSettings(payload)),
   listProjects: () => call("list_projects", {}, local.listProjects),
@@ -708,8 +713,21 @@ function localCalendarResult(state, { date, startAt, endAt }) {
 }
 
 const local = {
+  listTerminalFonts() {
+    return [];
+  },
+
   listTerminalSettings() {
-    return { ...defaultState.terminalSettings, ...readState().terminalSettings };
+    const settings = { ...defaultState.terminalSettings, ...readState().terminalSettings };
+    const storedLineHeight = Number(settings.lineHeight);
+    const storedHorizontalSpacing = Number(settings.horizontalSpacing);
+    settings.lineHeight = Number.isFinite(storedLineHeight)
+      ? Math.round(Math.min(200, Math.max(100, storedLineHeight <= 2 ? storedLineHeight * 100 : storedLineHeight)))
+      : defaultState.terminalSettings.lineHeight;
+    settings.horizontalSpacing = Number.isFinite(storedHorizontalSpacing)
+      ? Math.round(Math.min(200, Math.max(100, storedHorizontalSpacing <= 2 ? storedHorizontalSpacing * 100 : storedHorizontalSpacing)))
+      : defaultState.terminalSettings.horizontalSpacing;
+    return settings;
   },
 
   saveTerminalSettings(input) {
@@ -717,6 +735,8 @@ const local = {
     const requestedOpacity = Number(input.inactivePaneOpacity);
     const requestedFontSize = Number(input.fontSize);
     const requestedLineHeight = Number(input.lineHeight);
+    const requestedHorizontalSpacing = Number(input.horizontalSpacing);
+    const requestedFontWeight = Number(input.fontWeight);
     state.terminalSettings = {
       newTabDirectory: input.newTabDirectory?.trim() || null,
       newPaneDirectory: input.newPaneDirectory?.trim() || null,
@@ -727,12 +747,20 @@ const local = {
         ?? state.terminalSettings?.closeTerminalsOnAppExit
         ?? false,
       fontFamily: input.fontFamily?.trim() || defaultState.terminalSettings.fontFamily,
+      fontFace: null,
+      fontWeight: Number.isFinite(requestedFontWeight)
+        ? Math.min(900, Math.max(100, requestedFontWeight))
+        : defaultState.terminalSettings.fontWeight,
+      fontStyle: input.fontStyle === "italic" ? "italic" : "normal",
       fontSize: Number.isFinite(requestedFontSize)
         ? Math.min(32, Math.max(8, requestedFontSize))
         : defaultState.terminalSettings.fontSize,
       lineHeight: Number.isFinite(requestedLineHeight)
-        ? Math.min(2, Math.max(1, requestedLineHeight))
+        ? Math.round(Math.min(200, Math.max(100, requestedLineHeight <= 2 ? requestedLineHeight * 100 : requestedLineHeight)))
         : defaultState.terminalSettings.lineHeight,
+      horizontalSpacing: Number.isFinite(requestedHorizontalSpacing)
+        ? Math.round(Math.min(200, Math.max(100, requestedHorizontalSpacing <= 2 ? requestedHorizontalSpacing * 100 : requestedHorizontalSpacing)))
+        : defaultState.terminalSettings.horizontalSpacing,
       profileDirectory: state.terminalSettings?.profileDirectory || "~",
     };
     writeState(state);

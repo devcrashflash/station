@@ -137,10 +137,15 @@ function App() {
     inactivePaneOpacity: 0.65,
     closeTerminalsOnAppExit: false,
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+    fontFace: null,
+    fontWeight: 400,
+    fontStyle: "normal",
     fontSize: 13,
-    lineHeight: 1,
+    lineHeight: 100,
+    horizontalSpacing: 100,
     profileDirectory: "~",
   });
+  const [terminalFonts, setTerminalFonts] = useState([]);
   const [quickCaptureShortcutSettings, setQuickCaptureShortcutSettings] = useState({
     shortcut: "CommandOrControl+Shift+Space",
     defaultShortcut: "CommandOrControl+Shift+Space",
@@ -271,7 +276,7 @@ function App() {
   }, [selectedProjectId]);
 
   async function refreshShell() {
-    const [projectList, connectionList, calendarAccountList, aiPromptList, directoryList, browserSettingsResult, terminalSettingsResult, shortcutSettingsResult, recentFileList, todoList] = await Promise.all([
+    const [projectList, connectionList, calendarAccountList, aiPromptList, directoryList, browserSettingsResult, terminalSettingsResult, terminalFontList, shortcutSettingsResult, recentFileList, todoList] = await Promise.all([
       api.listProjects(),
       api.listConnections(),
       api.listCalendarAccounts(),
@@ -279,6 +284,7 @@ function App() {
       api.listDirectories(),
       api.listBrowserSettings(),
       api.listTerminalSettings(),
+      api.listTerminalFonts(),
       api.quickCaptureShortcutSettings(),
       api.listRecentDirectoryFiles(),
       api.listSmartInboxTodos(),
@@ -290,6 +296,7 @@ function App() {
     setDirectories(directoryList);
     setBrowserSettings(browserSettingsResult);
     setTerminalSettings(terminalSettingsResult);
+    setTerminalFonts(terminalFontList);
     setQuickCaptureShortcutSettings(shortcutSettingsResult);
     if (shortcutSettingsResult.error) showNotice(shortcutSettingsResult.error);
     setRecentDirectoryFiles(recentFileList);
@@ -933,6 +940,7 @@ function App() {
           directories={directories}
           browserSettings={browserSettings}
           terminalSettings={terminalSettings}
+          terminalFonts={terminalFonts}
           quickCaptureShortcutSettings={quickCaptureShortcutSettings}
           themePreference={themePreference}
           calendarAccounts={calendarAccounts}

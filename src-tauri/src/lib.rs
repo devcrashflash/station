@@ -1246,6 +1246,7 @@ pub fn run() {
             save_quick_capture_shortcut,
             hide_quick_capture,
             terminal_tabs::list_workspace_tabs,
+            terminal_tabs::list_terminal_fonts,
             terminal_tabs::list_terminal_settings,
             terminal_tabs::save_terminal_settings,
             terminal_tabs::get_terminal_layout,

@@ -1,13 +1,33 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { clampSplitRatio, flattenPaneLayout, paneIds, parseOsc7Cwd } from "./terminalPanes.js";
+import { clampSplitRatio, flattenPaneLayout, isTerminalClearShortcut, paneIds, parseOsc7Cwd } from "./terminalPanes.js";
 
 test("clamps persisted and dragged split ratios", () => {
   assert.equal(clampSplitRatio(0.5), 0.5);
   assert.equal(clampSplitRatio(-1), 0.1);
   assert.equal(clampSplitRatio(2), 0.9);
   assert.equal(clampSplitRatio(Number.NaN), 0.5);
+});
+
+test("recognizes only unmodified macOS Command+K keydown events", () => {
+  const commandK = {
+    type: "keydown",
+    key: "k",
+    metaKey: true,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+  };
+
+  assert.equal(isTerminalClearShortcut(commandK, "MacIntel"), true);
+  assert.equal(isTerminalClearShortcut({ ...commandK, key: "K" }, "MacIntel"), true);
+  assert.equal(isTerminalClearShortcut({ ...commandK, type: "keyup" }, "MacIntel"), false);
+  assert.equal(isTerminalClearShortcut({ ...commandK, metaKey: false, ctrlKey: true }, "MacIntel"), false);
+  assert.equal(isTerminalClearShortcut({ ...commandK, altKey: true }, "MacIntel"), false);
+  assert.equal(isTerminalClearShortcut({ ...commandK, shiftKey: true }, "MacIntel"), false);
+  assert.equal(isTerminalClearShortcut({ ...commandK, key: "l" }, "MacIntel"), false);
+  assert.equal(isTerminalClearShortcut(commandK, "Win32"), false);
 });
 
 test("walks nested pane layouts in visible order", () => {

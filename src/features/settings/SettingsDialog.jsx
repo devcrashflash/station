@@ -13,6 +13,7 @@ import { Kbd } from "@/components/ui/kbd";
 import { Textarea } from "@/components/ui/textarea";
 import { aiPromptIconFor, aiPromptIconOptions } from "@/lib/aiPromptIcons";
 import { formatShortcut, shortcutFromKeyboardEvent } from "@/lib/keyboardShortcut";
+import { terminalFontFamily, terminalFontOptions, terminalFontStyle, terminalFontStyleOptions } from "@/lib/terminalFonts";
 import { cn } from "@/lib/utils";
 
 const providerOptions = [
@@ -96,6 +97,7 @@ export function SettingsDialog({
   directories,
   browserSettings,
   terminalSettings,
+  terminalFonts = [],
   quickCaptureShortcutSettings,
   themePreference = "system",
   calendarAccounts = [],
@@ -367,6 +369,7 @@ export function SettingsDialog({
             {activeTab === "terminal" && (
               <TerminalTab
                 settings={terminalSettings}
+                fonts={terminalFonts}
                 onChooseDirectory={onChooseDirectory}
                 onSave={onSaveTerminalSettings}
               />
@@ -901,14 +904,17 @@ function BrowserTab({
   );
 }
 
-function TerminalTab({ settings, onChooseDirectory, onSave }) {
+function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
   const [newTabDirectory, setNewTabDirectory] = useState(settings?.newTabDirectory || "");
   const [newPaneDirectory, setNewPaneDirectory] = useState(settings?.newPaneDirectory || "");
   const [inactivePaneOpacity, setInactivePaneOpacity] = useState(settings?.inactivePaneOpacity ?? 0.65);
   const [closeTerminalsOnAppExit, setCloseTerminalsOnAppExit] = useState(settings?.closeTerminalsOnAppExit ?? false);
   const [fontFamily, setFontFamily] = useState(settings?.fontFamily || "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace");
+  const [fontWeight, setFontWeight] = useState(settings?.fontWeight ?? 400);
+  const [fontStyle, setFontStyle] = useState(settings?.fontStyle || "normal");
   const [fontSize, setFontSize] = useState(String(settings?.fontSize ?? 13));
-  const [lineHeight, setLineHeight] = useState(String(settings?.lineHeight ?? 1));
+  const [lineHeight, setLineHeight] = useState(String(settings?.lineHeight ?? 100));
+  const [horizontalSpacing, setHorizontalSpacing] = useState(String(settings?.horizontalSpacing ?? 100));
   const [notice, setNotice] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [choosingFor, setChoosingFor] = useState(null);
@@ -919,9 +925,32 @@ function TerminalTab({ settings, onChooseDirectory, onSave }) {
     setInactivePaneOpacity(settings?.inactivePaneOpacity ?? 0.65);
     setCloseTerminalsOnAppExit(settings?.closeTerminalsOnAppExit ?? false);
     setFontFamily(settings?.fontFamily || "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace");
+    setFontWeight(settings?.fontWeight ?? 400);
+    setFontStyle(settings?.fontStyle || "normal");
     setFontSize(String(settings?.fontSize ?? 13));
-    setLineHeight(String(settings?.lineHeight ?? 1));
-  }, [settings?.newTabDirectory, settings?.newPaneDirectory, settings?.inactivePaneOpacity, settings?.closeTerminalsOnAppExit, settings?.fontFamily, settings?.fontSize, settings?.lineHeight]);
+    setLineHeight(String(settings?.lineHeight ?? 100));
+    setHorizontalSpacing(String(settings?.horizontalSpacing ?? 100));
+  }, [settings?.newTabDirectory, settings?.newPaneDirectory, settings?.inactivePaneOpacity, settings?.closeTerminalsOnAppExit, settings?.fontFamily, settings?.fontWeight, settings?.fontStyle, settings?.fontSize, settings?.lineHeight, settings?.horizontalSpacing]);
+
+  const selectedFont = terminalFontFamily(fonts, fontFamily);
+  const selectedStyle = terminalFontStyle(selectedFont, fontWeight, fontStyle);
+
+  function chooseFontFamily(value) {
+    const font = terminalFontFamily(fonts, value);
+    const style = terminalFontStyle(font, 400, "normal");
+    setFontFamily(value);
+    if (style) {
+      setFontWeight(style.weight);
+      setFontStyle(style.italic ? "italic" : "normal");
+    }
+  }
+
+  function chooseFontStyle(value) {
+    const style = selectedFont?.styles.find((entry) => entry.id === value);
+    if (!style) return;
+    setFontWeight(style.weight);
+    setFontStyle(style.italic ? "italic" : "normal");
+  }
 
   async function choose(setValue, target) {
     setChoosingFor(target);
@@ -942,11 +971,15 @@ function TerminalTab({ settings, onChooseDirectory, onSave }) {
     try {
       const parsedFontSize = Number(fontSize);
       const parsedLineHeight = Number(lineHeight);
+      const parsedHorizontalSpacing = Number(horizontalSpacing);
       if (!Number.isFinite(parsedFontSize) || parsedFontSize < 8 || parsedFontSize > 32) {
         throw new Error("Font size must be between 8 and 32 pixels.");
       }
-      if (!Number.isFinite(parsedLineHeight) || parsedLineHeight < 1 || parsedLineHeight > 2) {
-        throw new Error("Line height must be between 1.0 and 2.0.");
+      if (!Number.isFinite(parsedLineHeight) || parsedLineHeight < 100 || parsedLineHeight > 200) {
+        throw new Error("Vertical spacing must be between 100 and 200 percent.");
+      }
+      if (!Number.isFinite(parsedHorizontalSpacing) || parsedHorizontalSpacing < 100 || parsedHorizontalSpacing > 200) {
+        throw new Error("Horizontal spacing must be between 100 and 200 percent.");
       }
       await onSave({
         newTabDirectory,
@@ -954,8 +987,11 @@ function TerminalTab({ settings, onChooseDirectory, onSave }) {
         inactivePaneOpacity,
         closeTerminalsOnAppExit,
         fontFamily,
+        fontWeight,
+        fontStyle,
         fontSize: parsedFontSize,
         lineHeight: parsedLineHeight,
+        horizontalSpacing: parsedHorizontalSpacing,
       });
       setNotice("Terminal settings saved.");
     } catch (error) {
@@ -972,26 +1008,48 @@ function TerminalTab({ settings, onChooseDirectory, onSave }) {
         <p className="text-xs text-muted-foreground">Saved changes apply to all open terminal panes.</p>
       </div>
 
-      <Field>
-        <FieldLabel>Font family</FieldLabel>
-        <Input
-          value={fontFamily}
-          placeholder="ui-monospace, monospace"
-          onChange={(event) => setFontFamily(event.target.value)}
-        />
-        <p className="text-xs text-muted-foreground">Enter a CSS font-family name or fallback list.</p>
-      </Field>
-
-      <div className="grid gap-4 sm:grid-cols-2">
+      <div className="grid gap-4 sm:grid-cols-3">
+        <Field>
+          <FieldLabel>Font family</FieldLabel>
+          <SelectControl
+            value={selectedFont?.family || ""}
+            placeholder="Select a local font"
+            disabled={!fonts.length}
+            onValueChange={chooseFontFamily}
+            options={terminalFontOptions(fonts)}
+          />
+          <p className="text-xs text-muted-foreground">
+            {fonts.length ? "Installed monospaced fonts only." : "Local font discovery requires the desktop app."}
+          </p>
+        </Field>
+        <Field>
+          <FieldLabel>Font style</FieldLabel>
+          <SelectControl
+            value={selectedStyle?.id || ""}
+            placeholder="Select a style"
+            disabled={!selectedFont}
+            onValueChange={chooseFontStyle}
+            options={terminalFontStyleOptions(selectedFont)}
+          />
+          <p className="text-xs text-muted-foreground">Only styles installed for this family.</p>
+        </Field>
         <Field>
           <FieldLabel>Font size</FieldLabel>
           <Input type="number" min="8" max="32" step="1" value={fontSize} onChange={(event) => setFontSize(event.target.value)} />
           <p className="text-xs text-muted-foreground">8–32 pixels</p>
         </Field>
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2">
         <Field>
-          <FieldLabel>Line height</FieldLabel>
-          <Input type="number" min="1" max="2" step="0.05" value={lineHeight} onChange={(event) => setLineHeight(event.target.value)} />
-          <p className="text-xs text-muted-foreground">1.0–2.0 multiplier</p>
+          <FieldLabel>Vertical spacing</FieldLabel>
+          <Input type="number" min="100" max="200" step="1" value={lineHeight} onChange={(event) => setLineHeight(event.target.value)} />
+          <p className="text-xs text-muted-foreground">100–200 percent</p>
+        </Field>
+        <Field>
+          <FieldLabel>Horizontal spacing</FieldLabel>
+          <Input type="number" min="100" max="200" step="1" value={horizontalSpacing} onChange={(event) => setHorizontalSpacing(event.target.value)} />
+          <p className="text-xs text-muted-foreground">100–200 percent</p>
         </Field>
       </div>
 

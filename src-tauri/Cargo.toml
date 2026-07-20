@@ -39,6 +39,7 @@ rten = { version = "0.24.0", default-features = false }
 rten-imageproc = "0.24.0"
 rten-tensor = "0.24.0"
 portable-pty = "0.9.0"
+fontdb = "0.23"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-global-shortcut = "2"

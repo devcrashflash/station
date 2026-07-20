@@ -159,8 +159,12 @@ test("local fallback stores terminal settings and restores defaults", async () =
     inactivePaneOpacity: 0.65,
     closeTerminalsOnAppExit: false,
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+    fontFace: null,
+    fontWeight: 400,
+    fontStyle: "normal",
     fontSize: 13,
-    lineHeight: 1,
+    lineHeight: 100,
+    horizontalSpacing: 100,
     profileDirectory: "~",
   });
   assert.deepEqual(await api.saveTerminalSettings({
@@ -169,28 +173,41 @@ test("local fallback stores terminal settings and restores defaults", async () =
     inactivePaneOpacity: 0.5,
     closeTerminalsOnAppExit: true,
     fontFamily: "JetBrains Mono, monospace",
+    fontFace: null,
+    fontWeight: 100,
+    fontStyle: "italic",
     fontSize: 15,
-    lineHeight: 1.25,
+    lineHeight: 1.2,
+    horizontalSpacing: 1.2,
   }), {
     newTabDirectory: "/projects/app",
     newPaneDirectory: "/projects/tests",
     inactivePaneOpacity: 0.5,
     closeTerminalsOnAppExit: true,
     fontFamily: "JetBrains Mono, monospace",
+    fontFace: null,
+    fontWeight: 100,
+    fontStyle: "italic",
     fontSize: 15,
-    lineHeight: 1.25,
+    lineHeight: 120,
+    horizontalSpacing: 120,
     profileDirectory: "~",
   });
-  assert.deepEqual(await api.saveTerminalSettings({ newTabDirectory: "", newPaneDirectory: "", inactivePaneOpacity: 0.65, closeTerminalsOnAppExit: false, fontFamily: "", fontSize: 13, lineHeight: 1 }), {
+  assert.deepEqual(await api.saveTerminalSettings({ newTabDirectory: "", newPaneDirectory: "", inactivePaneOpacity: 0.65, closeTerminalsOnAppExit: false, fontFamily: "", fontWeight: 1200, fontStyle: "invalid", fontSize: 13, lineHeight: 1, horizontalSpacing: 3 }), {
     newTabDirectory: null,
     newPaneDirectory: null,
     inactivePaneOpacity: 0.65,
     closeTerminalsOnAppExit: false,
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+    fontFace: null,
+    fontWeight: 900,
+    fontStyle: "normal",
     fontSize: 13,
-    lineHeight: 1,
+    lineHeight: 100,
+    horizontalSpacing: 100,
     profileDirectory: "~",
   });
+  assert.deepEqual(await api.listTerminalFonts(), []);
 });
 
 test("normalizes base urls without a scheme", () => {
