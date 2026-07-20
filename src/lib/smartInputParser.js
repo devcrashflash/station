@@ -106,10 +106,6 @@ export function parseSmartInput(value) {
   };
 }
 
-export function isPullRequestInput(parsed) {
-  return parsed.kind === "pull_request" || parsed.kind === "merge_request";
-}
-
 function extractUrl(input) {
   return input
     .split(/\s+/)

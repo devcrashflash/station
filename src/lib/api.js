@@ -174,10 +174,6 @@ export const api = {
     call("list_project_connections", payload, () => local.listProjectConnections(payload)),
   setProjectConnections: (payload) =>
     call("set_project_connections", payload, () => local.setProjectConnections(payload)),
-  listPullRequests: (payload) => call("list_pull_requests", payload, () => local.listPullRequests(payload)),
-  savePullRequest: (payload) => call("save_pull_request", { input: payload }, () => local.savePullRequest(payload)),
-  updatePullRequestReviewState: (payload) =>
-    call("update_pull_request_review_state", payload, () => local.updatePullRequestReviewState(payload)),
   listActivities: (payload) => {
     const input = activityRequestPayload(payload);
     return call("list_activities", input, () => local.listActivities(input));
@@ -1640,52 +1636,6 @@ const local = {
     state.projectConnections[projectId] = connectionIds;
     writeState(state);
     return connectionIds;
-  },
-
-  listPullRequests({ projectId }) {
-    return readState().pullRequests.filter((item) => item.projectId === projectId);
-  },
-
-  savePullRequest(input) {
-    const state = readState();
-    const timestamp = now();
-    let pullRequest = state.pullRequests.find(
-      (item) => item.id === input.id || item.prUrl === input.prUrl,
-    );
-
-    if (!pullRequest) {
-      pullRequest = {
-        id: id("pr"),
-        createdAt: timestamp,
-      };
-      state.pullRequests.push(pullRequest);
-    }
-
-    const connection = selectBestConnection(
-      state.connections,
-      state.projectConnections?.[input.projectId] || [],
-      input.parsed || {},
-    );
-
-    Object.assign(pullRequest, input, {
-      id: pullRequest.id,
-      connectionId: connection?.id || input.connectionId || null,
-      updatedAt: timestamp,
-    });
-    writeState(state);
-    return { pullRequest, notice: connection ? null : "No enabled connection matched this external link." };
-  },
-
-  updatePullRequestReviewState({ id: pullRequestId, status, reviewNotes, testState }) {
-    const state = readState();
-    const pullRequest = state.pullRequests.find((item) => item.id === pullRequestId);
-    if (!pullRequest) throw new Error("Pull request not found");
-    pullRequest.status = status ?? pullRequest.status;
-    pullRequest.reviewNotes = reviewNotes ?? pullRequest.reviewNotes;
-    pullRequest.testState = testState ?? pullRequest.testState;
-    pullRequest.updatedAt = now();
-    writeState(state);
-    return pullRequest;
   },
 
   listActivities(payload) {

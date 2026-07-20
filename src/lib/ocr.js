@@ -78,14 +78,6 @@ export function ocrTaskTitle(text) {
   return firstPart.length > 80 ? firstPart.slice(0, 80).trim() : firstPart;
 }
 
-export function ocrParsedPayload(text) {
-  return textParsedPayload(ocrTaskTitle(text));
-}
-
-export function emailParsedPayload(subject) {
-  return textParsedPayload(emailTaskTitle(subject));
-}
-
 export function textParsedPayload(title) {
   return {
     kind: "text",
@@ -99,10 +91,6 @@ export function textParsedPayload(title) {
 
 function taskTitle(title) {
   return String(title || "").replace(/\s+/g, " ").trim() || "New task";
-}
-
-function emailTaskTitle(subject) {
-  return taskTitle(subject) === "New task" ? "Email task" : taskTitle(subject);
 }
 
 function droppedFileNames(items) {

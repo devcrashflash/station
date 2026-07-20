@@ -860,13 +860,6 @@ struct EmailFileResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PullRequestSaveResult {
-    pull_request: PullRequestRecord,
-    notice: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct PullRequestCheckoutResult {
     path: String,
     branch: String,
@@ -1060,27 +1053,6 @@ struct OpenAiPromptThreadInput {
     ai_prompt_id: String,
     task_id: String,
     path: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PullRequestInput {
-    id: Option<String>,
-    project_id: String,
-    provider: String,
-    repo_url: String,
-    pr_url: String,
-    title: String,
-    status: String,
-    review_notes: String,
-    test_state: String,
-    connection_id: Option<String>,
-    external_title: Option<String>,
-    external_body: Option<String>,
-    external_state: Option<String>,
-    target_branch: Option<String>,
-    fetched_at: Option<i64>,
-    parsed: Option<ParsedInputPayload>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1342,10 +1314,7 @@ pub fn run() {
             sync_calendar_events,
             list_activities,
             sync_activities,
-            resolve_trello_tickets,
-            list_pull_requests,
-            save_pull_request,
-            update_pull_request_review_state
+            resolve_trello_tickets
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -10533,181 +10502,6 @@ async fn resolve_trello_tickets(
     })
     .await
     .map_err(|error| format!("Trello ticket resolution task failed: {error}"))?
-}
-
-#[tauri::command]
-fn list_pull_requests(
-    state: tauri::State<'_, AppState>,
-    project_id: String,
-) -> Result<Vec<PullRequestRecord>, String> {
-    let db = state.db.lock().map_err(db_error)?;
-    let mut statement = db
-        .prepare(
-            "SELECT id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, target_branch, fetched_at, created_at, updated_at
-             FROM pull_requests WHERE project_id = ?1 ORDER BY updated_at DESC",
-        )
-        .map_err(db_error)?;
-    let pull_requests = statement
-        .query_map(params![project_id], row_to_pull_request)
-        .map_err(db_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(db_error)?;
-    Ok(pull_requests)
-}
-
-#[tauri::command]
-fn save_pull_request(
-    state: tauri::State<'_, AppState>,
-    input: PullRequestInput,
-) -> Result<PullRequestSaveResult, String> {
-    let db = state.db.lock().map_err(db_error)?;
-    let metadata = input
-        .parsed
-        .as_ref()
-        .map(|parsed| fetch_provider_metadata(&db, &input.project_id, parsed))
-        .unwrap_or_else(ProviderMetadata::empty);
-    let title = metadata
-        .title
-        .clone()
-        .or(input.external_title.clone())
-        .unwrap_or(input.title);
-    let pr_url = metadata.url.clone().unwrap_or(input.pr_url);
-    let timestamp = now_millis();
-    let id = input.id.unwrap_or_else(|| new_id("pr"));
-    let exists: Option<String> = db
-        .query_row(
-            "SELECT id FROM pull_requests WHERE id = ?1 OR pr_url = ?2 LIMIT 1",
-            params![id, pr_url],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(db_error)?;
-    let target_id = exists.unwrap_or(id);
-
-    let row_exists: bool = db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM pull_requests WHERE id = ?1)",
-            params![target_id],
-            |row| row.get(0),
-        )
-        .map_err(db_error)?;
-
-    if row_exists {
-        db.execute(
-            "UPDATE pull_requests
-             SET project_id = ?1, provider = ?2, repo_url = ?3, pr_url = ?4, title = ?5,
-                 status = ?6, review_notes = ?7, test_state = ?8, connection_id = ?9,
-                 external_title = ?10, external_body = ?11, external_state = ?12, target_branch = ?13, fetched_at = ?14,
-                 updated_at = ?15
-             WHERE id = ?16",
-            params![
-                input.project_id,
-                input.provider,
-                input.repo_url,
-                pr_url,
-                title,
-                input.status,
-                input.review_notes,
-                input.test_state,
-                metadata
-                    .connection_id
-                    .clone()
-                    .or(input.connection_id.clone()),
-                metadata.title.clone().or(input.external_title.clone()),
-                metadata.body.clone().or(input.external_body.clone()),
-                metadata.state.clone().or(input.external_state.clone()),
-                metadata
-                    .target_branch
-                    .clone()
-                    .or(input.target_branch.clone()),
-                metadata.fetched_at.or(input.fetched_at),
-                timestamp,
-                target_id
-            ],
-        )
-        .map_err(db_error)?;
-    } else {
-        db.execute(
-            "INSERT INTO pull_requests
-             (id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, target_branch, fetched_at, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
-            params![
-                target_id,
-                input.project_id,
-                input.provider,
-                input.repo_url,
-                pr_url,
-                title,
-                input.status,
-                input.review_notes,
-                input.test_state,
-                metadata.connection_id.clone().or(input.connection_id.clone()),
-                metadata.title.clone().or(input.external_title.clone()),
-                metadata.body.clone().or(input.external_body.clone()),
-                metadata.state.clone().or(input.external_state.clone()),
-                metadata
-                    .target_branch
-                    .clone()
-                    .or(input.target_branch.clone()),
-                metadata.fetched_at.or(input.fetched_at),
-                timestamp,
-                timestamp
-            ],
-        )
-        .map_err(db_error)?;
-    }
-
-    let pull_request = db.query_row(
-        "SELECT id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, target_branch, fetched_at, created_at, updated_at
-         FROM pull_requests WHERE id = ?1",
-        params![target_id],
-        row_to_pull_request,
-    )
-    .map_err(db_error)?;
-    Ok(PullRequestSaveResult {
-        pull_request,
-        notice: metadata.notice.clone(),
-    })
-}
-
-#[tauri::command]
-fn update_pull_request_review_state(
-    state: tauri::State<'_, AppState>,
-    id: String,
-    status: Option<String>,
-    review_notes: Option<String>,
-    test_state: Option<String>,
-) -> Result<PullRequestRecord, String> {
-    let db = state.db.lock().map_err(db_error)?;
-    let existing = db
-        .query_row(
-            "SELECT id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, target_branch, fetched_at, created_at, updated_at
-             FROM pull_requests WHERE id = ?1",
-            params![id],
-            row_to_pull_request,
-        )
-        .optional()
-        .map_err(db_error)?
-        .ok_or_else(|| "Pull request not found".to_string())?;
-    let timestamp = now_millis();
-    db.execute(
-        "UPDATE pull_requests SET status = ?1, review_notes = ?2, test_state = ?3, updated_at = ?4 WHERE id = ?5",
-        params![
-            status.unwrap_or(existing.status),
-            review_notes.unwrap_or(existing.review_notes),
-            test_state.unwrap_or(existing.test_state),
-            timestamp,
-            id
-        ],
-    )
-    .map_err(db_error)?;
-    db.query_row(
-        "SELECT id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, target_branch, fetched_at, created_at, updated_at
-         FROM pull_requests WHERE id = ?1",
-        params![id],
-        row_to_pull_request,
-    )
-    .map_err(db_error)
 }
 
 #[cfg(test)]
