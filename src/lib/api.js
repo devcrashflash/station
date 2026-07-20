@@ -46,6 +46,7 @@ const defaultState = {
     fontSize: 13,
     lineHeight: 100,
     horizontalSpacing: 100,
+    scrollbackLines: 10_000,
     profileDirectory: "~",
   },
 };
@@ -721,12 +722,16 @@ const local = {
     const settings = { ...defaultState.terminalSettings, ...readState().terminalSettings };
     const storedLineHeight = Number(settings.lineHeight);
     const storedHorizontalSpacing = Number(settings.horizontalSpacing);
+    const storedScrollbackLines = Number(settings.scrollbackLines);
     settings.lineHeight = Number.isFinite(storedLineHeight)
       ? Math.round(Math.min(200, Math.max(100, storedLineHeight <= 2 ? storedLineHeight * 100 : storedLineHeight)))
       : defaultState.terminalSettings.lineHeight;
     settings.horizontalSpacing = Number.isFinite(storedHorizontalSpacing)
       ? Math.round(Math.min(200, Math.max(100, storedHorizontalSpacing <= 2 ? storedHorizontalSpacing * 100 : storedHorizontalSpacing)))
       : defaultState.terminalSettings.horizontalSpacing;
+    settings.scrollbackLines = Number.isInteger(storedScrollbackLines)
+      ? Math.min(100_000, Math.max(0, storedScrollbackLines))
+      : defaultState.terminalSettings.scrollbackLines;
     return settings;
   },
 
@@ -736,6 +741,9 @@ const local = {
     const requestedFontSize = Number(input.fontSize);
     const requestedLineHeight = Number(input.lineHeight);
     const requestedHorizontalSpacing = Number(input.horizontalSpacing);
+    const requestedScrollbackLines = Number(
+      input.scrollbackLines ?? state.terminalSettings?.scrollbackLines ?? defaultState.terminalSettings.scrollbackLines,
+    );
     const requestedFontWeight = Number(input.fontWeight);
     state.terminalSettings = {
       newTabDirectory: input.newTabDirectory?.trim() || null,
@@ -761,6 +769,9 @@ const local = {
       horizontalSpacing: Number.isFinite(requestedHorizontalSpacing)
         ? Math.round(Math.min(200, Math.max(100, requestedHorizontalSpacing <= 2 ? requestedHorizontalSpacing * 100 : requestedHorizontalSpacing)))
         : defaultState.terminalSettings.horizontalSpacing,
+      scrollbackLines: Number.isInteger(requestedScrollbackLines)
+        ? Math.min(100_000, Math.max(0, requestedScrollbackLines))
+        : defaultState.terminalSettings.scrollbackLines,
       profileDirectory: state.terminalSettings?.profileDirectory || "~",
     };
     writeState(state);

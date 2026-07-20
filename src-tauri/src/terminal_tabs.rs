@@ -2,7 +2,7 @@ use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, Pt
 use rusqlite::{params, Connection as SqliteConnection};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
@@ -31,12 +31,18 @@ const FONT_STYLE_SETTING_KEY: &str = "terminal_font_style";
 const FONT_SIZE_SETTING_KEY: &str = "terminal_font_size";
 const LINE_HEIGHT_SETTING_KEY: &str = "terminal_line_height";
 const HORIZONTAL_SPACING_SETTING_KEY: &str = "terminal_horizontal_spacing";
+const SCROLLBACK_LINES_SETTING_KEY: &str = "terminal_scrollback_lines";
 const DEFAULT_INACTIVE_PANE_OPACITY: f64 = 0.65;
 const DEFAULT_FONT_FAMILY: &str =
     "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
 const DEFAULT_FONT_SIZE: f64 = 13.0;
 const DEFAULT_LINE_HEIGHT: f64 = 100.0;
 const DEFAULT_HORIZONTAL_SPACING: f64 = 100.0;
+const DEFAULT_SCROLLBACK_LINES: u32 = 10_000;
+const MAX_SCROLLBACK_LINES: u32 = 100_000;
+const MAX_DETACHED_OUTPUT_BYTES: usize = 1024 * 1024;
+const DETACHED_OUTPUT_TRUNCATED_NOTICE: &[u8] =
+    b"\x1bc\r\n\x1b[33m[Earlier background terminal output was truncated.]\x1b[0m\r\n";
 const DEFAULT_FONT_WEIGHT: u16 = 400;
 const DEFAULT_FONT_STYLE: &str = "normal";
 const PREFERRED_FONT_FAMILIES: [&str; 5] = [
@@ -94,6 +100,7 @@ pub struct TerminalSettings {
     font_size: f64,
     line_height: f64,
     horizontal_spacing: f64,
+    scrollback_lines: u32,
     profile_directory: String,
 }
 
@@ -110,6 +117,7 @@ pub struct TerminalSettingsInput {
     font_size: Option<f64>,
     line_height: Option<f64>,
     horizontal_spacing: Option<f64>,
+    scrollback_lines: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -187,12 +195,63 @@ pub enum TerminalLifecycleEvent {
     },
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalAttachmentResult {
+    attachment_id: u64,
+}
+
+struct TerminalAttachment {
+    id: u64,
+    on_output: Channel<InvokeResponseBody>,
+    on_event: Channel<TerminalLifecycleEvent>,
+}
+
+#[derive(Default)]
+struct DetachedOutputBuffer {
+    chunks: VecDeque<Vec<u8>>,
+    byte_len: usize,
+    truncated: bool,
+}
+
+impl DetachedOutputBuffer {
+    fn push(&mut self, chunk: Vec<u8>) {
+        if chunk.is_empty() {
+            return;
+        }
+        if chunk.len() > MAX_DETACHED_OUTPUT_BYTES {
+            self.chunks.clear();
+            self.byte_len = MAX_DETACHED_OUTPUT_BYTES;
+            self.chunks
+                .push_back(chunk[chunk.len() - MAX_DETACHED_OUTPUT_BYTES..].to_vec());
+            self.truncated = true;
+            return;
+        }
+        self.byte_len += chunk.len();
+        self.chunks.push_back(chunk);
+        while self.byte_len > MAX_DETACHED_OUTPUT_BYTES {
+            if let Some(removed) = self.chunks.pop_front() {
+                self.byte_len -= removed.len();
+                self.truncated = true;
+            }
+        }
+    }
+
+    fn take(&mut self) -> (bool, VecDeque<Vec<u8>>) {
+        let truncated = std::mem::take(&mut self.truncated);
+        self.byte_len = 0;
+        (truncated, std::mem::take(&mut self.chunks))
+    }
+}
+
 struct TerminalSession {
     generation: u64,
     process_id: Option<u32>,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    attachment: Option<TerminalAttachment>,
+    detached_output: DetachedOutputBuffer,
 }
 
 struct TerminalTabsRuntime {
@@ -202,6 +261,7 @@ struct TerminalTabsRuntime {
     pending_input: HashMap<String, Vec<u8>>,
     startup_input_gates: HashSet<String>,
     next_generation: u64,
+    next_attachment_id: u64,
 }
 
 pub struct TerminalTabsState {
@@ -602,6 +662,7 @@ fn load_runtime(db: &SqliteConnection) -> Result<TerminalTabsRuntime, String> {
         pending_input: HashMap::new(),
         startup_input_gates: HashSet::new(),
         next_generation: 1,
+        next_attachment_id: 1,
     })
 }
 
@@ -1645,6 +1706,15 @@ fn terminal_horizontal_spacing(db: &SqliteConnection) -> f64 {
     )
 }
 
+fn terminal_scrollback_lines(db: &SqliteConnection) -> u32 {
+    get_app_setting(db, SCROLLBACK_LINES_SETTING_KEY)
+        .ok()
+        .flatten()
+        .and_then(|value| value.parse::<i64>().ok())
+        .map(|value| value.clamp(0, MAX_SCROLLBACK_LINES as i64) as u32)
+        .unwrap_or(DEFAULT_SCROLLBACK_LINES)
+}
+
 #[tauri::command]
 pub fn list_terminal_fonts() -> Vec<TerminalFontFamily> {
     terminal_font_catalog().to_vec()
@@ -1687,6 +1757,7 @@ pub fn list_terminal_settings(
         ),
         line_height: terminal_line_height(&db),
         horizontal_spacing: terminal_horizontal_spacing(&db),
+        scrollback_lines: terminal_scrollback_lines(&db),
         profile_directory: profile_directory.to_string_lossy().into_owned(),
     })
 }
@@ -1727,6 +1798,7 @@ pub fn save_terminal_settings(
     let requested_horizontal_spacing = input
         .horizontal_spacing
         .unwrap_or(DEFAULT_HORIZONTAL_SPACING);
+    let requested_scrollback_lines = input.scrollback_lines;
     if !requested_font_size.is_finite()
         || !requested_line_height.is_finite()
         || !requested_horizontal_spacing.is_finite()
@@ -1750,6 +1822,9 @@ pub fn save_terminal_settings(
     .round();
     {
         let db = state.db.lock().map_err(db_error)?;
+        let scrollback_lines = requested_scrollback_lines
+            .unwrap_or_else(|| terminal_scrollback_lines(&db) as i64)
+            .clamp(0, MAX_SCROLLBACK_LINES as i64) as u32;
         let close_terminals_on_app_exit = input
             .close_terminals_on_app_exit
             .unwrap_or_else(|| close_terminals_on_app_exit(&db));
@@ -1796,6 +1871,12 @@ pub fn save_terminal_settings(
             Some(&horizontal_spacing.to_string()),
         )
         .map_err(db_error)?;
+        set_app_setting(
+            &db,
+            SCROLLBACK_LINES_SETTING_KEY,
+            Some(&scrollback_lines.to_string()),
+        )
+        .map_err(db_error)?;
     }
     let settings = list_terminal_settings(app.clone(), state)?;
     let _ = app.emit("terminal-settings-changed", &settings);
@@ -1828,6 +1909,116 @@ fn pane_cwd(
         .unwrap_or(home))
 }
 
+fn next_attachment_id(runtime: &mut TerminalTabsRuntime) -> u64 {
+    let id = runtime.next_attachment_id;
+    runtime.next_attachment_id += 1;
+    id
+}
+
+fn attach_to_running_session(
+    state: &TerminalTabsState,
+    tab_id: &str,
+    pane_id: &str,
+    cols: u16,
+    rows: u16,
+    on_output: Channel<InvokeResponseBody>,
+    on_event: Channel<TerminalLifecycleEvent>,
+) -> Result<TerminalAttachmentResult, String> {
+    let mut runtime = state.runtime.lock().map_err(db_error)?;
+    validate_pane(&runtime, tab_id, pane_id)?;
+    let attachment_id = next_attachment_id(&mut runtime);
+    let session = runtime
+        .sessions
+        .get_mut(pane_id)
+        .ok_or_else(|| "The terminal process is not running.".to_string())?;
+    session
+        .master
+        .resize(PtySize {
+            rows: rows.max(1),
+            cols: cols.max(1),
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(db_error)?;
+    let (truncated, chunks) = session.detached_output.take();
+    if truncated {
+        on_output
+            .send(InvokeResponseBody::Raw(
+                DETACHED_OUTPUT_TRUNCATED_NOTICE.to_vec(),
+            ))
+            .map_err(db_error)?;
+    }
+    for chunk in chunks {
+        on_output
+            .send(InvokeResponseBody::Raw(chunk))
+            .map_err(db_error)?;
+    }
+    session.attachment = Some(TerminalAttachment {
+        id: attachment_id,
+        on_output,
+        on_event,
+    });
+    Ok(TerminalAttachmentResult { attachment_id })
+}
+
+fn route_terminal_output(
+    app: &tauri::AppHandle,
+    pane_id: &str,
+    generation: u64,
+    data: Vec<u8>,
+) -> bool {
+    let state = app.state::<TerminalTabsState>();
+    let Ok(mut runtime) = state.runtime.lock() else {
+        return false;
+    };
+    let Some(session) = runtime.sessions.get_mut(pane_id) else {
+        return false;
+    };
+    if session.generation != generation {
+        return false;
+    }
+    if let Some(attachment) = session.attachment.as_ref() {
+        if attachment
+            .on_output
+            .send(InvokeResponseBody::Raw(data.clone()))
+            .is_err()
+        {
+            session.attachment = None;
+            session.detached_output.push(data);
+        }
+    } else {
+        session.detached_output.push(data);
+    }
+    true
+}
+
+fn route_terminal_reader_error(
+    app: &tauri::AppHandle,
+    pane_id: &str,
+    generation: u64,
+    message: String,
+) {
+    let state = app.state::<TerminalTabsState>();
+    let channel = {
+        let Ok(runtime) = state.runtime.lock() else {
+            return;
+        };
+        runtime.sessions.get(pane_id).and_then(|session| {
+            if session.generation == generation {
+                session
+                    .attachment
+                    .as_ref()
+                    .map(|attachment| attachment.on_event.clone())
+            } else {
+                None
+            }
+        })
+    };
+    if let Some(channel) = channel {
+        let _ = channel.send(TerminalLifecycleEvent::Error { message });
+    }
+}
+
 fn spawn_terminal_session(
     app: &tauri::AppHandle,
     state: &TerminalTabsState,
@@ -1837,7 +2028,7 @@ fn spawn_terminal_session(
     rows: u16,
     on_output: Channel<InvokeResponseBody>,
     on_event: Channel<TerminalLifecycleEvent>,
-) -> Result<WorkspaceTabsSnapshot, String> {
+) -> Result<TerminalAttachmentResult, String> {
     let cwd = {
         let runtime = state.runtime.lock().map_err(db_error)?;
         validate_pane(&runtime, tab_id, pane_id)?;
@@ -1861,7 +2052,7 @@ fn spawn_terminal_session(
     let writer = pair.master.take_writer().map_err(db_error)?;
     let mut killer = child.clone_killer();
 
-    let generation = {
+    let (generation, attachment_id) = {
         let mut runtime = state.runtime.lock().map_err(db_error)?;
         if let Err(error) = validate_pane(&runtime, tab_id, pane_id) {
             let _ = killer.kill();
@@ -1870,6 +2061,7 @@ fn spawn_terminal_session(
         terminate_session(&mut runtime, pane_id);
         let generation = runtime.next_generation;
         runtime.next_generation += 1;
+        let attachment_id = next_attachment_id(&mut runtime);
         runtime.sessions.insert(
             pane_id.to_string(),
             TerminalSession {
@@ -1878,6 +2070,12 @@ fn spawn_terminal_session(
                 master: pair.master,
                 writer,
                 killer,
+                attachment: Some(TerminalAttachment {
+                    id: attachment_id,
+                    on_output,
+                    on_event,
+                }),
+                detached_output: DetachedOutputBuffer::default(),
             },
         );
         if !runtime.startup_input_gates.contains(tab_id) {
@@ -1899,28 +2097,33 @@ fn spawn_terminal_session(
             *running = true;
             *exit_code = None;
         }
-        generation
+        (generation, attachment_id)
     };
 
-    let output_channel = on_output.clone();
-    let reader_event_channel = on_event.clone();
+    let reader_app = app.clone();
+    let reader_pane_id = pane_id.to_string();
     thread::spawn(move || {
         let mut buffer = vec![0_u8; 16 * 1024];
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(count) => {
-                    if output_channel
-                        .send(InvokeResponseBody::Raw(buffer[..count].to_vec()))
-                        .is_err()
-                    {
+                    if !route_terminal_output(
+                        &reader_app,
+                        &reader_pane_id,
+                        generation,
+                        buffer[..count].to_vec(),
+                    ) {
                         break;
                     }
                 }
                 Err(error) => {
-                    let _ = reader_event_channel.send(TerminalLifecycleEvent::Error {
-                        message: error.to_string(),
-                    });
+                    route_terminal_reader_error(
+                        &reader_app,
+                        &reader_pane_id,
+                        generation,
+                        error.to_string(),
+                    );
                     break;
                 }
             }
@@ -1933,7 +2136,7 @@ fn spawn_terminal_session(
     thread::spawn(move || {
         let result = child.wait();
         let state = wait_app.state::<TerminalTabsState>();
-        let update = {
+        let (update, event_channel, lifecycle_event) = {
             let Ok(mut runtime) = state.runtime.lock() else {
                 return;
             };
@@ -1944,6 +2147,11 @@ fn spawn_terminal_session(
             if !is_current {
                 return;
             }
+            let event_channel = runtime
+                .sessions
+                .get(&wait_pane_id)
+                .and_then(|session| session.attachment.as_ref())
+                .map(|attachment| attachment.on_event.clone());
             runtime.sessions.remove(&wait_pane_id);
             let Some(tab) = runtime.tabs.iter_mut().find(|tab| tab.id == wait_tab_id) else {
                 return;
@@ -1955,23 +2163,30 @@ fn spawn_terminal_session(
                 return;
             };
             *running = false;
-            match result {
+            let lifecycle_event = match result {
                 Ok(status) => {
                     *exit_code = Some(status.exit_code());
-                    let _ = on_event.send(TerminalLifecycleEvent::Exited {
+                    TerminalLifecycleEvent::Exited {
                         exit_code: status.exit_code(),
                         signal: status.signal().map(ToString::to_string),
-                    });
+                    }
                 }
                 Err(error) => {
                     *exit_code = Some(1);
-                    let _ = on_event.send(TerminalLifecycleEvent::Error {
+                    TerminalLifecycleEvent::Error {
                         message: error.to_string(),
-                    });
+                    }
                 }
-            }
-            (tab.layout(), snapshot_from_runtime(&runtime))
+            };
+            (
+                (tab.layout(), snapshot_from_runtime(&runtime)),
+                event_channel,
+                lifecycle_event,
+            )
         };
+        if let Some(channel) = event_channel {
+            let _ = channel.send(lifecycle_event);
+        }
         emit_layout(&wait_app, &update.0);
         emit_snapshot(&wait_app, &update.1);
     });
@@ -1987,7 +2202,7 @@ fn spawn_terminal_session(
     };
     emit_layout(app, &layout);
     emit_snapshot(app, &snapshot);
-    Ok(snapshot)
+    Ok(TerminalAttachmentResult { attachment_id })
 }
 
 #[tauri::command]
@@ -2001,11 +2216,36 @@ pub fn terminal_attach(
     rows: u16,
     on_output: Channel<InvokeResponseBody>,
     on_event: Channel<TerminalLifecycleEvent>,
-) -> Result<WorkspaceTabsSnapshot, String> {
+) -> Result<TerminalAttachmentResult, String> {
     validate_terminal_caller(&webview, &tab_id)?;
-    spawn_terminal_session(
-        &app, &state, &tab_id, &pane_id, cols, rows, on_output, on_event,
-    )
+    let (has_session, has_exited) = {
+        let runtime = state.runtime.lock().map_err(db_error)?;
+        validate_pane(&runtime, &tab_id, &pane_id)?;
+        let has_exited = runtime
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| tab.root.find_pane(&pane_id))
+            .is_some_and(|pane| {
+                matches!(
+                    pane,
+                    PaneNode::Pane {
+                        exit_code: Some(_),
+                        ..
+                    }
+                )
+            });
+        (runtime.sessions.contains_key(&pane_id), has_exited)
+    };
+    if has_session {
+        attach_to_running_session(&state, &tab_id, &pane_id, cols, rows, on_output, on_event)
+    } else if has_exited {
+        Err("The terminal process has exited. Restart it explicitly to continue.".to_string())
+    } else {
+        spawn_terminal_session(
+            &app, &state, &tab_id, &pane_id, cols, rows, on_output, on_event,
+        )
+    }
 }
 
 #[tauri::command]
@@ -2019,11 +2259,34 @@ pub fn restart_terminal(
     rows: u16,
     on_output: Channel<InvokeResponseBody>,
     on_event: Channel<TerminalLifecycleEvent>,
-) -> Result<WorkspaceTabsSnapshot, String> {
+) -> Result<TerminalAttachmentResult, String> {
     validate_terminal_caller(&webview, &tab_id)?;
     spawn_terminal_session(
         &app, &state, &tab_id, &pane_id, cols, rows, on_output, on_event,
     )
+}
+
+#[tauri::command]
+pub fn terminal_detach(
+    webview: Webview,
+    state: tauri::State<'_, TerminalTabsState>,
+    tab_id: String,
+    pane_id: String,
+    attachment_id: u64,
+) -> Result<(), String> {
+    validate_terminal_caller(&webview, &tab_id)?;
+    let mut runtime = state.runtime.lock().map_err(db_error)?;
+    validate_pane(&runtime, &tab_id, &pane_id)?;
+    if let Some(session) = runtime.sessions.get_mut(&pane_id) {
+        if session
+            .attachment
+            .as_ref()
+            .is_some_and(|attachment| attachment.id == attachment_id)
+        {
+            session.attachment = None;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2246,6 +2509,7 @@ mod tests {
             pending_input: HashMap::new(),
             startup_input_gates: HashSet::new(),
             next_generation: 1,
+            next_attachment_id: 1,
         }
     }
 
@@ -2599,6 +2863,66 @@ mod tests {
         assert_eq!(terminal_horizontal_spacing(&db), 120.0);
         set_app_setting(&db, LINE_HEIGHT_SETTING_KEY, Some("175")).unwrap();
         assert_eq!(terminal_line_height(&db), 175.0);
+    }
+
+    #[test]
+    fn terminal_scrollback_uses_a_default_and_clamps_saved_values() {
+        let db = SqliteConnection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );",
+        )
+        .unwrap();
+
+        assert_eq!(terminal_scrollback_lines(&db), DEFAULT_SCROLLBACK_LINES);
+        set_app_setting(&db, SCROLLBACK_LINES_SETTING_KEY, Some("0")).unwrap();
+        assert_eq!(terminal_scrollback_lines(&db), 0);
+        set_app_setting(&db, SCROLLBACK_LINES_SETTING_KEY, Some("25000")).unwrap();
+        assert_eq!(terminal_scrollback_lines(&db), 25_000);
+        set_app_setting(&db, SCROLLBACK_LINES_SETTING_KEY, Some("200000")).unwrap();
+        assert_eq!(terminal_scrollback_lines(&db), MAX_SCROLLBACK_LINES);
+        set_app_setting(&db, SCROLLBACK_LINES_SETTING_KEY, Some("invalid")).unwrap();
+        assert_eq!(terminal_scrollback_lines(&db), DEFAULT_SCROLLBACK_LINES);
+    }
+
+    #[test]
+    fn detached_output_buffer_is_bounded_and_reports_truncation_once() {
+        let mut buffer = DetachedOutputBuffer::default();
+        let chunk = vec![b'x'; MAX_DETACHED_OUTPUT_BYTES / 2 + 1];
+        buffer.push(chunk.clone());
+        buffer.push(chunk);
+        assert!(buffer.byte_len <= MAX_DETACHED_OUTPUT_BYTES);
+        assert!(buffer.truncated);
+
+        let (truncated, chunks) = buffer.take();
+        assert!(truncated);
+        assert!(chunks.iter().map(Vec::len).sum::<usize>() <= MAX_DETACHED_OUTPUT_BYTES);
+        assert_eq!(buffer.byte_len, 0);
+        assert!(!buffer.truncated);
+
+        buffer.push(b"next".to_vec());
+        let (truncated, chunks) = buffer.take();
+        assert!(!truncated);
+        assert_eq!(
+            chunks.into_iter().collect::<Vec<_>>(),
+            vec![b"next".to_vec()]
+        );
+    }
+
+    #[test]
+    fn detached_output_keeps_the_tail_of_a_single_oversized_chunk() {
+        let mut buffer = DetachedOutputBuffer::default();
+        let mut chunk = vec![b'a'; MAX_DETACHED_OUTPUT_BYTES + 7];
+        chunk[MAX_DETACHED_OUTPUT_BYTES + 6] = b'z';
+        buffer.push(chunk);
+        let (truncated, chunks) = buffer.take();
+        let retained = chunks.into_iter().next().unwrap();
+        assert!(truncated);
+        assert_eq!(retained.len(), MAX_DETACHED_OUTPUT_BYTES);
+        assert_eq!(retained.last(), Some(&b'z'));
     }
 
     fn font_candidate(

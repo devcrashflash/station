@@ -165,6 +165,7 @@ test("local fallback stores terminal settings and restores defaults", async () =
     fontSize: 13,
     lineHeight: 100,
     horizontalSpacing: 100,
+    scrollbackLines: 10000,
     profileDirectory: "~",
   });
   assert.deepEqual(await api.saveTerminalSettings({
@@ -179,6 +180,7 @@ test("local fallback stores terminal settings and restores defaults", async () =
     fontSize: 15,
     lineHeight: 1.2,
     horizontalSpacing: 1.2,
+    scrollbackLines: 25000,
   }), {
     newTabDirectory: "/projects/app",
     newPaneDirectory: "/projects/tests",
@@ -191,9 +193,10 @@ test("local fallback stores terminal settings and restores defaults", async () =
     fontSize: 15,
     lineHeight: 120,
     horizontalSpacing: 120,
+    scrollbackLines: 25000,
     profileDirectory: "~",
   });
-  assert.deepEqual(await api.saveTerminalSettings({ newTabDirectory: "", newPaneDirectory: "", inactivePaneOpacity: 0.65, closeTerminalsOnAppExit: false, fontFamily: "", fontWeight: 1200, fontStyle: "invalid", fontSize: 13, lineHeight: 1, horizontalSpacing: 3 }), {
+  assert.deepEqual(await api.saveTerminalSettings({ newTabDirectory: "", newPaneDirectory: "", inactivePaneOpacity: 0.65, closeTerminalsOnAppExit: false, fontFamily: "", fontWeight: 1200, fontStyle: "invalid", fontSize: 13, lineHeight: 1, horizontalSpacing: 3, scrollbackLines: 200000 }), {
     newTabDirectory: null,
     newPaneDirectory: null,
     inactivePaneOpacity: 0.65,
@@ -205,6 +208,7 @@ test("local fallback stores terminal settings and restores defaults", async () =
     fontSize: 13,
     lineHeight: 100,
     horizontalSpacing: 100,
+    scrollbackLines: 100000,
     profileDirectory: "~",
   });
   assert.deepEqual(await api.listTerminalFonts(), []);

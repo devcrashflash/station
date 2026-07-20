@@ -3,6 +3,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SerializeAddon } from "@xterm/addon-serialize";
 import "@xterm/xterm/css/xterm.css";
 
 import {
@@ -102,6 +103,7 @@ function measureTerminalCharacterWidth(host, fontFamily, fontWeight, fontStyle, 
 function TerminalPane({
   tabId,
   pane,
+  active,
   focused,
   titled,
   bounds,
@@ -113,16 +115,22 @@ function TerminalPane({
   fontSize,
   lineHeight,
   horizontalSpacing,
+  scrollbackLines,
 }) {
   const hostRef = useRef(null);
   const terminalRef = useRef(null);
   const fitRef = useRef(null);
+  const serializeRef = useRef(null);
+  const serializedStateRef = useRef("");
+  const attachmentIdRef = useRef(null);
+  const teardownRef = useRef(null);
+  const transitionRef = useRef(Promise.resolve());
+  const desiredActiveRef = useRef(active);
+  const mountedRef = useRef(true);
   const startupReadyTimerRef = useRef(0);
   const [lifecycle, setLifecycle] = useState({ running: true, exitCode: null, error: "" });
 
-  const attach = useCallback(async (command = "terminal_attach") => {
-    const terminal = terminalRef.current;
-    const fit = fitRef.current;
+  const attach = useCallback(async (terminal, fit, command = "terminal_attach") => {
     if (!terminal || !fit) return;
     fit.fit();
     let receivedOutput = false;
@@ -144,7 +152,7 @@ function TerminalPane({
       }
     });
     setLifecycle({ running: true, exitCode: null, error: "" });
-    await invoke(command, {
+    const result = await invoke(command, {
       tabId,
       paneId: pane.paneId,
       cols: terminal.cols,
@@ -152,32 +160,51 @@ function TerminalPane({
       onOutput,
       onEvent,
     });
+    attachmentIdRef.current = result.attachmentId;
     // Interactive shells normally print a prompt. Keep a fallback for custom
     // shells with an empty prompt so a deferred terminal can still activate.
     if (!receivedOutput) scheduleStartupReady(1000);
   }, [pane.paneId, tabId]);
 
-  useEffect(() => {
+  async function createRenderer() {
+    if (!hostRef.current || terminalRef.current) return;
     const terminal = new Terminal({
       allowProposedApi: false,
       cursorBlink: true,
-      fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-      fontWeight: 400,
-      fontWeightBold: 700,
-      fontSize: 13,
+      fontFamily,
+      fontWeight,
+      fontWeightBold: fontWeight < 700 ? 700 : 900,
+      fontSize,
+      lineHeight: lineHeight / 100,
       minimumContrastRatio: 4.5,
-      scrollback: 10_000,
+      scrollback: scrollbackLines,
       theme: document.documentElement.classList.contains("dark")
         ? DARK_TERMINAL_THEME
         : LIGHT_TERMINAL_THEME,
     });
     const fit = new FitAddon();
+    const serialize = new SerializeAddon();
     terminal.loadAddon(fit);
+    terminal.loadAddon(serialize);
     openTerminalWithConsistentFontMeasurement(terminal, hostRef.current);
-    terminal.element.style.fontStyle = "normal";
+    terminal.element.style.fontStyle = fontStyle;
+    hostRef.current.style.fontStyle = fontStyle;
     terminalRef.current = terminal;
     fitRef.current = fit;
+    serializeRef.current = serialize;
     fit.fit();
+
+    const characterWidth = measureTerminalCharacterWidth(
+      hostRef.current,
+      fontFamily,
+      fontWeight,
+      fontStyle,
+      fontSize,
+    );
+    terminal.options.letterSpacing = terminalCellLetterSpacing(characterWidth, horizontalSpacing);
+    if (serializedStateRef.current) {
+      await new Promise((resolve) => terminal.write(serializedStateRef.current, resolve));
+    }
 
     terminal.attachCustomKeyEventHandler((event) => {
       if (!isTerminalClearShortcut(event)) return true;
@@ -210,19 +237,75 @@ function TerminalPane({
       }).catch(() => {});
     });
     resizeObserver.observe(hostRef.current);
-    attach().catch((error) => setLifecycle({ running: false, exitCode: null, error: error?.message || String(error) }));
-
-    return () => {
+    teardownRef.current = () => {
       clearTimeout(startupReadyTimerRef.current);
       resizeObserver.disconnect();
       dataDisposable.dispose();
       titleDisposable.dispose();
       cwdDisposable.dispose();
-      terminal.dispose();
-      terminalRef.current = null;
-      fitRef.current = null;
     };
-  }, [attach, pane.paneId, tabId]);
+
+    if (pane.running === false && pane.exitCode !== null) {
+      setLifecycle({ running: false, exitCode: pane.exitCode, error: "" });
+      return;
+    }
+    try {
+      await attach(terminal, fit);
+    } catch (error) {
+      if (terminalRef.current === terminal) {
+        setLifecycle({ running: false, exitCode: null, error: error?.message || String(error) });
+      }
+    }
+  }
+
+  async function disposeRenderer() {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    const attachmentId = attachmentIdRef.current;
+    if (attachmentId !== null) {
+      await invoke("terminal_detach", {
+        tabId,
+        paneId: pane.paneId,
+        attachmentId,
+      }).catch(() => {});
+    }
+    await new Promise((resolve) => terminal.write("", resolve));
+    if (terminalRef.current !== terminal) return;
+    serializedStateRef.current = serializeRef.current?.serialize({ scrollback: scrollbackLines }) || "";
+    teardownRef.current?.();
+    teardownRef.current = null;
+    terminal.dispose();
+    terminalRef.current = null;
+    fitRef.current = null;
+    serializeRef.current = null;
+    attachmentIdRef.current = null;
+  }
+
+  useEffect(() => {
+    desiredActiveRef.current = active;
+    transitionRef.current = transitionRef.current.then(async () => {
+      while (mountedRef.current && desiredActiveRef.current !== Boolean(terminalRef.current)) {
+        if (desiredActiveRef.current) {
+          await createRenderer();
+          if (!terminalRef.current) break;
+        } else {
+          await disposeRenderer();
+        }
+      }
+    }).catch(console.error);
+  }, [active]);
+
+  useEffect(() => () => {
+    mountedRef.current = false;
+    desiredActiveRef.current = false;
+    transitionRef.current = transitionRef.current.then(disposeRenderer).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (pane.running === false && pane.exitCode !== null) {
+      setLifecycle({ running: false, exitCode: pane.exitCode, error: "" });
+    }
+  }, [pane.exitCode, pane.running]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -238,6 +321,7 @@ function TerminalPane({
     terminal.options.fontWeightBold = fontWeight < 700 ? 700 : 900;
     terminal.options.fontSize = fontSize;
     terminal.options.lineHeight = lineHeight / 100;
+    terminal.options.scrollback = scrollbackLines;
     const characterWidth = measureTerminalCharacterWidth(
       hostRef.current,
       fontFamily,
@@ -254,7 +338,7 @@ function TerminalPane({
       cols: terminal.cols,
       rows: terminal.rows,
     }).catch(() => {});
-  }, [fontFamily, fontWeight, fontStyle, fontSize, lineHeight, horizontalSpacing, pane.paneId, tabId]);
+  }, [fontFamily, fontWeight, fontStyle, fontSize, lineHeight, horizontalSpacing, scrollbackLines, pane.paneId, tabId]);
 
   useEffect(() => {
     if (focused) terminalRef.current?.focus();
@@ -268,8 +352,10 @@ function TerminalPane({
   }
 
   async function restart() {
-    terminalRef.current?.clear();
-    await attach("restart_terminal");
+    const terminal = terminalRef.current;
+    const fit = fitRef.current;
+    terminal?.clear();
+    await attach(terminal, fit, "restart_terminal");
     focus();
   }
 
@@ -391,6 +477,7 @@ const DEFAULT_TERMINAL_SETTINGS = {
     fontSize: 13,
     lineHeight: 100,
     horizontalSpacing: 100,
+    scrollbackLines: 10_000,
   },
 };
 
@@ -405,6 +492,7 @@ function normalizeTerminalSettings(settings = {}) {
       fontSize: settings.fontSize ?? 13,
       lineHeight: settings.lineHeight ?? 100,
       horizontalSpacing: settings.horizontalSpacing ?? 100,
+      scrollbackLines: settings.scrollbackLines ?? 10_000,
     },
   };
 }
@@ -546,6 +634,7 @@ function TerminalTabSurface({ tabId, layout, active, inactivePaneOpacity, typogr
           key={pane.paneId}
           tabId={tabId}
           pane={pane}
+          active={active}
           bounds={bounds}
           focused={active && pane.paneId === layout.focusedPaneId}
           titled={panesAreSplit}

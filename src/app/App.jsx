@@ -143,6 +143,7 @@ function App() {
     fontSize: 13,
     lineHeight: 100,
     horizontalSpacing: 100,
+    scrollbackLines: 10_000,
     profileDirectory: "~",
   });
   const [terminalFonts, setTerminalFonts] = useState([]);

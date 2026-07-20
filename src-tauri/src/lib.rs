@@ -1263,6 +1263,7 @@ pub fn run() {
             terminal_tabs::move_terminal_pane,
             terminal_tabs::restart_terminal,
             terminal_tabs::terminal_attach,
+            terminal_tabs::terminal_detach,
             terminal_tabs::terminal_surface_ready,
             terminal_tabs::terminal_write,
             terminal_tabs::terminal_resize,

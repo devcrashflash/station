@@ -915,6 +915,7 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
   const [fontSize, setFontSize] = useState(String(settings?.fontSize ?? 13));
   const [lineHeight, setLineHeight] = useState(String(settings?.lineHeight ?? 100));
   const [horizontalSpacing, setHorizontalSpacing] = useState(String(settings?.horizontalSpacing ?? 100));
+  const [scrollbackLines, setScrollbackLines] = useState(String(settings?.scrollbackLines ?? 10_000));
   const [notice, setNotice] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [choosingFor, setChoosingFor] = useState(null);
@@ -930,7 +931,8 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
     setFontSize(String(settings?.fontSize ?? 13));
     setLineHeight(String(settings?.lineHeight ?? 100));
     setHorizontalSpacing(String(settings?.horizontalSpacing ?? 100));
-  }, [settings?.newTabDirectory, settings?.newPaneDirectory, settings?.inactivePaneOpacity, settings?.closeTerminalsOnAppExit, settings?.fontFamily, settings?.fontWeight, settings?.fontStyle, settings?.fontSize, settings?.lineHeight, settings?.horizontalSpacing]);
+    setScrollbackLines(String(settings?.scrollbackLines ?? 10_000));
+  }, [settings?.newTabDirectory, settings?.newPaneDirectory, settings?.inactivePaneOpacity, settings?.closeTerminalsOnAppExit, settings?.fontFamily, settings?.fontWeight, settings?.fontStyle, settings?.fontSize, settings?.lineHeight, settings?.horizontalSpacing, settings?.scrollbackLines]);
 
   const selectedFont = terminalFontFamily(fonts, fontFamily);
   const selectedStyle = terminalFontStyle(selectedFont, fontWeight, fontStyle);
@@ -972,6 +974,7 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
       const parsedFontSize = Number(fontSize);
       const parsedLineHeight = Number(lineHeight);
       const parsedHorizontalSpacing = Number(horizontalSpacing);
+      const parsedScrollbackLines = Number(scrollbackLines);
       if (!Number.isFinite(parsedFontSize) || parsedFontSize < 8 || parsedFontSize > 32) {
         throw new Error("Font size must be between 8 and 32 pixels.");
       }
@@ -980,6 +983,9 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
       }
       if (!Number.isFinite(parsedHorizontalSpacing) || parsedHorizontalSpacing < 100 || parsedHorizontalSpacing > 200) {
         throw new Error("Horizontal spacing must be between 100 and 200 percent.");
+      }
+      if (!Number.isInteger(parsedScrollbackLines) || parsedScrollbackLines < 0 || parsedScrollbackLines > 100_000) {
+        throw new Error("Scrollback must be a whole number between 0 and 100,000 lines.");
       }
       await onSave({
         newTabDirectory,
@@ -992,6 +998,7 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
         fontSize: parsedFontSize,
         lineHeight: parsedLineHeight,
         horizontalSpacing: parsedHorizontalSpacing,
+        scrollbackLines: parsedScrollbackLines,
       });
       setNotice("Terminal settings saved.");
     } catch (error) {
@@ -1093,6 +1100,19 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
       </Field>
 
       <Field>
+        <FieldLabel>Scrollback lines</FieldLabel>
+        <Input
+          type="number"
+          min="0"
+          max="100000"
+          step="1000"
+          value={scrollbackLines}
+          onChange={(event) => setScrollbackLines(event.target.value)}
+        />
+        <p className="text-xs text-muted-foreground">0 disables history; maximum 100,000 lines.</p>
+      </Field>
+
+      <Field>
         <div className="flex items-center justify-between gap-3">
           <FieldLabel>Inactive pane opacity</FieldLabel>
           <span className="text-xs tabular-nums text-muted-foreground">{Math.round(inactivePaneOpacity * 100)}%</span>
@@ -1129,7 +1149,7 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
           {isSaving && <LoaderCircle className="animate-spin" />}
           Save terminal
         </Button>
-        <Button type="button" variant="outline" onClick={() => { setNewTabDirectory(""); setNewPaneDirectory(""); setInactivePaneOpacity(0.65); setCloseTerminalsOnAppExit(false); setFontFamily("ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"); setFontSize("13"); setLineHeight("1"); }}>
+        <Button type="button" variant="outline" onClick={() => { setNewTabDirectory(""); setNewPaneDirectory(""); setInactivePaneOpacity(0.65); setCloseTerminalsOnAppExit(false); setFontFamily("ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"); setFontSize("13"); setLineHeight("100"); setHorizontalSpacing("100"); setScrollbackLines("10000"); }}>
           <RotateCcw className="size-4" />
           Restore defaults
         </Button>
