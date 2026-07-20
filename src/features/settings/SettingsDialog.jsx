@@ -460,7 +460,7 @@ function ShortcutsTab({ settings, onSave }) {
       <div className="grid gap-1">
         <p className="text-sm font-medium">Quick capture overlay</p>
         <p className="text-xs text-muted-foreground">
-          Open the capture overlay from any application while Studio is running.
+          Open the capture overlay from any application while Station is running.
         </p>
       </div>
 

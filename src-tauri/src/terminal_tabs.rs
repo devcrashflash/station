@@ -723,7 +723,7 @@ fn layout_webviews(window: &Window) -> Result<(), String> {
 
 pub fn setup_workspace_window(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let window = tauri::window::WindowBuilder::new(app, "main")
-        .title("Dev Crash Flash AI Studio")
+        .title("Station by DevCrashFlash")
         .inner_size(1400.0, 900.0)
         .visible(false)
         .build()?;

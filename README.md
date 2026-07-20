@@ -1,4 +1,4 @@
-# Dev Crash Flash AI Studio
+# Station by DevCrashFlash
 
 Minimal Tauri v2 starter using React, JavaScript, Vite, Tailwind CSS, and shadcn/ui.
 

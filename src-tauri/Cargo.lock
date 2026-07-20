@@ -782,7 +782,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dev-crash-flash-studio"
+name = "devcrashflash-station"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",

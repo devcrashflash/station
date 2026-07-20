@@ -146,6 +146,49 @@ test("local fallback migrates legacy AI Agents into AI Prompts", async () => {
   assert.equal(JSON.parse(stored).aiAgents, undefined);
 });
 
+test("local fallback imports legacy AI Studio state into Station storage", async () => {
+  const values = new Map([
+    ["dev-crash-flash-ai-studio-state", JSON.stringify({
+      projects: [{ id: "project_1", name: "Legacy project" }],
+    })],
+  ]);
+  global.localStorage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => { values.set(key, value); },
+  };
+
+  assert.deepEqual(
+    (await api.listProjects()).map(({ id, name }) => ({ id, name })),
+    [{ id: "project_1", name: "Legacy project" }],
+  );
+  assert.deepEqual(
+    JSON.parse(values.get("devcrashflash-station-state"))
+      .projects.map(({ id, name }) => ({ id, name })),
+    [{ id: "project_1", name: "Legacy project" }],
+  );
+  assert.equal(values.has("dev-crash-flash-ai-studio-state"), true);
+});
+
+test("local fallback prefers existing Station state over legacy storage", async () => {
+  const values = new Map([
+    ["devcrashflash-station-state", JSON.stringify({
+      projects: [{ id: "project_station", name: "Station project" }],
+    })],
+    ["dev-crash-flash-ai-studio-state", JSON.stringify({
+      projects: [{ id: "project_legacy", name: "Legacy project" }],
+    })],
+  ]);
+  global.localStorage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => { values.set(key, value); },
+  };
+
+  assert.deepEqual(
+    (await api.listProjects()).map(({ id, name }) => ({ id, name })),
+    [{ id: "project_station", name: "Station project" }],
+  );
+});
+
 test("local fallback stores terminal settings and restores defaults", async () => {
   let stored = "";
   global.localStorage = {

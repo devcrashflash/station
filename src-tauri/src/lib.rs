@@ -33,6 +33,10 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static GOOGLE_OAUTH_ACTIVE: AtomicBool = AtomicBool::new(false);
 static GOOGLE_OAUTH_CANCELLED: AtomicBool = AtomicBool::new(false);
 const DEFAULT_PROJECT_COLOR: &str = "#2563eb";
+const APP_DATABASE_FILENAME: &str = "default.sqlite";
+const APP_DATABASE_MIGRATION_FILENAME: &str = "default.sqlite.migrating";
+const LEGACY_APP_IDENTIFIER: &str = "com.devcrashflash.aistudio";
+const LEGACY_DATABASE_FILENAME: &str = "studio.sqlite";
 const BROWSER_BUNDLE_ID_SETTING_KEY: &str = "browser_bundle_id";
 const DEFAULT_QUICK_CAPTURE_SHORTCUT: &str = "CommandOrControl+Shift+Space";
 const QUICK_CAPTURE_SHORTCUT_SETTING_KEY: &str = "quick_capture_shortcut";
@@ -1120,6 +1124,37 @@ struct ProviderResourceMetadata {
     icon_url: Option<String>,
 }
 
+fn prepare_app_database(app_dir: &Path) -> std::io::Result<PathBuf> {
+    fs::create_dir_all(app_dir)?;
+    let database_path = app_dir.join(APP_DATABASE_FILENAME);
+    if database_path.exists() {
+        return Ok(database_path);
+    }
+
+    let Some(data_root) = app_dir.parent() else {
+        return Ok(database_path);
+    };
+    let legacy_database_path = data_root
+        .join(LEGACY_APP_IDENTIFIER)
+        .join(LEGACY_DATABASE_FILENAME);
+    if legacy_database_path.exists() {
+        let migration_path = app_dir.join(APP_DATABASE_MIGRATION_FILENAME);
+        if migration_path.exists() {
+            fs::remove_file(&migration_path)?;
+        }
+        if let Err(error) = fs::copy(&legacy_database_path, &migration_path) {
+            let _ = fs::remove_file(&migration_path);
+            return Err(error);
+        }
+        if let Err(error) = fs::rename(&migration_path, &database_path) {
+            let _ = fs::remove_file(&migration_path);
+            return Err(error);
+        }
+    }
+
+    Ok(database_path)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
@@ -1156,8 +1191,7 @@ pub fn run() {
             )?;
 
             let app_dir = app.path().app_data_dir()?;
-            fs::create_dir_all(&app_dir)?;
-            let db_path = app_dir.join("studio.sqlite");
+            let db_path = prepare_app_database(&app_dir)?;
             let db = SqliteConnection::open(&db_path)?;
             init_database(&db)?;
             terminal_tabs::init_terminal_schema(&db)?;
@@ -3255,7 +3289,7 @@ fn github_review_headers(connection: &ConnectionRecord) -> Vec<(&'static str, St
         ("Accept", "application/vnd.github+json".to_string()),
         ("Authorization", format!("Bearer {}", connection.token)),
         ("X-GitHub-Api-Version", "2022-11-28".to_string()),
-        ("User-Agent", "dev-crash-flash-ai-studio".to_string()),
+        ("User-Agent", "devcrashflash-station".to_string()),
     ]
 }
 
@@ -6601,7 +6635,7 @@ fn fetch_github_pull_request_comments(
     let headers = vec![
         ("Authorization", format!("Bearer {}", connection.token)),
         ("X-GitHub-Api-Version", "2022-11-28".to_string()),
-        ("User-Agent", "dev-crash-flash-ai-studio".to_string()),
+        ("User-Agent", "devcrashflash-station".to_string()),
     ];
     let conversation = fetch_paginated_json(
         &format!("https://api.github.com/repos/{repo_path}/issues/{number}/comments"),
@@ -7181,7 +7215,7 @@ fn fetch_github_review_requests(
         vec![
             ("Authorization", format!("Bearer {}", connection.token)),
             ("X-GitHub-Api-Version", "2022-11-28".to_string()),
-            ("User-Agent", "dev-crash-flash-ai-studio".to_string()),
+            ("User-Agent", "devcrashflash-station".to_string()),
         ],
     )?;
 
@@ -7384,7 +7418,7 @@ fn fetch_github_activities(
     let headers = vec![
         ("Authorization", format!("Bearer {}", connection.token)),
         ("X-GitHub-Api-Version", "2022-11-28".to_string()),
-        ("User-Agent", "dev-crash-flash-ai-studio".to_string()),
+        ("User-Agent", "devcrashflash-station".to_string()),
     ];
     let user = fetch_json("https://api.github.com/user", headers.clone())?;
     let login = json_string(&user, "login")
@@ -8298,7 +8332,7 @@ fn test_github_connection(connection: &ConnectionRecord) -> Result<Option<String
         vec![
             ("Authorization", format!("Bearer {}", connection.token)),
             ("X-GitHub-Api-Version", "2022-11-28".to_string()),
-            ("User-Agent", "dev-crash-flash-ai-studio".to_string()),
+            ("User-Agent", "devcrashflash-station".to_string()),
         ],
     )?;
     Ok(account_name_from_json(&json, &["login", "name"]))
@@ -8577,7 +8611,7 @@ fn fetch_github_pull_request(
         vec![
             ("Authorization", format!("Bearer {}", connection.token)),
             ("X-GitHub-Api-Version", "2022-11-28".to_string()),
-            ("User-Agent", "dev-crash-flash-ai-studio".to_string()),
+            ("User-Agent", "devcrashflash-station".to_string()),
         ],
     )?;
     let comments = fetch_github_pull_request_comments(connection, &repo_path, &number)?;
@@ -8604,7 +8638,7 @@ fn fetch_github_issue(
         vec![
             ("Authorization", format!("Bearer {}", connection.token)),
             ("X-GitHub-Api-Version", "2022-11-28".to_string()),
-            ("User-Agent", "dev-crash-flash-ai-studio".to_string()),
+            ("User-Agent", "devcrashflash-station".to_string()),
         ],
     )?;
     Ok(ProviderMetadata {
@@ -10515,6 +10549,79 @@ mod tests {
     }
 
     #[test]
+    fn migrates_legacy_database_to_default_profile() {
+        let data_root = temp_test_path("station_database_migration");
+        let app_dir = data_root.join("com.devcrashflash.station");
+        let legacy_dir = data_root.join(LEGACY_APP_IDENTIFIER);
+        fs::create_dir_all(&legacy_dir).expect("create legacy app directory");
+        fs::write(
+            legacy_dir.join(LEGACY_DATABASE_FILENAME),
+            b"legacy database",
+        )
+        .expect("write legacy database");
+
+        let database_path = prepare_app_database(&app_dir).expect("migrate legacy database");
+
+        assert_eq!(database_path, app_dir.join(APP_DATABASE_FILENAME));
+        assert_eq!(
+            fs::read(&database_path).expect("read migrated database"),
+            b"legacy database"
+        );
+        assert!(legacy_dir.join(LEGACY_DATABASE_FILENAME).exists());
+        let _ = fs::remove_dir_all(data_root);
+    }
+
+    #[test]
+    fn prepares_fresh_default_database_path_without_legacy_data() {
+        let data_root = temp_test_path("station_fresh_database");
+        let app_dir = data_root.join("com.devcrashflash.station");
+
+        let database_path = prepare_app_database(&app_dir).expect("prepare database path");
+
+        assert_eq!(database_path, app_dir.join(APP_DATABASE_FILENAME));
+        assert!(!database_path.exists());
+        let _ = fs::remove_dir_all(data_root);
+    }
+
+    #[test]
+    fn existing_default_database_takes_precedence_over_legacy_data() {
+        let data_root = temp_test_path("station_existing_database");
+        let app_dir = data_root.join("com.devcrashflash.station");
+        let legacy_dir = data_root.join(LEGACY_APP_IDENTIFIER);
+        fs::create_dir_all(&app_dir).expect("create Station app directory");
+        fs::create_dir_all(&legacy_dir).expect("create legacy app directory");
+        fs::write(app_dir.join(APP_DATABASE_FILENAME), b"Station database")
+            .expect("write Station database");
+        fs::write(
+            legacy_dir.join(LEGACY_DATABASE_FILENAME),
+            b"legacy database",
+        )
+        .expect("write legacy database");
+
+        let database_path = prepare_app_database(&app_dir).expect("prepare existing database");
+
+        assert_eq!(
+            fs::read(database_path).expect("read Station database"),
+            b"Station database"
+        );
+        let _ = fs::remove_dir_all(data_root);
+    }
+
+    #[test]
+    fn reports_legacy_database_copy_failures() {
+        let data_root = temp_test_path("station_failed_database_migration");
+        let app_dir = data_root.join("com.devcrashflash.station");
+        let legacy_database_path = data_root
+            .join(LEGACY_APP_IDENTIFIER)
+            .join(LEGACY_DATABASE_FILENAME);
+        fs::create_dir_all(&legacy_database_path).expect("create invalid legacy database");
+
+        assert!(prepare_app_database(&app_dir).is_err());
+        assert!(!app_dir.join(APP_DATABASE_FILENAME).exists());
+        let _ = fs::remove_dir_all(data_root);
+    }
+
+    #[test]
     fn quick_capture_centers_on_a_secondary_monitor_with_negative_coordinates() {
         assert_eq!(
             centered_origin(-1920.0, 24.0, 1920.0, 1056.0, 640.0, 180.0),
@@ -10649,7 +10756,7 @@ mod tests {
 
     fn temp_file(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "dev-crash-flash-ai-studio-{}-{}-{name}",
+            "devcrashflash-station-{}-{}-{name}",
             std::process::id(),
             NEXT_ID.fetch_add(1, Ordering::Relaxed)
         ));
@@ -11410,7 +11517,7 @@ mod tests {
 
     fn unique_temp_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "dev-crash-flash-ai-studio-{name}-{}-{}",
+            "devcrashflash-station-{name}-{}-{}",
             std::process::id(),
             NEXT_ID.fetch_add(1, Ordering::Relaxed)
         ))

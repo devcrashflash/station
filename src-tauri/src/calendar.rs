@@ -521,7 +521,7 @@ fn google_oauth_callback_page(cancelled: bool) -> String {
     } else {
         (
             "Google account connected",
-            "Google authorization was received. Return to Dev Crash Flash.",
+            "Google authorization was received. Return to Station.",
         )
     };
     format!(

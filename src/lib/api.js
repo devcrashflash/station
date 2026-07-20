@@ -7,7 +7,8 @@ import { normalizeExternalLabelColor } from "./externalLabels.js";
 import { normalizeProjectColor } from "./projectAvatar.js";
 import { parseSmartInput } from "./smartInputParser.js";
 
-const STORAGE_KEY = "dev-crash-flash-ai-studio-state";
+const STORAGE_KEY = "devcrashflash-station-state";
+const LEGACY_STORAGE_KEY = "dev-crash-flash-ai-studio-state";
 
 const defaultState = {
   projects: [],
@@ -218,8 +219,10 @@ async function call(command, payload, fallback) {
 
 function readState() {
   try {
-    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    let migrated = false;
+    const storedState = localStorage.getItem(STORAGE_KEY);
+    const legacyState = storedState === null ? localStorage.getItem(LEGACY_STORAGE_KEY) : null;
+    const parsed = JSON.parse(storedState ?? legacyState);
+    let migrated = legacyState !== null;
     if (!Array.isArray(parsed?.aiPrompts) && Array.isArray(parsed?.aiAgents)) {
       parsed.aiPrompts = parsed.aiAgents.map(({ type, ...agent }) => ({
         ...agent,
