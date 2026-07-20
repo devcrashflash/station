@@ -39,6 +39,9 @@ const defaultState = {
     newPaneDirectory: null,
     inactivePaneOpacity: 0.65,
     closeTerminalsOnAppExit: false,
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+    fontSize: 13,
+    lineHeight: 1,
     profileDirectory: "~",
   },
 };
@@ -712,6 +715,8 @@ const local = {
   saveTerminalSettings(input) {
     const state = readState();
     const requestedOpacity = Number(input.inactivePaneOpacity);
+    const requestedFontSize = Number(input.fontSize);
+    const requestedLineHeight = Number(input.lineHeight);
     state.terminalSettings = {
       newTabDirectory: input.newTabDirectory?.trim() || null,
       newPaneDirectory: input.newPaneDirectory?.trim() || null,
@@ -721,6 +726,13 @@ const local = {
       closeTerminalsOnAppExit: input.closeTerminalsOnAppExit
         ?? state.terminalSettings?.closeTerminalsOnAppExit
         ?? false,
+      fontFamily: input.fontFamily?.trim() || defaultState.terminalSettings.fontFamily,
+      fontSize: Number.isFinite(requestedFontSize)
+        ? Math.min(32, Math.max(8, requestedFontSize))
+        : defaultState.terminalSettings.fontSize,
+      lineHeight: Number.isFinite(requestedLineHeight)
+        ? Math.min(2, Math.max(1, requestedLineHeight))
+        : defaultState.terminalSettings.lineHeight,
       profileDirectory: state.terminalSettings?.profileDirectory || "~",
     };
     writeState(state);

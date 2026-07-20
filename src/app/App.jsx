@@ -136,6 +136,9 @@ function App() {
     newPaneDirectory: null,
     inactivePaneOpacity: 0.65,
     closeTerminalsOnAppExit: false,
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+    fontSize: 13,
+    lineHeight: 1,
     profileDirectory: "~",
   });
   const [quickCaptureShortcutSettings, setQuickCaptureShortcutSettings] = useState({

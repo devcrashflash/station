@@ -25,7 +25,14 @@ const NEW_TAB_DIRECTORY_SETTING_KEY: &str = "terminal_new_tab_directory";
 const NEW_PANE_DIRECTORY_SETTING_KEY: &str = "terminal_new_pane_directory";
 const INACTIVE_PANE_OPACITY_SETTING_KEY: &str = "terminal_inactive_pane_opacity";
 const CLOSE_TERMINALS_ON_APP_EXIT_SETTING_KEY: &str = "terminal_close_on_app_exit";
+const FONT_FAMILY_SETTING_KEY: &str = "terminal_font_family";
+const FONT_SIZE_SETTING_KEY: &str = "terminal_font_size";
+const LINE_HEIGHT_SETTING_KEY: &str = "terminal_line_height";
 const DEFAULT_INACTIVE_PANE_OPACITY: f64 = 0.65;
+const DEFAULT_FONT_FAMILY: &str =
+    "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
+const DEFAULT_FONT_SIZE: f64 = 13.0;
+const DEFAULT_LINE_HEIGHT: f64 = 1.0;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +41,9 @@ pub struct TerminalSettings {
     new_pane_directory: Option<String>,
     inactive_pane_opacity: f64,
     close_terminals_on_app_exit: bool,
+    font_family: String,
+    font_size: f64,
+    line_height: f64,
     profile_directory: String,
 }
 
@@ -44,6 +54,9 @@ pub struct TerminalSettingsInput {
     new_pane_directory: Option<String>,
     inactive_pane_opacity: Option<f64>,
     close_terminals_on_app_exit: Option<bool>,
+    font_family: Option<String>,
+    font_size: Option<f64>,
+    line_height: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1248,6 +1261,30 @@ fn close_terminals_on_app_exit(db: &SqliteConnection) -> bool {
         .is_some_and(|value| value == "true")
 }
 
+fn terminal_font_family(db: &SqliteConnection) -> String {
+    get_app_setting(db, FONT_FAMILY_SETTING_KEY)
+        .ok()
+        .flatten()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_FONT_FAMILY.to_string())
+}
+
+fn terminal_number_setting(
+    db: &SqliteConnection,
+    key: &str,
+    default: f64,
+    min: f64,
+    max: f64,
+) -> f64 {
+    get_app_setting(db, key)
+        .ok()
+        .flatten()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite())
+        .map(|value| value.clamp(min, max))
+        .unwrap_or(default)
+}
+
 #[tauri::command]
 pub fn list_terminal_settings(
     app: tauri::AppHandle,
@@ -1261,6 +1298,21 @@ pub fn list_terminal_settings(
             .map_err(db_error)?,
         inactive_pane_opacity: inactive_pane_opacity(&db),
         close_terminals_on_app_exit: close_terminals_on_app_exit(&db),
+        font_family: terminal_font_family(&db),
+        font_size: terminal_number_setting(
+            &db,
+            FONT_SIZE_SETTING_KEY,
+            DEFAULT_FONT_SIZE,
+            8.0,
+            32.0,
+        ),
+        line_height: terminal_number_setting(
+            &db,
+            LINE_HEIGHT_SETTING_KEY,
+            DEFAULT_LINE_HEIGHT,
+            1.0,
+            2.0,
+        ),
         profile_directory: profile_directory.to_string_lossy().into_owned(),
     })
 }
@@ -1281,6 +1333,18 @@ pub fn save_terminal_settings(
         return Err("Inactive pane opacity must be a finite number.".to_string());
     }
     let inactive_pane_opacity = requested_opacity.clamp(0.2, 0.95);
+    let font_family = input
+        .font_family
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_FONT_FAMILY.to_string());
+    let requested_font_size = input.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+    let requested_line_height = input.line_height.unwrap_or(DEFAULT_LINE_HEIGHT);
+    if !requested_font_size.is_finite() || !requested_line_height.is_finite() {
+        return Err("Terminal font size and line height must be finite numbers.".to_string());
+    }
+    let font_size = requested_font_size.clamp(8.0, 32.0);
+    let line_height = requested_line_height.clamp(1.0, 2.0);
     {
         let db = state.db.lock().map_err(db_error)?;
         let close_terminals_on_app_exit = input
@@ -1315,6 +1379,11 @@ pub fn save_terminal_settings(
             }),
         )
         .map_err(db_error)?;
+        set_app_setting(&db, FONT_FAMILY_SETTING_KEY, Some(&font_family)).map_err(db_error)?;
+        set_app_setting(&db, FONT_SIZE_SETTING_KEY, Some(&font_size.to_string()))
+            .map_err(db_error)?;
+        set_app_setting(&db, LINE_HEIGHT_SETTING_KEY, Some(&line_height.to_string()))
+            .map_err(db_error)?;
     }
     let settings = list_terminal_settings(app.clone(), state)?;
     let _ = app.emit("terminal-settings-changed", &settings);
@@ -1824,6 +1893,42 @@ mod tests {
 
         set_app_setting(&db, INACTIVE_PANE_OPACITY_SETTING_KEY, Some("invalid")).unwrap();
         assert_eq!(inactive_pane_opacity(&db), DEFAULT_INACTIVE_PANE_OPACITY);
+    }
+
+    #[test]
+    fn terminal_typography_settings_use_defaults_and_clamp_saved_values() {
+        let db = SqliteConnection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );",
+        )
+        .unwrap();
+
+        assert_eq!(terminal_font_family(&db), DEFAULT_FONT_FAMILY);
+        assert_eq!(
+            terminal_number_setting(&db, FONT_SIZE_SETTING_KEY, DEFAULT_FONT_SIZE, 8.0, 32.0),
+            DEFAULT_FONT_SIZE
+        );
+        assert_eq!(
+            terminal_number_setting(&db, LINE_HEIGHT_SETTING_KEY, DEFAULT_LINE_HEIGHT, 1.0, 2.0),
+            DEFAULT_LINE_HEIGHT
+        );
+
+        set_app_setting(&db, FONT_FAMILY_SETTING_KEY, Some("JetBrains Mono")).unwrap();
+        set_app_setting(&db, FONT_SIZE_SETTING_KEY, Some("48")).unwrap();
+        set_app_setting(&db, LINE_HEIGHT_SETTING_KEY, Some("0.5")).unwrap();
+        assert_eq!(terminal_font_family(&db), "JetBrains Mono");
+        assert_eq!(
+            terminal_number_setting(&db, FONT_SIZE_SETTING_KEY, DEFAULT_FONT_SIZE, 8.0, 32.0),
+            32.0
+        );
+        assert_eq!(
+            terminal_number_setting(&db, LINE_HEIGHT_SETTING_KEY, DEFAULT_LINE_HEIGHT, 1.0, 2.0),
+            1.0
+        );
     }
 
     #[test]

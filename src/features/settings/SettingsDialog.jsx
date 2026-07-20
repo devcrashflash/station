@@ -64,7 +64,7 @@ const settingsSections = [
   { id: "directories", label: "Directories", description: "Local source folders", icon: FolderOpen },
   { id: "shortcuts", label: "Shortcuts", description: "Global quick capture", icon: Keyboard },
   { id: "appearance", label: "Appearance", description: "Color theme", icon: Palette },
-  { id: "terminal", label: "Terminal", description: "Start directories", icon: SquareTerminal },
+  { id: "terminal", label: "Terminal", description: "Typography and behavior", icon: SquareTerminal },
   { id: "browser", label: "Browser", description: "New tab behavior", icon: Monitor },
 ];
 
@@ -906,6 +906,9 @@ function TerminalTab({ settings, onChooseDirectory, onSave }) {
   const [newPaneDirectory, setNewPaneDirectory] = useState(settings?.newPaneDirectory || "");
   const [inactivePaneOpacity, setInactivePaneOpacity] = useState(settings?.inactivePaneOpacity ?? 0.65);
   const [closeTerminalsOnAppExit, setCloseTerminalsOnAppExit] = useState(settings?.closeTerminalsOnAppExit ?? false);
+  const [fontFamily, setFontFamily] = useState(settings?.fontFamily || "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace");
+  const [fontSize, setFontSize] = useState(String(settings?.fontSize ?? 13));
+  const [lineHeight, setLineHeight] = useState(String(settings?.lineHeight ?? 1));
   const [notice, setNotice] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [choosingFor, setChoosingFor] = useState(null);
@@ -915,7 +918,10 @@ function TerminalTab({ settings, onChooseDirectory, onSave }) {
     setNewPaneDirectory(settings?.newPaneDirectory || "");
     setInactivePaneOpacity(settings?.inactivePaneOpacity ?? 0.65);
     setCloseTerminalsOnAppExit(settings?.closeTerminalsOnAppExit ?? false);
-  }, [settings?.newTabDirectory, settings?.newPaneDirectory, settings?.inactivePaneOpacity, settings?.closeTerminalsOnAppExit]);
+    setFontFamily(settings?.fontFamily || "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace");
+    setFontSize(String(settings?.fontSize ?? 13));
+    setLineHeight(String(settings?.lineHeight ?? 1));
+  }, [settings?.newTabDirectory, settings?.newPaneDirectory, settings?.inactivePaneOpacity, settings?.closeTerminalsOnAppExit, settings?.fontFamily, settings?.fontSize, settings?.lineHeight]);
 
   async function choose(setValue, target) {
     setChoosingFor(target);
@@ -934,7 +940,23 @@ function TerminalTab({ settings, onChooseDirectory, onSave }) {
     setIsSaving(true);
     setNotice("");
     try {
-      await onSave({ newTabDirectory, newPaneDirectory, inactivePaneOpacity, closeTerminalsOnAppExit });
+      const parsedFontSize = Number(fontSize);
+      const parsedLineHeight = Number(lineHeight);
+      if (!Number.isFinite(parsedFontSize) || parsedFontSize < 8 || parsedFontSize > 32) {
+        throw new Error("Font size must be between 8 and 32 pixels.");
+      }
+      if (!Number.isFinite(parsedLineHeight) || parsedLineHeight < 1 || parsedLineHeight > 2) {
+        throw new Error("Line height must be between 1.0 and 2.0.");
+      }
+      await onSave({
+        newTabDirectory,
+        newPaneDirectory,
+        inactivePaneOpacity,
+        closeTerminalsOnAppExit,
+        fontFamily,
+        fontSize: parsedFontSize,
+        lineHeight: parsedLineHeight,
+      });
       setNotice("Terminal settings saved.");
     } catch (error) {
       setNotice(error?.message || String(error));
@@ -945,6 +967,34 @@ function TerminalTab({ settings, onChooseDirectory, onSave }) {
 
   return (
     <div className="grid gap-5">
+      <div className="grid gap-1">
+        <p className="text-sm font-medium">Terminal typography</p>
+        <p className="text-xs text-muted-foreground">Saved changes apply to all open terminal panes.</p>
+      </div>
+
+      <Field>
+        <FieldLabel>Font family</FieldLabel>
+        <Input
+          value={fontFamily}
+          placeholder="ui-monospace, monospace"
+          onChange={(event) => setFontFamily(event.target.value)}
+        />
+        <p className="text-xs text-muted-foreground">Enter a CSS font-family name or fallback list.</p>
+      </Field>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field>
+          <FieldLabel>Font size</FieldLabel>
+          <Input type="number" min="8" max="32" step="1" value={fontSize} onChange={(event) => setFontSize(event.target.value)} />
+          <p className="text-xs text-muted-foreground">8–32 pixels</p>
+        </Field>
+        <Field>
+          <FieldLabel>Line height</FieldLabel>
+          <Input type="number" min="1" max="2" step="0.05" value={lineHeight} onChange={(event) => setLineHeight(event.target.value)} />
+          <p className="text-xs text-muted-foreground">1.0–2.0 multiplier</p>
+        </Field>
+      </div>
+
       <div className="grid gap-1">
         <p className="text-sm font-medium">Terminal start directories</p>
         <p className="text-xs text-muted-foreground">
@@ -1021,7 +1071,7 @@ function TerminalTab({ settings, onChooseDirectory, onSave }) {
           {isSaving && <LoaderCircle className="animate-spin" />}
           Save terminal
         </Button>
-        <Button type="button" variant="outline" onClick={() => { setNewTabDirectory(""); setNewPaneDirectory(""); setInactivePaneOpacity(0.65); setCloseTerminalsOnAppExit(false); }}>
+        <Button type="button" variant="outline" onClick={() => { setNewTabDirectory(""); setNewPaneDirectory(""); setInactivePaneOpacity(0.65); setCloseTerminalsOnAppExit(false); setFontFamily("ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"); setFontSize("13"); setLineHeight("1"); }}>
           <RotateCcw className="size-4" />
           Restore defaults
         </Button>

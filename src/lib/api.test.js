@@ -146,7 +146,7 @@ test("local fallback migrates legacy AI Agents into AI Prompts", async () => {
   assert.equal(JSON.parse(stored).aiAgents, undefined);
 });
 
-test("local fallback stores terminal directory overrides and restores defaults", async () => {
+test("local fallback stores terminal settings and restores defaults", async () => {
   let stored = "";
   global.localStorage = {
     getItem: () => stored,
@@ -158,6 +158,9 @@ test("local fallback stores terminal directory overrides and restores defaults",
     newPaneDirectory: null,
     inactivePaneOpacity: 0.65,
     closeTerminalsOnAppExit: false,
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+    fontSize: 13,
+    lineHeight: 1,
     profileDirectory: "~",
   });
   assert.deepEqual(await api.saveTerminalSettings({
@@ -165,18 +168,27 @@ test("local fallback stores terminal directory overrides and restores defaults",
     newPaneDirectory: " /projects/tests ",
     inactivePaneOpacity: 0.5,
     closeTerminalsOnAppExit: true,
+    fontFamily: "JetBrains Mono, monospace",
+    fontSize: 15,
+    lineHeight: 1.25,
   }), {
     newTabDirectory: "/projects/app",
     newPaneDirectory: "/projects/tests",
     inactivePaneOpacity: 0.5,
     closeTerminalsOnAppExit: true,
+    fontFamily: "JetBrains Mono, monospace",
+    fontSize: 15,
+    lineHeight: 1.25,
     profileDirectory: "~",
   });
-  assert.deepEqual(await api.saveTerminalSettings({ newTabDirectory: "", newPaneDirectory: "", inactivePaneOpacity: 0.65, closeTerminalsOnAppExit: false }), {
+  assert.deepEqual(await api.saveTerminalSettings({ newTabDirectory: "", newPaneDirectory: "", inactivePaneOpacity: 0.65, closeTerminalsOnAppExit: false, fontFamily: "", fontSize: 13, lineHeight: 1 }), {
     newTabDirectory: null,
     newPaneDirectory: null,
     inactivePaneOpacity: 0.65,
     closeTerminalsOnAppExit: false,
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+    fontSize: 13,
+    lineHeight: 1,
     profileDirectory: "~",
   });
 });

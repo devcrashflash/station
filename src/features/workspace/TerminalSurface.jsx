@@ -17,7 +17,7 @@ function percent(value) {
   return `${value * 100}%`;
 }
 
-function TerminalPane({ tabId, pane, focused, bounds }) {
+function TerminalPane({ tabId, pane, focused, bounds, fontFamily, fontSize, lineHeight }) {
   const hostRef = useRef(null);
   const terminalRef = useRef(null);
   const fitRef = useRef(null);
@@ -99,6 +99,22 @@ function TerminalPane({ tabId, pane, focused, bounds }) {
       fitRef.current = null;
     };
   }, [attach, pane.paneId, tabId]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    const fit = fitRef.current;
+    if (!terminal || !fit) return;
+    terminal.options.fontFamily = fontFamily;
+    terminal.options.fontSize = fontSize;
+    terminal.options.lineHeight = lineHeight;
+    fit.fit();
+    invoke("terminal_resize", {
+      tabId,
+      paneId: pane.paneId,
+      cols: terminal.cols,
+      rows: terminal.rows,
+    }).catch(() => {});
+  }, [fontFamily, fontSize, lineHeight, pane.paneId, tabId]);
 
   useEffect(() => {
     if (focused) terminalRef.current?.focus();
@@ -220,13 +236,25 @@ export function TerminalSurface({ tabId }) {
   const [layout, setLayout] = useState(null);
   const [ratioOverrides, setRatioOverrides] = useState({});
   const [inactivePaneOpacity, setInactivePaneOpacity] = useState(0.65);
+  const [typography, setTypography] = useState({
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+    fontSize: 13,
+    lineHeight: 1,
+  });
   const surfaceRef = useRef(null);
 
   useEffect(() => {
     let disposed = false;
     let unlisten = null;
     listen("terminal-settings-changed", ({ payload }) => {
-      if (!disposed) setInactivePaneOpacity(payload.inactivePaneOpacity ?? 0.65);
+      if (!disposed) {
+        setInactivePaneOpacity(payload.inactivePaneOpacity ?? 0.65);
+        setTypography({
+          fontFamily: payload.fontFamily || "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+          fontSize: payload.fontSize ?? 13,
+          lineHeight: payload.lineHeight ?? 1,
+        });
+      }
     }).then((dispose) => {
       if (disposed) {
         dispose();
@@ -234,7 +262,14 @@ export function TerminalSurface({ tabId }) {
       }
       unlisten = dispose;
       invoke("list_terminal_settings").then((settings) => {
-        if (!disposed) setInactivePaneOpacity(settings.inactivePaneOpacity ?? 0.65);
+        if (!disposed) {
+          setInactivePaneOpacity(settings.inactivePaneOpacity ?? 0.65);
+          setTypography({
+            fontFamily: settings.fontFamily || "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+            fontSize: settings.fontSize ?? 13,
+            lineHeight: settings.lineHeight ?? 1,
+          });
+        }
       }).catch(console.error);
     }).catch(console.error);
     return () => {
@@ -281,6 +316,7 @@ export function TerminalSurface({ tabId }) {
           pane={pane}
           bounds={bounds}
           focused={pane.paneId === layout.focusedPaneId}
+          {...typography}
         />
       ))}
       {flattened.splits.map((split) => (
