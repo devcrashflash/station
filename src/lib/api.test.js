@@ -201,6 +201,7 @@ test("local fallback stores terminal settings and restores defaults", async () =
     newPaneDirectory: null,
     inactivePaneOpacity: 0.65,
     closeTerminalsOnAppExit: false,
+    copyOnSelection: true,
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
     fontFace: null,
     fontWeight: 400,
@@ -216,6 +217,7 @@ test("local fallback stores terminal settings and restores defaults", async () =
     newPaneDirectory: " /projects/tests ",
     inactivePaneOpacity: 0.5,
     closeTerminalsOnAppExit: true,
+    copyOnSelection: false,
     fontFamily: "JetBrains Mono, monospace",
     fontFace: null,
     fontWeight: 100,
@@ -229,6 +231,7 @@ test("local fallback stores terminal settings and restores defaults", async () =
     newPaneDirectory: "/projects/tests",
     inactivePaneOpacity: 0.5,
     closeTerminalsOnAppExit: true,
+    copyOnSelection: false,
     fontFamily: "JetBrains Mono, monospace",
     fontFace: null,
     fontWeight: 100,
@@ -244,6 +247,7 @@ test("local fallback stores terminal settings and restores defaults", async () =
     newPaneDirectory: null,
     inactivePaneOpacity: 0.65,
     closeTerminalsOnAppExit: false,
+    copyOnSelection: false,
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
     fontFace: null,
     fontWeight: 900,
@@ -254,6 +258,7 @@ test("local fallback stores terminal settings and restores defaults", async () =
     scrollbackLines: 100000,
     profileDirectory: "~",
   });
+  assert.equal((await api.saveTerminalSettings({ copyOnSelection: true })).copyOnSelection, true);
   assert.deepEqual(await api.listTerminalFonts(), []);
 });
 

@@ -13,6 +13,12 @@ export function isTerminalClearShortcut(event, platform = globalThis.navigator?.
     && event.key.toLowerCase() === "k";
 }
 
+export function copyableTerminalSelection(copyOnSelection, selection) {
+  return copyOnSelection && typeof selection === "string" && selection.length > 0
+    ? selection
+    : null;
+}
+
 export function paneIds(node) {
   if (!node) return [];
   if (node.type === "pane") return [node.paneId];

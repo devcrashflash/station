@@ -136,6 +136,7 @@ function App() {
     newPaneDirectory: null,
     inactivePaneOpacity: 0.65,
     closeTerminalsOnAppExit: false,
+    copyOnSelection: true,
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
     fontFace: null,
     fontWeight: 400,

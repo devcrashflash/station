@@ -8,6 +8,7 @@ import "@xterm/xterm/css/xterm.css";
 
 import {
   clampSplitRatio,
+  copyableTerminalSelection,
   flattenPaneLayout,
   isTerminalClearShortcut,
   parseOsc7Cwd,
@@ -21,6 +22,9 @@ const DARK_TERMINAL_THEME = {
   foreground: "#f5f5f5",
   cursor: "#ffffff",
   cursorAccent: "#000000",
+  selectionBackground: "rgba(59, 130, 246, 0.42)",
+  selectionInactiveBackground: "rgba(59, 130, 246, 0.24)",
+  selectionForeground: "#f8fafc",
   black: "#000000",
   red: "#bb0000",
   green: "#00bb00",
@@ -43,6 +47,9 @@ const LIGHT_TERMINAL_THEME = {
   background: "#fffefa",
   foreground: "#202124",
   cursor: "#202124",
+  selectionBackground: "rgba(37, 99, 235, 0.28)",
+  selectionInactiveBackground: "rgba(37, 99, 235, 0.16)",
+  selectionForeground: "#111827",
 };
 
 function bytesFromChannel(payload) {
@@ -53,6 +60,39 @@ function bytesFromChannel(payload) {
 
 function percent(value) {
   return `${value * 100}%`;
+}
+
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Fall back for webviews that expose the Clipboard API without granting access.
+    }
+  }
+
+  const previouslyFocused = document.activeElement;
+  const textarea = document.createElement("textarea");
+  try {
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    Object.assign(textarea.style, {
+      position: "fixed",
+      opacity: "0",
+      pointerEvents: "none",
+    });
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+  } catch {
+    // Copy on selection is intentionally silent when no clipboard path is available.
+  } finally {
+    textarea.remove();
+    if (previouslyFocused instanceof HTMLElement && previouslyFocused.isConnected) {
+      previouslyFocused.focus({ preventScroll: true });
+    }
+  }
 }
 
 function openTerminalWithConsistentFontMeasurement(terminal, host) {
@@ -110,6 +150,7 @@ function TerminalPane({
   bounds,
   dragging,
   onMoveStart,
+  copyOnSelection,
   fontFamily,
   fontWeight,
   fontStyle,
@@ -128,11 +169,13 @@ function TerminalPane({
   const transitionRef = useRef(Promise.resolve());
   const desiredActiveRef = useRef(active);
   const focusedRef = useRef(focused);
+  const copyOnSelectionRef = useRef(copyOnSelection);
   const mountedRef = useRef(true);
   const startupReadyTimerRef = useRef(0);
   const [lifecycle, setLifecycle] = useState({ running: true, exitCode: null, error: "" });
 
   focusedRef.current = focused;
+  copyOnSelectionRef.current = copyOnSelection;
 
   const attach = useCallback(async (terminal, fit, command = "terminal_attach") => {
     if (!terminal || !fit) return;
@@ -228,6 +271,11 @@ function TerminalPane({
     const titleDisposable = terminal.onTitleChange((title) => {
       invoke("terminal_set_title", { tabId, paneId: pane.paneId, title }).catch(console.error);
     });
+    const selectionDisposable = terminal.onSelectionChange(() => {
+      if (!copyOnSelectionRef.current || !terminal.hasSelection()) return;
+      const selection = copyableTerminalSelection(copyOnSelectionRef.current, terminal.getSelection());
+      if (selection !== null) void copyTextToClipboard(selection);
+    });
     const cwdDisposable = terminal.parser.registerOscHandler(7, (data) => {
       const cwd = parseOsc7Cwd(data);
       if (!cwd) return false;
@@ -249,6 +297,7 @@ function TerminalPane({
       resizeObserver.disconnect();
       dataDisposable.dispose();
       titleDisposable.dispose();
+      selectionDisposable.dispose();
       cwdDisposable.dispose();
     };
 
@@ -483,6 +532,7 @@ function TerminalDivider({ tabId, split, surfaceRef, onPreview }) {
 
 const DEFAULT_TERMINAL_SETTINGS = {
   inactivePaneOpacity: 0.65,
+  copyOnSelection: true,
   typography: {
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
     fontFace: null,
@@ -498,6 +548,7 @@ const DEFAULT_TERMINAL_SETTINGS = {
 function normalizeTerminalSettings(settings = {}) {
   return {
     inactivePaneOpacity: settings.inactivePaneOpacity ?? 0.65,
+    copyOnSelection: settings.copyOnSelection ?? true,
     typography: {
       fontFamily: settings.fontFamily || DEFAULT_TERMINAL_SETTINGS.typography.fontFamily,
       fontFace: settings.fontFace || null,
@@ -511,7 +562,7 @@ function normalizeTerminalSettings(settings = {}) {
   };
 }
 
-function TerminalTabSurface({ tabId, layout, active, inactivePaneOpacity, typography }) {
+function TerminalTabSurface({ tabId, layout, active, inactivePaneOpacity, copyOnSelection, typography }) {
   const [ratioOverrides, setRatioOverrides] = useState({});
   const [paneDrag, setPaneDrag] = useState(null);
   const surfaceRef = useRef(null);
@@ -654,6 +705,7 @@ function TerminalTabSurface({ tabId, layout, active, inactivePaneOpacity, typogr
           titled={panesAreSplit}
           dragging={pane.paneId === paneDrag?.sourcePaneId}
           onMoveStart={startPaneMove}
+          copyOnSelection={copyOnSelection}
           {...typography}
         />
       ))}

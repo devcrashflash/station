@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   clampSplitRatio,
+  copyableTerminalSelection,
   flattenPaneLayout,
   isTerminalClearShortcut,
   paneDropPosition,
@@ -10,6 +11,13 @@ import {
   parseOsc7Cwd,
   terminalPaneDropTarget,
 } from "./terminalPanes.js";
+
+test("returns only enabled non-empty terminal selections for copying", () => {
+  assert.equal(copyableTerminalSelection(false, "selected"), null);
+  assert.equal(copyableTerminalSelection(true, ""), null);
+  assert.equal(copyableTerminalSelection(true, null), null);
+  assert.equal(copyableTerminalSelection(true, "first line\nGrüße 👋"), "first line\nGrüße 👋");
+});
 
 test("clamps persisted and dragged split ratios", () => {
   assert.equal(clampSplitRatio(0.5), 0.5);

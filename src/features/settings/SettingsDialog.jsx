@@ -909,6 +909,7 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
   const [newPaneDirectory, setNewPaneDirectory] = useState(settings?.newPaneDirectory || "");
   const [inactivePaneOpacity, setInactivePaneOpacity] = useState(settings?.inactivePaneOpacity ?? 0.65);
   const [closeTerminalsOnAppExit, setCloseTerminalsOnAppExit] = useState(settings?.closeTerminalsOnAppExit ?? false);
+  const [copyOnSelection, setCopyOnSelection] = useState(settings?.copyOnSelection ?? true);
   const [fontFamily, setFontFamily] = useState(settings?.fontFamily || "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace");
   const [fontWeight, setFontWeight] = useState(settings?.fontWeight ?? 400);
   const [fontStyle, setFontStyle] = useState(settings?.fontStyle || "normal");
@@ -925,6 +926,7 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
     setNewPaneDirectory(settings?.newPaneDirectory || "");
     setInactivePaneOpacity(settings?.inactivePaneOpacity ?? 0.65);
     setCloseTerminalsOnAppExit(settings?.closeTerminalsOnAppExit ?? false);
+    setCopyOnSelection(settings?.copyOnSelection ?? true);
     setFontFamily(settings?.fontFamily || "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace");
     setFontWeight(settings?.fontWeight ?? 400);
     setFontStyle(settings?.fontStyle || "normal");
@@ -932,7 +934,7 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
     setLineHeight(String(settings?.lineHeight ?? 100));
     setHorizontalSpacing(String(settings?.horizontalSpacing ?? 100));
     setScrollbackLines(String(settings?.scrollbackLines ?? 10_000));
-  }, [settings?.newTabDirectory, settings?.newPaneDirectory, settings?.inactivePaneOpacity, settings?.closeTerminalsOnAppExit, settings?.fontFamily, settings?.fontWeight, settings?.fontStyle, settings?.fontSize, settings?.lineHeight, settings?.horizontalSpacing, settings?.scrollbackLines]);
+  }, [settings?.newTabDirectory, settings?.newPaneDirectory, settings?.inactivePaneOpacity, settings?.closeTerminalsOnAppExit, settings?.copyOnSelection, settings?.fontFamily, settings?.fontWeight, settings?.fontStyle, settings?.fontSize, settings?.lineHeight, settings?.horizontalSpacing, settings?.scrollbackLines]);
 
   const selectedFont = terminalFontFamily(fonts, fontFamily);
   const selectedStyle = terminalFontStyle(selectedFont, fontWeight, fontStyle);
@@ -992,6 +994,7 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
         newPaneDirectory,
         inactivePaneOpacity,
         closeTerminalsOnAppExit,
+        copyOnSelection,
         fontFamily,
         fontWeight,
         fontStyle,
@@ -1131,6 +1134,19 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
 
       <label className="flex items-start gap-3 rounded-md border bg-muted/20 p-3">
         <Checkbox
+          checked={copyOnSelection}
+          onCheckedChange={(checked) => setCopyOnSelection(checked === true)}
+        />
+        <div>
+          <p className="text-sm font-medium">Copy selected text to clipboard</p>
+          <p className="text-xs text-muted-foreground">
+            Automatically copy completed terminal selections to the system clipboard.
+          </p>
+        </div>
+      </label>
+
+      <label className="flex items-start gap-3 rounded-md border bg-muted/20 p-3">
+        <Checkbox
           checked={closeTerminalsOnAppExit}
           onCheckedChange={(checked) => setCloseTerminalsOnAppExit(checked === true)}
         />
@@ -1149,7 +1165,7 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
           {isSaving && <LoaderCircle className="animate-spin" />}
           Save terminal
         </Button>
-        <Button type="button" variant="outline" onClick={() => { setNewTabDirectory(""); setNewPaneDirectory(""); setInactivePaneOpacity(0.65); setCloseTerminalsOnAppExit(false); setFontFamily("ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"); setFontSize("13"); setLineHeight("100"); setHorizontalSpacing("100"); setScrollbackLines("10000"); }}>
+        <Button type="button" variant="outline" onClick={() => { setNewTabDirectory(""); setNewPaneDirectory(""); setInactivePaneOpacity(0.65); setCloseTerminalsOnAppExit(false); setCopyOnSelection(true); setFontFamily("ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"); setFontSize("13"); setLineHeight("100"); setHorizontalSpacing("100"); setScrollbackLines("10000"); }}>
           <RotateCcw className="size-4" />
           Restore defaults
         </Button>

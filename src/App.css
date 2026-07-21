@@ -406,7 +406,7 @@ body.terminal-window #root {
   box-sizing: border-box;
   width: 100%;
   height: 100%;
-  padding: 6px 7px;
+  padding: 0 7px;
 }
 
 .terminal-pane-titled .terminal-host {
@@ -426,8 +426,32 @@ body.terminal-window #root {
   isolation: isolate;
 }
 
+/* Keep isolated DOM-renderer rows above xterm's selection overlay so the
+ * selected foreground remains visible instead of being covered by it. */
+.terminal-host .xterm-rows > div {
+  position: relative;
+  z-index: 2;
+}
+
 .terminal-host .xterm {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
   height: 100%;
+  padding: 6px 0 8px;
+}
+
+.terminal-host .xterm-screen {
+  flex: none;
+}
+
+.terminal-host .xterm .xterm-viewport {
+  background-color: #fffefa;
+}
+
+.dark .terminal-host .xterm .xterm-viewport {
+  background-color: #000;
 }
 
 .terminal-exit-banner {

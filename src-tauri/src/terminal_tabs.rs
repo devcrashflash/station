@@ -25,6 +25,7 @@ const NEW_TAB_DIRECTORY_SETTING_KEY: &str = "terminal_new_tab_directory";
 const NEW_PANE_DIRECTORY_SETTING_KEY: &str = "terminal_new_pane_directory";
 const INACTIVE_PANE_OPACITY_SETTING_KEY: &str = "terminal_inactive_pane_opacity";
 const CLOSE_TERMINALS_ON_APP_EXIT_SETTING_KEY: &str = "terminal_close_on_app_exit";
+const COPY_ON_SELECTION_SETTING_KEY: &str = "terminal_copy_on_selection";
 const FONT_FAMILY_SETTING_KEY: &str = "terminal_font_family";
 const FONT_WEIGHT_SETTING_KEY: &str = "terminal_font_weight";
 const FONT_STYLE_SETTING_KEY: &str = "terminal_font_style";
@@ -93,6 +94,7 @@ pub struct TerminalSettings {
     new_pane_directory: Option<String>,
     inactive_pane_opacity: f64,
     close_terminals_on_app_exit: bool,
+    copy_on_selection: bool,
     font_family: String,
     font_face: Option<String>,
     font_weight: u16,
@@ -111,6 +113,7 @@ pub struct TerminalSettingsInput {
     new_pane_directory: Option<String>,
     inactive_pane_opacity: Option<f64>,
     close_terminals_on_app_exit: Option<bool>,
+    copy_on_selection: Option<bool>,
     font_family: Option<String>,
     font_weight: Option<u16>,
     font_style: Option<String>,
@@ -1473,6 +1476,18 @@ fn close_terminals_on_app_exit(db: &SqliteConnection) -> bool {
         .is_some_and(|value| value == "true")
 }
 
+fn copy_on_selection(db: &SqliteConnection) -> bool {
+    match get_app_setting(db, COPY_ON_SELECTION_SETTING_KEY)
+        .ok()
+        .flatten()
+        .as_deref()
+    {
+        Some("false") => false,
+        Some("true") | None => true,
+        Some(_) => true,
+    }
+}
+
 fn font_style_label(weight: u16, italic: bool) -> String {
     let weight_label = match weight {
         100 => "Thin".to_string(),
@@ -1744,6 +1759,7 @@ pub fn list_terminal_settings(
             .map_err(db_error)?,
         inactive_pane_opacity: inactive_pane_opacity(&db),
         close_terminals_on_app_exit: close_terminals_on_app_exit(&db),
+        copy_on_selection: copy_on_selection(&db),
         font_family,
         font_face,
         font_weight,
@@ -1828,6 +1844,9 @@ pub fn save_terminal_settings(
         let close_terminals_on_app_exit = input
             .close_terminals_on_app_exit
             .unwrap_or_else(|| close_terminals_on_app_exit(&db));
+        let copy_on_selection = input
+            .copy_on_selection
+            .unwrap_or_else(|| copy_on_selection(&db));
         set_app_setting(
             &db,
             NEW_TAB_DIRECTORY_SETTING_KEY,
@@ -1855,6 +1874,12 @@ pub fn save_terminal_settings(
             } else {
                 "false"
             }),
+        )
+        .map_err(db_error)?;
+        set_app_setting(
+            &db,
+            COPY_ON_SELECTION_SETTING_KEY,
+            Some(if copy_on_selection { "true" } else { "false" }),
         )
         .map_err(db_error)?;
         set_app_setting(&db, FONT_FAMILY_SETTING_KEY, Some(&font_family)).map_err(db_error)?;
@@ -2830,6 +2855,27 @@ mod tests {
 
         set_app_setting(&db, INACTIVE_PANE_OPACITY_SETTING_KEY, Some("invalid")).unwrap();
         assert_eq!(inactive_pane_opacity(&db), DEFAULT_INACTIVE_PANE_OPACITY);
+    }
+
+    #[test]
+    fn copy_on_selection_defaults_to_enabled_and_reads_saved_booleans() {
+        let db = SqliteConnection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );",
+        )
+        .unwrap();
+
+        assert!(copy_on_selection(&db));
+        set_app_setting(&db, COPY_ON_SELECTION_SETTING_KEY, Some("false")).unwrap();
+        assert!(!copy_on_selection(&db));
+        set_app_setting(&db, COPY_ON_SELECTION_SETTING_KEY, Some("true")).unwrap();
+        assert!(copy_on_selection(&db));
+        set_app_setting(&db, COPY_ON_SELECTION_SETTING_KEY, Some("invalid")).unwrap();
+        assert!(copy_on_selection(&db));
     }
 
     #[test]
