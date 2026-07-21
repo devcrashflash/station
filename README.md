@@ -20,6 +20,15 @@ OAuth client ID and client secret are compiled into the app and must not be trea
 confidential. User calendar credentials are stored unencrypted in the local application
 database; anyone with access to that database may be able to read them.
 
+## Release
+
+- Run `pnpm release` to increase the patch version and build an installable macOS DMG.
+- Run `pnpm release 0.1.1` (or `pnpm release -- 0.1.1`) to set an explicit version.
+- Find the finished installer in `src-tauri/target/release/bundle/dmg/`.
+
+The release command synchronizes the versions in `package.json`, the Tauri config,
+and the Rust package files before building. DMG releases must be built on macOS.
+
 ## Local-First Behavior
 
 The app should always prefer local data first. Opening projects, tasks, and
