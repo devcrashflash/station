@@ -126,9 +126,12 @@ function TerminalPane({
   const teardownRef = useRef(null);
   const transitionRef = useRef(Promise.resolve());
   const desiredActiveRef = useRef(active);
+  const focusedRef = useRef(focused);
   const mountedRef = useRef(true);
   const startupReadyTimerRef = useRef(0);
   const [lifecycle, setLifecycle] = useState({ running: true, exitCode: null, error: "" });
+
+  focusedRef.current = focused;
 
   const attach = useCallback(async (terminal, fit, command = "terminal_attach") => {
     if (!terminal || !fit) return;
@@ -247,6 +250,7 @@ function TerminalPane({
 
     if (pane.running === false && pane.exitCode !== null) {
       setLifecycle({ running: false, exitCode: pane.exitCode, error: "" });
+      if (desiredActiveRef.current && focusedRef.current) terminal.focus();
       return;
     }
     try {
@@ -255,6 +259,12 @@ function TerminalPane({
       if (terminalRef.current === terminal) {
         setLifecycle({ running: false, exitCode: null, error: error?.message || String(error) });
       }
+    }
+    // The focused prop can become true before an asynchronously-created
+    // renderer exists. Restore focus once creation finishes so new tabs,
+    // split panes, and reactivated terminal tabs accept input immediately.
+    if (terminalRef.current === terminal && desiredActiveRef.current && focusedRef.current) {
+      terminal.focus();
     }
   }
 
