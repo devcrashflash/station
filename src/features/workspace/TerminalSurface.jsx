@@ -13,6 +13,7 @@ import {
   parseOsc7Cwd,
   terminalPaneDropTarget,
 } from "@/lib/terminalPanes";
+import { openExternalUrl } from "@/lib/externalLinks";
 import { terminalCellLetterSpacing } from "@/lib/terminalFonts";
 
 const DARK_TERMINAL_THEME = {
@@ -178,6 +179,9 @@ function TerminalPane({
       fontWeight,
       fontWeightBold: fontWeight < 700 ? 700 : 900,
       fontSize,
+      linkHandler: {
+        activate: (_event, uri) => void openExternalUrl(uri),
+      },
       lineHeight: lineHeight / 100,
       minimumContrastRatio: 4.5,
       scrollback: scrollbackLines,
