@@ -12,6 +12,7 @@ use tauri::{
     ipc::{Channel, InvokeResponseBody},
     Emitter, LogicalPosition, LogicalSize, Manager, Rect, Webview, WebviewUrl, Window, WindowEvent,
 };
+use tauri_plugin_opener::OpenerExt;
 
 use super::{db_error, get_app_setting, now_millis, set_app_setting, AppState};
 
@@ -202,6 +203,13 @@ pub enum TerminalLifecycleEvent {
 #[serde(rename_all = "camelCase")]
 pub struct TerminalAttachmentResult {
     attachment_id: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedTerminalPath {
+    index: usize,
+    path: String,
 }
 
 struct TerminalAttachment {
@@ -1934,6 +1942,98 @@ fn pane_cwd(
         .unwrap_or(home))
 }
 
+fn resolve_terminal_path(cwd: &Path, home: &Path, candidate: &str) -> Option<PathBuf> {
+    if candidate.is_empty()
+        || candidate
+            .chars()
+            .any(|character| character == '\0' || character.is_control())
+    {
+        return None;
+    }
+
+    let expanded = if candidate == "~" {
+        home.to_path_buf()
+    } else if let Some(relative) = candidate
+        .strip_prefix("~/")
+        .or_else(|| candidate.strip_prefix("~\\"))
+    {
+        home.join(relative)
+    } else {
+        PathBuf::from(candidate)
+    };
+    let absolute = if expanded.is_absolute() {
+        expanded
+    } else {
+        cwd.join(expanded)
+    };
+    absolute.canonicalize().ok()
+}
+
+#[tauri::command]
+pub fn resolve_terminal_paths(
+    app: tauri::AppHandle,
+    webview: Webview,
+    state: tauri::State<'_, TerminalTabsState>,
+    tab_id: String,
+    pane_id: String,
+    candidates: Vec<String>,
+) -> Result<Vec<ResolvedTerminalPath>, String> {
+    validate_terminal_caller(&webview, &tab_id)?;
+    let home = app.path().home_dir().map_err(db_error)?;
+    let cwd = {
+        let runtime = state.runtime.lock().map_err(db_error)?;
+        validate_pane(&runtime, &tab_id, &pane_id)?;
+        let tracked_cwd = pane_cwd(&app, &runtime, &tab_id, &pane_id)?;
+        runtime
+            .sessions
+            .get(&pane_id)
+            .and_then(|session| session.process_id)
+            .and_then(process_cwd)
+            .unwrap_or(tracked_cwd)
+    };
+
+    Ok(candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(index, candidate)| {
+            let path = resolve_terminal_path(&cwd, &home, candidate)?;
+            Some(ResolvedTerminalPath {
+                index,
+                path: path.to_str()?.to_string(),
+            })
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub fn open_terminal_path(
+    app: tauri::AppHandle,
+    webview: Webview,
+    state: tauri::State<'_, TerminalTabsState>,
+    tab_id: String,
+    pane_id: String,
+    path: String,
+) -> Result<(), String> {
+    validate_terminal_caller(&webview, &tab_id)?;
+    {
+        let runtime = state.runtime.lock().map_err(db_error)?;
+        validate_pane(&runtime, &tab_id, &pane_id)?;
+    }
+    let candidate = Path::new(&path);
+    if !candidate.is_absolute() {
+        return Err("Terminal links must resolve to an absolute local path.".to_string());
+    }
+    let canonical = candidate
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve terminal link: {error}"))?;
+    let canonical = canonical
+        .to_str()
+        .ok_or_else(|| "Terminal link is not valid UTF-8.".to_string())?;
+    app.opener()
+        .open_path(canonical, None::<&str>)
+        .map_err(|error| format!("Could not open terminal link: {error}"))
+}
+
 fn next_attachment_id(runtime: &mut TerminalTabsRuntime) -> u64 {
     let id = runtime.next_attachment_id;
     runtime.next_attachment_id += 1;
@@ -2522,6 +2622,7 @@ pub fn terminal_set_cwd(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn runtime(ids: &[&str], active: &str) -> TerminalTabsRuntime {
         TerminalTabsRuntime {
@@ -2536,6 +2637,51 @@ mod tests {
             next_generation: 1,
             next_attachment_id: 1,
         }
+    }
+
+    #[test]
+    fn resolves_existing_terminal_paths_relative_to_cwd_and_home() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("devcrashflash-terminal-links-{suffix}"));
+        let cwd = root.join("project");
+        let home = root.join("home");
+        std::fs::create_dir_all(cwd.join("src")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(cwd.join("src/app.js"), "export default true;").unwrap();
+        std::fs::write(home.join("notes.md"), "notes").unwrap();
+
+        assert_eq!(
+            resolve_terminal_path(&cwd, &home, "src/app.js"),
+            Some(cwd.join("src/app.js").canonicalize().unwrap())
+        );
+        assert_eq!(
+            resolve_terminal_path(&cwd, &home, "./src"),
+            Some(cwd.join("src").canonicalize().unwrap())
+        );
+        assert_eq!(
+            resolve_terminal_path(&cwd, &home, "~/notes.md"),
+            Some(home.join("notes.md").canonicalize().unwrap())
+        );
+        assert_eq!(
+            resolve_terminal_path(&cwd, &home, cwd.join("src/app.js").to_str().unwrap()),
+            Some(cwd.join("src/app.js").canonicalize().unwrap())
+        );
+        assert_eq!(resolve_terminal_path(&cwd, &home, "missing.txt"), None);
+        assert_eq!(resolve_terminal_path(&cwd, &home, "bad\npath"), None);
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(cwd.join("src/app.js"), cwd.join("linked.js")).unwrap();
+            assert_eq!(
+                resolve_terminal_path(&cwd, &home, "linked.js"),
+                Some(cwd.join("src/app.js").canonicalize().unwrap())
+            );
+        }
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

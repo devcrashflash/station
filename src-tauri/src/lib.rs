@@ -1275,6 +1275,8 @@ pub fn run() {
             terminal_tabs::terminal_resize,
             terminal_tabs::terminal_set_title,
             terminal_tabs::terminal_set_cwd,
+            terminal_tabs::resolve_terminal_paths,
+            terminal_tabs::open_terminal_path,
             list_projects,
             create_project,
             update_project,

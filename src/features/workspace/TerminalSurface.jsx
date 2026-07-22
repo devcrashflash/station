@@ -22,6 +22,10 @@ import {
   terminalPaneDropTarget,
 } from "@/lib/terminalPanes";
 import { openExternalUrl } from "@/lib/externalLinks";
+import {
+  createTerminalFileLinkProvider,
+  isPrimaryTerminalLinkEvent,
+} from "@/lib/terminalLinks";
 import { terminalCellLetterSpacing } from "@/lib/terminalFonts";
 import { useSynchronizedTheme } from "@/lib/theme";
 
@@ -281,7 +285,9 @@ function TerminalPane({
       fontWeightBold: fontWeight < 700 ? 700 : 900,
       fontSize,
       linkHandler: {
-        activate: (_event, uri) => void openExternalUrl(uri),
+        activate: (event, uri) => {
+          if (isPrimaryTerminalLinkEvent(event)) void openExternalUrl(uri);
+        },
       },
       lineHeight: lineHeight / 100,
       minimumContrastRatio: 4.5,
@@ -293,7 +299,9 @@ function TerminalPane({
     const fit = new FitAddon();
     const searchAddon = new SearchAddon();
     const serialize = new SerializeAddon();
-    const webLinks = new WebLinksAddon((_event, uri) => void openExternalUrl(uri));
+    const webLinks = new WebLinksAddon((event, uri) => {
+      if (isPrimaryTerminalLinkEvent(event)) void openExternalUrl(uri);
+    });
     terminal.loadAddon(fit);
     terminal.loadAddon(searchAddon);
     terminal.loadAddon(serialize);
@@ -305,6 +313,19 @@ function TerminalPane({
     fitRef.current = fit;
     searchRef.current = searchAddon;
     serializeRef.current = serialize;
+    const fileLinksDisposable = terminal.registerLinkProvider(createTerminalFileLinkProvider({
+      terminal,
+      resolvePaths: (candidates) => invoke("resolve_terminal_paths", {
+        tabId,
+        paneId: pane.paneId,
+        candidates,
+      }),
+      openPath: (path) => invoke("open_terminal_path", {
+        tabId,
+        paneId: pane.paneId,
+        path,
+      }).catch(console.error),
+    }));
     fit.fit();
 
     const characterWidth = measureTerminalCharacterWidth(
@@ -383,6 +404,7 @@ function TerminalPane({
       titleDisposable.dispose();
       selectionDisposable.dispose();
       cwdDisposable.dispose();
+      fileLinksDisposable.dispose();
     };
 
     if (searchOpenRef.current && searchQueryRef.current) {
