@@ -454,6 +454,75 @@ body.terminal-window #root {
   background-color: #000;
 }
 
+.terminal-search {
+  position: absolute;
+  z-index: 4;
+  top: 7px;
+  right: 14px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: calc(100% - 28px);
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--card);
+  color: var(--card-foreground);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 18%);
+  font: 12px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.terminal-pane-titled .terminal-search {
+  top: 31px;
+}
+
+.terminal-search input {
+  width: min(210px, calc(100vw - 190px));
+  min-width: 72px;
+  height: 26px;
+  box-sizing: border-box;
+  padding: 4px 7px;
+  border: 1px solid var(--input);
+  border-radius: 4px;
+  outline: none;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+}
+
+.terminal-search input:focus {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ring) 25%, transparent);
+}
+
+.terminal-search-count {
+  min-width: 42px;
+  color: var(--muted-foreground);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.terminal-search button {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: 16px/26px system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.terminal-search button:hover:not(:disabled) {
+  background: var(--muted);
+}
+
+.terminal-search button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 .terminal-exit-banner {
   position: absolute;
   right: 12px;

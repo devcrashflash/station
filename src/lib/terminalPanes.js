@@ -13,8 +13,16 @@ export function isTerminalClearShortcut(event, platform = globalThis.navigator?.
     && event.key.toLowerCase() === "k";
 }
 
-export function copyableTerminalSelection(copyOnSelection, selection) {
-  return copyOnSelection && typeof selection === "string" && selection.length > 0
+export function isTerminalSearchShortcut(event, platform = globalThis.navigator?.platform || "") {
+  if (event.type && event.type !== "keydown") return false;
+  if (event.altKey || event.shiftKey || event.key.toLowerCase() !== "f") return false;
+  return platform.toLowerCase().startsWith("mac")
+    ? event.metaKey && !event.ctrlKey
+    : event.ctrlKey && !event.metaKey;
+}
+
+export function copyableTerminalSelection(copyOnSelection, selection, searchOpen = false) {
+  return copyOnSelection && !searchOpen && typeof selection === "string" && selection.length > 0
     ? selection
     : null;
 }

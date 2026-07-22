@@ -6,6 +6,7 @@ import {
   copyableTerminalSelection,
   flattenPaneLayout,
   isTerminalClearShortcut,
+  isTerminalSearchShortcut,
   paneDropPosition,
   paneIds,
   parseOsc7Cwd,
@@ -16,6 +17,7 @@ test("returns only enabled non-empty terminal selections for copying", () => {
   assert.equal(copyableTerminalSelection(false, "selected"), null);
   assert.equal(copyableTerminalSelection(true, ""), null);
   assert.equal(copyableTerminalSelection(true, null), null);
+  assert.equal(copyableTerminalSelection(true, "search result", true), null);
   assert.equal(copyableTerminalSelection(true, "first line\nGrüße 👋"), "first line\nGrüße 👋");
 });
 
@@ -44,6 +46,27 @@ test("recognizes only unmodified macOS Command+K keydown events", () => {
   assert.equal(isTerminalClearShortcut({ ...commandK, shiftKey: true }, "MacIntel"), false);
   assert.equal(isTerminalClearShortcut({ ...commandK, key: "l" }, "MacIntel"), false);
   assert.equal(isTerminalClearShortcut(commandK, "Win32"), false);
+});
+
+test("recognizes the platform-primary terminal search shortcut", () => {
+  const commandF = {
+    type: "keydown",
+    key: "f",
+    metaKey: true,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+  };
+
+  assert.equal(isTerminalSearchShortcut(commandF, "MacIntel"), true);
+  assert.equal(isTerminalSearchShortcut({ ...commandF, key: "F" }, "MacIntel"), true);
+  assert.equal(isTerminalSearchShortcut({ ...commandF, metaKey: false, ctrlKey: true }, "MacIntel"), false);
+  assert.equal(isTerminalSearchShortcut({ ...commandF, altKey: true }, "MacIntel"), false);
+  assert.equal(isTerminalSearchShortcut({ ...commandF, shiftKey: true }, "MacIntel"), false);
+  assert.equal(isTerminalSearchShortcut({ ...commandF, type: "keyup" }, "MacIntel"), false);
+  assert.equal(isTerminalSearchShortcut({ ...commandF, metaKey: false, ctrlKey: true }, "Win32"), true);
+  assert.equal(isTerminalSearchShortcut({ ...commandF, metaKey: false, ctrlKey: true }, "Linux x86_64"), true);
+  assert.equal(isTerminalSearchShortcut(commandF, "Win32"), false);
 });
 
 test("walks nested pane layouts in visible order", () => {

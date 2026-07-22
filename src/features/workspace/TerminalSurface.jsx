@@ -3,6 +3,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import "@xterm/xterm/css/xterm.css";
 
@@ -11,6 +12,8 @@ import {
   copyableTerminalSelection,
   flattenPaneLayout,
   isTerminalClearShortcut,
+  isTerminalSearchShortcut,
+  paneIds,
   parseOsc7Cwd,
   terminalPaneDropTarget,
 } from "@/lib/terminalPanes";
@@ -51,6 +54,20 @@ const LIGHT_TERMINAL_THEME = {
   selectionBackground: "rgba(37, 99, 235, 0.28)",
   selectionInactiveBackground: "rgba(37, 99, 235, 0.16)",
   selectionForeground: "#111827",
+};
+
+const TERMINAL_SEARCH_OPTIONS = {
+  caseSensitive: false,
+  regex: false,
+  wholeWord: false,
+  decorations: {
+    matchBackground: "#facc15",
+    matchBorder: "#eab308",
+    matchOverviewRuler: "#eab308",
+    activeMatchBackground: "#3b82f6",
+    activeMatchBorder: "#93c5fd",
+    activeMatchColorOverviewRuler: "#3b82f6",
+  },
 };
 
 function bytesFromChannel(payload) {
@@ -151,6 +168,9 @@ function TerminalPane({
   bounds,
   dragging,
   onMoveStart,
+  searchOpen,
+  onRequestSearch,
+  onCloseSearch,
   copyOnSelection,
   effectiveTheme,
   fontFamily,
@@ -164,7 +184,9 @@ function TerminalPane({
   const hostRef = useRef(null);
   const terminalRef = useRef(null);
   const fitRef = useRef(null);
+  const searchRef = useRef(null);
   const serializeRef = useRef(null);
+  const searchInputRef = useRef(null);
   const serializedStateRef = useRef("");
   const attachmentIdRef = useRef(null);
   const teardownRef = useRef(null);
@@ -172,12 +194,40 @@ function TerminalPane({
   const desiredActiveRef = useRef(active);
   const focusedRef = useRef(focused);
   const copyOnSelectionRef = useRef(copyOnSelection);
+  const searchOpenRef = useRef(searchOpen);
+  const searchQueryRef = useRef("");
+  const requestSearchRef = useRef(onRequestSearch);
+  const closeSearchRef = useRef(onCloseSearch);
   const mountedRef = useRef(true);
   const startupReadyTimerRef = useRef(0);
   const [lifecycle, setLifecycle] = useState({ running: true, exitCode: null, error: "" });
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResult, setSearchResult] = useState({ resultIndex: -1, resultCount: 0 });
 
   focusedRef.current = focused;
   copyOnSelectionRef.current = copyOnSelection;
+  searchOpenRef.current = searchOpen;
+  searchQueryRef.current = searchQuery;
+  requestSearchRef.current = onRequestSearch;
+  closeSearchRef.current = onCloseSearch;
+
+  function search(term, direction = "next", incremental = false) {
+    const searchAddon = searchRef.current;
+    if (!searchAddon) return;
+    if (!term) {
+      searchAddon.clearDecorations();
+      terminalRef.current?.clearSelection();
+      setSearchResult({ resultIndex: -1, resultCount: 0 });
+      return;
+    }
+    const options = { ...TERMINAL_SEARCH_OPTIONS, incremental };
+    if (direction === "previous") searchAddon.findPrevious(term, options);
+    else searchAddon.findNext(term, options);
+  }
+
+  function closeSearch() {
+    closeSearchRef.current();
+  }
 
   const attach = useCallback(async (terminal, fit, command = "terminal_attach") => {
     if (!terminal || !fit) return;
@@ -218,7 +268,9 @@ function TerminalPane({
   async function createRenderer() {
     if (!hostRef.current || terminalRef.current) return;
     const terminal = new Terminal({
-      allowProposedApi: false,
+      // Search result highlighting uses xterm's decoration API, which remains
+      // behind this flag in xterm 6 even when used by the official search addon.
+      allowProposedApi: true,
       cursorBlink: true,
       fontFamily,
       fontWeight,
@@ -235,14 +287,17 @@ function TerminalPane({
         : LIGHT_TERMINAL_THEME,
     });
     const fit = new FitAddon();
+    const searchAddon = new SearchAddon();
     const serialize = new SerializeAddon();
     terminal.loadAddon(fit);
+    terminal.loadAddon(searchAddon);
     terminal.loadAddon(serialize);
     openTerminalWithConsistentFontMeasurement(terminal, hostRef.current);
     terminal.element.style.fontStyle = fontStyle;
     hostRef.current.style.fontStyle = fontStyle;
     terminalRef.current = terminal;
     fitRef.current = fit;
+    searchRef.current = searchAddon;
     serializeRef.current = serialize;
     fit.fit();
 
@@ -259,14 +314,30 @@ function TerminalPane({
     }
 
     terminal.attachCustomKeyEventHandler((event) => {
-      if (!isTerminalClearShortcut(event)) return true;
-      event.preventDefault();
-      event.stopPropagation();
-      terminal.clear();
-      terminal.focus();
-      return false;
+      if (isTerminalSearchShortcut(event)) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (searchOpenRef.current) {
+          searchInputRef.current?.focus();
+          searchInputRef.current?.select();
+        } else {
+          requestSearchRef.current();
+        }
+        return false;
+      }
+      if (isTerminalClearShortcut(event)) {
+        event.preventDefault();
+        event.stopPropagation();
+        terminal.clear();
+        terminal.focus();
+        return false;
+      }
+      return true;
     });
 
+    const searchResultDisposable = searchAddon.onDidChangeResults((result) => {
+      setSearchResult(result);
+    });
     const dataDisposable = terminal.onData((data) => {
       invoke("terminal_write", { tabId, paneId: pane.paneId, data }).catch(() => {});
     });
@@ -275,7 +346,11 @@ function TerminalPane({
     });
     const selectionDisposable = terminal.onSelectionChange(() => {
       if (!copyOnSelectionRef.current || !terminal.hasSelection()) return;
-      const selection = copyableTerminalSelection(copyOnSelectionRef.current, terminal.getSelection());
+      const selection = copyableTerminalSelection(
+        copyOnSelectionRef.current,
+        terminal.getSelection(),
+        searchOpenRef.current,
+      );
       if (selection !== null) void copyTextToClipboard(selection);
     });
     const cwdDisposable = terminal.parser.registerOscHandler(7, (data) => {
@@ -297,15 +372,23 @@ function TerminalPane({
     teardownRef.current = () => {
       clearTimeout(startupReadyTimerRef.current);
       resizeObserver.disconnect();
+      searchResultDisposable.dispose();
       dataDisposable.dispose();
       titleDisposable.dispose();
       selectionDisposable.dispose();
       cwdDisposable.dispose();
     };
 
+    if (searchOpenRef.current && searchQueryRef.current) {
+      searchAddon.findNext(searchQueryRef.current, { ...TERMINAL_SEARCH_OPTIONS, incremental: true });
+    }
+
     if (pane.running === false && pane.exitCode !== null) {
       setLifecycle({ running: false, exitCode: pane.exitCode, error: "" });
-      if (desiredActiveRef.current && focusedRef.current) terminal.focus();
+      if (desiredActiveRef.current && focusedRef.current) {
+        if (searchOpenRef.current) requestAnimationFrame(() => searchInputRef.current?.focus());
+        else terminal.focus();
+      }
       return;
     }
     try {
@@ -319,7 +402,8 @@ function TerminalPane({
     // renderer exists. Restore focus once creation finishes so new tabs,
     // split panes, and reactivated terminal tabs accept input immediately.
     if (terminalRef.current === terminal && desiredActiveRef.current && focusedRef.current) {
-      terminal.focus();
+      if (searchOpenRef.current) requestAnimationFrame(() => searchInputRef.current?.focus());
+      else terminal.focus();
     }
   }
 
@@ -342,6 +426,7 @@ function TerminalPane({
     terminal.dispose();
     terminalRef.current = null;
     fitRef.current = null;
+    searchRef.current = null;
     serializeRef.current = null;
     attachmentIdRef.current = null;
   }
@@ -415,8 +500,26 @@ function TerminalPane({
   }, [fontFamily, fontWeight, fontStyle, fontSize, lineHeight, horizontalSpacing, scrollbackLines, pane.paneId, tabId]);
 
   useEffect(() => {
-    if (focused) terminalRef.current?.focus();
+    if (!focused) return;
+    if (searchOpenRef.current) searchInputRef.current?.focus();
+    else terminalRef.current?.focus();
   }, [focused]);
+
+  useEffect(() => {
+    if (searchOpen) {
+      if (searchQuery) search(searchQuery, "next", true);
+      const frame = requestAnimationFrame(() => {
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      });
+      return () => cancelAnimationFrame(frame);
+    }
+    searchRef.current?.clearDecorations();
+    terminalRef.current?.clearSelection();
+    setSearchResult({ resultIndex: -1, resultCount: 0 });
+    if (focused) terminalRef.current?.focus();
+    return undefined;
+  }, [searchOpen]);
 
   function focus() {
     terminalRef.current?.focus();
@@ -455,6 +558,78 @@ function TerminalPane({
         </div>
       )}
       <div ref={hostRef} className="terminal-host" />
+      {searchOpen && (
+        <div
+          className="terminal-search"
+          role="search"
+          aria-label="Search terminal output"
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <input
+            ref={searchInputRef}
+            type="text"
+            value={searchQuery}
+            aria-label="Search terminal output"
+            placeholder="Find"
+            autoComplete="off"
+            spellCheck={false}
+            onChange={(event) => {
+              const value = event.target.value;
+              setSearchQuery(value);
+              searchQueryRef.current = value;
+              search(value, "next", true);
+            }}
+            onKeyDown={(event) => {
+              if (isTerminalSearchShortcut(event)) {
+                event.preventDefault();
+                event.stopPropagation();
+                event.currentTarget.select();
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                closeSearch();
+              } else if (event.key === "Enter" && !event.altKey && !event.ctrlKey && !event.metaKey) {
+                event.preventDefault();
+                search(searchQuery, event.shiftKey ? "previous" : "next");
+              }
+            }}
+          />
+          <span className="terminal-search-count" aria-live="polite">
+            {searchResult.resultCount > 0 && searchResult.resultIndex >= 0
+              ? `${searchResult.resultIndex + 1}/${searchResult.resultCount}`
+              : searchResult.resultCount > 0 ? `–/${searchResult.resultCount}` : "0/0"}
+          </span>
+          <button
+            type="button"
+            title="Previous match (Shift+Enter)"
+            aria-label="Previous match"
+            disabled={!searchQuery || searchResult.resultCount === 0}
+            onPointerDown={(event) => event.preventDefault()}
+            onClick={() => search(searchQuery, "previous")}
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            title="Next match (Enter)"
+            aria-label="Next match"
+            disabled={!searchQuery || searchResult.resultCount === 0}
+            onPointerDown={(event) => event.preventDefault()}
+            onClick={() => search(searchQuery, "next")}
+          >
+            ↓
+          </button>
+          <button
+            type="button"
+            title="Close search (Escape)"
+            aria-label="Close search"
+            onPointerDown={(event) => event.preventDefault()}
+            onClick={closeSearch}
+          >
+            ×
+          </button>
+        </div>
+      )}
       {!lifecycle.running && (
         <div className="terminal-exit-banner" role="status">
           <span>{lifecycle.error || `Process exited with code ${lifecycle.exitCode ?? 1}.`}</span>
@@ -573,7 +748,18 @@ function normalizeTerminalSettings(settings = {}) {
   };
 }
 
-function TerminalTabSurface({ tabId, layout, active, effectiveTheme, inactivePaneOpacity, copyOnSelection, typography }) {
+function TerminalTabSurface({
+  tabId,
+  layout,
+  active,
+  effectiveTheme,
+  inactivePaneOpacity,
+  copyOnSelection,
+  typography,
+  searchTarget,
+  onRequestSearch,
+  onCloseSearch,
+}) {
   const [ratioOverrides, setRatioOverrides] = useState({});
   const [paneDrag, setPaneDrag] = useState(null);
   const surfaceRef = useRef(null);
@@ -716,6 +902,9 @@ function TerminalTabSurface({ tabId, layout, active, effectiveTheme, inactivePan
           titled={panesAreSplit}
           dragging={pane.paneId === paneDrag?.sourcePaneId}
           onMoveStart={startPaneMove}
+          searchOpen={searchTarget?.tabId === tabId && searchTarget?.paneId === pane.paneId}
+          onRequestSearch={() => onRequestSearch(tabId, pane.paneId)}
+          onCloseSearch={() => onCloseSearch(tabId, pane.paneId)}
           copyOnSelection={copyOnSelection}
           effectiveTheme={effectiveTheme}
           {...typography}
@@ -750,6 +939,7 @@ export function TerminalWorkspace() {
   const [snapshot, setSnapshot] = useState({ tabs: [], activeTabId: "main" });
   const [layouts, setLayouts] = useState({});
   const [settings, setSettings] = useState(DEFAULT_TERMINAL_SETTINGS);
+  const [searchTarget, setSearchTarget] = useState(null);
 
   useEffect(() => {
     let disposed = false;
@@ -807,6 +997,14 @@ export function TerminalWorkspace() {
   const terminalTabKey = terminalTabIds.join("\0");
 
   useEffect(() => {
+    if (!searchTarget) return;
+    const layout = layouts[searchTarget.tabId];
+    const tabExists = terminalTabIds.includes(searchTarget.tabId);
+    const paneExists = !layout || paneIds(layout.root).includes(searchTarget.paneId);
+    if (!tabExists || !paneExists) setSearchTarget(null);
+  }, [layouts, searchTarget, terminalTabKey]);
+
+  useEffect(() => {
     let disposed = false;
     const activeIds = new Set(terminalTabIds);
     setLayouts((current) => Object.fromEntries(
@@ -833,6 +1031,11 @@ export function TerminalWorkspace() {
           layout={layouts[tab.id] || null}
           active={tab.id === snapshot.activeTabId}
           effectiveTheme={effectiveTheme}
+          searchTarget={searchTarget}
+          onRequestSearch={(tabId, paneId) => setSearchTarget({ tabId, paneId })}
+          onCloseSearch={(tabId, paneId) => setSearchTarget((current) => (
+            current?.tabId === tabId && current?.paneId === paneId ? null : current
+          ))}
           {...settings}
         />
       ))}
