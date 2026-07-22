@@ -13,15 +13,18 @@ import {
   clampSplitRatio,
   copyableTerminalSelection,
   flattenPaneLayout,
-  isTerminalClearShortcut,
-  isTerminalSearchShortcut,
   nextTerminalFontZoomOffset,
   paneIds,
   parseOsc7Cwd,
   terminalFontSizeWithZoom,
-  terminalFontZoomDelta,
   terminalPaneDropTarget,
 } from "@/lib/terminalPanes";
+import {
+  DEFAULT_TERMINAL_SHORTCUTS,
+  matchesTerminalShortcut,
+  normalizeTerminalShortcuts,
+  terminalZoomDelta,
+} from "@/lib/terminalShortcuts";
 import { openExternalUrl } from "@/lib/externalLinks";
 import {
   createTerminalFileLinkProvider,
@@ -182,6 +185,7 @@ function TerminalPane({
   onRequestSearch,
   onCloseSearch,
   copyOnSelection,
+  shortcuts,
   effectiveTheme,
   fontFamily,
   fontWeight,
@@ -208,6 +212,7 @@ function TerminalPane({
   const searchQueryRef = useRef("");
   const requestSearchRef = useRef(onRequestSearch);
   const closeSearchRef = useRef(onCloseSearch);
+  const shortcutsRef = useRef(shortcuts);
   const mountedRef = useRef(true);
   const startupReadyTimerRef = useRef(0);
   const [lifecycle, setLifecycle] = useState({ running: true, exitCode: null, error: "" });
@@ -220,6 +225,7 @@ function TerminalPane({
   searchQueryRef.current = searchQuery;
   requestSearchRef.current = onRequestSearch;
   closeSearchRef.current = onCloseSearch;
+  shortcutsRef.current = shortcuts;
 
   function search(term, direction = "next", incremental = false) {
     const searchAddon = searchRef.current;
@@ -346,7 +352,7 @@ function TerminalPane({
     }
 
     terminal.attachCustomKeyEventHandler((event) => {
-      if (isTerminalSearchShortcut(event)) {
+      if (matchesTerminalShortcut(event, shortcutsRef.current.search)) {
         event.preventDefault();
         event.stopPropagation();
         if (searchOpenRef.current) {
@@ -357,7 +363,7 @@ function TerminalPane({
         }
         return false;
       }
-      if (isTerminalClearShortcut(event)) {
+      if (matchesTerminalShortcut(event, shortcutsRef.current.clear)) {
         event.preventDefault();
         event.stopPropagation();
         terminal.clear();
@@ -614,7 +620,7 @@ function TerminalPane({
               search(value, "next", true);
             }}
             onKeyDown={(event) => {
-              if (isTerminalSearchShortcut(event)) {
+              if (matchesTerminalShortcut(event, shortcuts.search)) {
                 event.preventDefault();
                 event.stopPropagation();
                 event.currentTarget.select();
@@ -753,6 +759,7 @@ function TerminalDivider({ tabId, split, surfaceRef, onPreview }) {
 const DEFAULT_TERMINAL_SETTINGS = {
   inactivePaneOpacity: 0.65,
   copyOnSelection: true,
+  shortcuts: DEFAULT_TERMINAL_SHORTCUTS,
   typography: {
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
     fontFace: null,
@@ -769,6 +776,7 @@ function normalizeTerminalSettings(settings = {}) {
   return {
     inactivePaneOpacity: settings.inactivePaneOpacity ?? 0.65,
     copyOnSelection: settings.copyOnSelection ?? true,
+    shortcuts: normalizeTerminalShortcuts(settings.shortcuts),
     typography: {
       fontFamily: settings.fontFamily || DEFAULT_TERMINAL_SETTINGS.typography.fontFamily,
       fontFace: settings.fontFace || null,
@@ -789,6 +797,7 @@ function TerminalTabSurface({
   effectiveTheme,
   inactivePaneOpacity,
   copyOnSelection,
+  shortcuts,
   typography,
   searchTarget,
   onRequestSearch,
@@ -940,6 +949,7 @@ function TerminalTabSurface({
           onRequestSearch={() => onRequestSearch(tabId, pane.paneId)}
           onCloseSearch={() => onCloseSearch(tabId, pane.paneId)}
           copyOnSelection={copyOnSelection}
+          shortcuts={shortcuts}
           effectiveTheme={effectiveTheme}
           {...typography}
         />
@@ -978,7 +988,7 @@ export function TerminalWorkspace() {
 
   useEffect(() => {
     function handleFontZoom(event) {
-      const delta = terminalFontZoomDelta(event);
+      const delta = terminalZoomDelta(event, settings.shortcuts);
       if (delta === null) return;
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -991,7 +1001,7 @@ export function TerminalWorkspace() {
 
     window.addEventListener("keydown", handleFontZoom, true);
     return () => window.removeEventListener("keydown", handleFontZoom, true);
-  }, [settings.typography.fontSize]);
+  }, [settings.shortcuts, settings.typography.fontSize]);
 
   useEffect(() => {
     let disposed = false;

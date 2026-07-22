@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AtSign, Bot, CalendarDays, FolderOpen, GitMerge, GitPullRequest, Keyboard, LoaderCircle, Monitor, Palette, Pencil, PlugZap, RefreshCw, RotateCcw, SquareKanban, SquareTerminal, Trash2, UserRound } from "lucide-react";
+import { AtSign, Bot, CalendarDays, ChevronDown, FolderOpen, GitMerge, GitPullRequest, Keyboard, LoaderCircle, Monitor, Palette, Pencil, PlugZap, RefreshCw, RotateCcw, SquareKanban, SquareTerminal, Trash2, UserRound } from "lucide-react";
 
 import { EmptyState } from "@/components/common/EmptyState";
 import { Modal } from "@/components/common/Modal";
@@ -15,6 +15,13 @@ import { aiPromptIconFor, aiPromptIconOptions } from "@/lib/aiPromptIcons";
 import { formatShortcut, shortcutFromKeyboardEvent } from "@/lib/keyboardShortcut";
 import { quickCaptureStatus } from "@/lib/quickCaptureSettings";
 import { terminalFontFamily, terminalFontOptions, terminalFontStyle, terminalFontStyleOptions } from "@/lib/terminalFonts";
+import {
+  DEFAULT_TERMINAL_SHORTCUTS,
+  TERMINAL_SHORTCUT_ACTIONS,
+  normalizeTerminalShortcuts,
+  setTerminalShortcutRecording,
+  terminalShortcutConflict,
+} from "@/lib/terminalShortcuts";
 import { cn } from "@/lib/utils";
 
 const providerOptions = [
@@ -955,6 +962,9 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
   const [lineHeight, setLineHeight] = useState(String(settings?.lineHeight ?? 100));
   const [horizontalSpacing, setHorizontalSpacing] = useState(String(settings?.horizontalSpacing ?? 100));
   const [scrollbackLines, setScrollbackLines] = useState(String(settings?.scrollbackLines ?? 10_000));
+  const [shortcuts, setShortcuts] = useState(() => normalizeTerminalShortcuts(settings?.shortcuts));
+  const [recordingAction, setRecordingAction] = useState(null);
+  const [shortcutError, setShortcutError] = useState("");
   const [notice, setNotice] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [choosingFor, setChoosingFor] = useState(null);
@@ -972,7 +982,10 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
     setLineHeight(String(settings?.lineHeight ?? 100));
     setHorizontalSpacing(String(settings?.horizontalSpacing ?? 100));
     setScrollbackLines(String(settings?.scrollbackLines ?? 10_000));
-  }, [settings?.newTabDirectory, settings?.newPaneDirectory, settings?.inactivePaneOpacity, settings?.closeTerminalsOnAppExit, settings?.copyOnSelection, settings?.fontFamily, settings?.fontWeight, settings?.fontStyle, settings?.fontSize, settings?.lineHeight, settings?.horizontalSpacing, settings?.scrollbackLines]);
+    setShortcuts(normalizeTerminalShortcuts(settings?.shortcuts));
+  }, [settings?.newTabDirectory, settings?.newPaneDirectory, settings?.inactivePaneOpacity, settings?.closeTerminalsOnAppExit, settings?.copyOnSelection, settings?.fontFamily, settings?.fontWeight, settings?.fontStyle, settings?.fontSize, settings?.lineHeight, settings?.horizontalSpacing, settings?.scrollbackLines, settings?.shortcuts]);
+
+  useEffect(() => () => setTerminalShortcutRecording(false), []);
 
   const selectedFont = terminalFontFamily(fonts, fontFamily);
   const selectedStyle = terminalFontStyle(selectedFont, fontWeight, fontStyle);
@@ -992,6 +1005,52 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
     if (!style) return;
     setFontWeight(style.weight);
     setFontStyle(style.italic ? "italic" : "normal");
+  }
+
+  function stopShortcutRecording() {
+    setRecordingAction(null);
+    setTerminalShortcutRecording(false);
+  }
+
+  function startShortcutRecording(action) {
+    setRecordingAction(action);
+    setShortcutError("");
+    setNotice("Press the new shortcut. Escape cancels.");
+    setTerminalShortcutRecording(true);
+  }
+
+  function recordShortcut(event, action) {
+    if (recordingAction !== action) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const result = shortcutFromKeyboardEvent(event);
+    if (result.status === "cancel") {
+      stopShortcutRecording();
+      setNotice("Shortcut recording cancelled.");
+      return;
+    }
+    if (result.status === "recording") {
+      setNotice("Press a non-modifier key to finish the shortcut.");
+      return;
+    }
+    if (result.status === "error") {
+      setShortcutError(result.error);
+      return;
+    }
+
+    const next = { ...shortcuts, [action]: result.shortcut };
+    const conflict = terminalShortcutConflict(next);
+    if (conflict) {
+      const other = TERMINAL_SHORTCUT_ACTIONS.find((entry) => entry.id === conflict.otherAction)?.label;
+      setShortcutError(conflict.reserved
+        ? "That shortcut is reserved for new terminal, close terminal, or terminal navigation."
+        : `That shortcut is already assigned to ${other || "another terminal action"}.`);
+      return;
+    }
+    setShortcuts(next);
+    setShortcutError("");
+    stopShortcutRecording();
+    setNotice("Shortcut recorded. Save terminal settings to activate it.");
   }
 
   async function choose(setValue, target) {
@@ -1027,6 +1086,14 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
       if (!Number.isInteger(parsedScrollbackLines) || parsedScrollbackLines < 0 || parsedScrollbackLines > 100_000) {
         throw new Error("Scrollback must be a whole number between 0 and 100,000 lines.");
       }
+      const shortcutConflict = terminalShortcutConflict(shortcuts);
+      if (shortcutConflict) {
+        throw new Error(shortcutConflict.invalid
+          ? "Terminal shortcuts must include Command, Control, Option, or Alt with another key."
+          : shortcutConflict.reserved
+            ? "Terminal shortcuts cannot replace Cmd/Ctrl+T, Cmd/Ctrl+W, or Cmd/Ctrl+0–9."
+            : "Each terminal action must use a unique shortcut.");
+      }
       await onSave({
         newTabDirectory,
         newPaneDirectory,
@@ -1040,6 +1107,7 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
         lineHeight: parsedLineHeight,
         horizontalSpacing: parsedHorizontalSpacing,
         scrollbackLines: parsedScrollbackLines,
+        shortcuts,
       });
       setNotice("Terminal settings saved.");
     } catch (error) {
@@ -1196,14 +1264,60 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
         </div>
       </label>
 
+      <details
+        className="group rounded-lg border"
+        onToggle={(event) => {
+          if (!event.currentTarget.open && recordingAction !== null) stopShortcutRecording();
+        }}
+      >
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-4 text-sm font-medium marker:hidden">
+          <span className="flex items-center gap-2">
+            <Keyboard className="size-4 text-muted-foreground" />
+            Terminal shortcuts
+          </span>
+          <ChevronDown className="size-4 text-muted-foreground transition-transform group-open:rotate-180" />
+        </summary>
+        <fieldset className="grid gap-3 border-t p-4">
+          <legend className="sr-only">Terminal shortcuts</legend>
+          <p className="text-xs text-muted-foreground">
+            Cmd/Ctrl+T, Cmd/Ctrl+W, and Cmd/Ctrl+0–9 remain fixed.
+          </p>
+          <div className="grid gap-2">
+            {TERMINAL_SHORTCUT_ACTIONS.map((action) => (
+              <div key={action.id} className="flex flex-wrap items-center justify-between gap-3 rounded-md bg-muted/20 p-3">
+                <span className="text-sm">{action.label}</span>
+                <div className="flex items-center gap-2">
+                  <Kbd className="h-7 px-2 text-sm">{formatShortcut(shortcuts[action.id])}</Kbd>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={recordingAction === action.id ? "secondary" : "outline"}
+                    disabled={isSaving || (recordingAction !== null && recordingAction !== action.id)}
+                    onClick={() => startShortcutRecording(action.id)}
+                    onKeyDown={(event) => recordShortcut(event, action.id)}
+                    onBlur={() => {
+                      if (recordingAction === action.id) stopShortcutRecording();
+                    }}
+                  >
+                    <Keyboard />
+                    {recordingAction === action.id ? "Press shortcut…" : "Change"}
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+          {shortcutError && <p className="text-sm text-destructive" role="alert">{shortcutError}</p>}
+        </fieldset>
+      </details>
+
       {notice && <p className="text-sm text-muted-foreground">{notice}</p>}
 
       <div className="flex flex-wrap gap-2">
-        <Button type="button" disabled={isSaving} onClick={save}>
+        <Button type="button" disabled={isSaving || recordingAction !== null} onClick={save}>
           {isSaving && <LoaderCircle className="animate-spin" />}
           Save terminal
         </Button>
-        <Button type="button" variant="outline" onClick={() => { setNewTabDirectory(""); setNewPaneDirectory(""); setInactivePaneOpacity(0.65); setCloseTerminalsOnAppExit(false); setCopyOnSelection(true); setFontFamily("ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"); setFontSize("13"); setLineHeight("100"); setHorizontalSpacing("100"); setScrollbackLines("10000"); }}>
+        <Button type="button" variant="outline" onClick={() => { stopShortcutRecording(); setShortcutError(""); setNewTabDirectory(""); setNewPaneDirectory(""); setInactivePaneOpacity(0.65); setCloseTerminalsOnAppExit(false); setCopyOnSelection(true); setFontFamily("ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"); setFontSize("13"); setLineHeight("100"); setHorizontalSpacing("100"); setScrollbackLines("10000"); setShortcuts({ ...DEFAULT_TERMINAL_SHORTCUTS }); }}>
           <RotateCcw className="size-4" />
           Restore defaults
         </Button>

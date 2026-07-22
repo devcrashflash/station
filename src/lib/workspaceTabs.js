@@ -11,6 +11,7 @@ export const workspaceTabsApi = {
   close: (tabId) => invoke("close_terminal_tab", { tabId }),
   closeActivePane: () => invoke("close_active_terminal_pane"),
   splitActive: (axis) => invoke("split_active_terminal", { axis }),
+  listTerminalSettings: () => invoke("list_terminal_settings"),
 };
 
 const TERMINAL_KEY_SEQUENCES = {

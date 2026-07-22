@@ -4,14 +4,38 @@ import { listen } from "@tauri-apps/api/event";
 import {
   isWorkspaceShortcut,
   terminalInputFromKeyEvent,
-  workspaceSplitShortcut,
   workspaceNumberShortcut,
   workspaceTabForNumber,
   workspaceTabsApi,
 } from "@/lib/workspaceTabs";
+import {
+  DEFAULT_TERMINAL_SHORTCUTS,
+  matchesTerminalShortcut,
+  normalizeTerminalShortcuts,
+  terminalShortcutRecordingActive,
+} from "@/lib/terminalShortcuts";
 
 export function WorkspaceShortcuts() {
   const pendingTerminalRef = useRef(null);
+  const shortcutsRef = useRef(DEFAULT_TERMINAL_SHORTCUTS);
+
+  useEffect(() => {
+    if (!window.__TAURI_INTERNALS__) return undefined;
+    let disposed = false;
+    let unlisten = null;
+    async function subscribe() {
+      unlisten = await listen("terminal-settings-changed", ({ payload }) => {
+        if (!disposed) shortcutsRef.current = normalizeTerminalShortcuts(payload?.shortcuts);
+      });
+      const settings = await workspaceTabsApi.listTerminalSettings();
+      if (!disposed) shortcutsRef.current = normalizeTerminalShortcuts(settings?.shortcuts);
+    }
+    subscribe().catch(console.error);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     if (!window.__TAURI_INTERNALS__) return undefined;
@@ -52,6 +76,7 @@ export function WorkspaceShortcuts() {
     }
 
     async function handleKeyDown(event) {
+      if (terminalShortcutRecordingActive()) return;
       const pendingTerminal = pendingTerminalRef.current;
       if (pendingTerminal) {
         const data = terminalInputFromKeyEvent(event);
@@ -62,7 +87,9 @@ export function WorkspaceShortcuts() {
         }
       }
       if (event.repeat) return;
-      const splitAxis = workspaceSplitShortcut(event);
+      const splitAxis = matchesTerminalShortcut(event, shortcutsRef.current.splitRows)
+        ? "rows"
+        : matchesTerminalShortcut(event, shortcutsRef.current.splitColumns) ? "columns" : null;
       if (splitAxis) {
         consume(event);
         await workspaceTabsApi.splitActive(splitAxis);

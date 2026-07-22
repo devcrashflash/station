@@ -6,6 +6,11 @@ import { AI_PROMPT_ICON_IDS } from "./aiPromptIcons.js";
 import { normalizeExternalLabelColor } from "./externalLabels.js";
 import { normalizeProjectColor } from "./projectAvatar.js";
 import { parseSmartInput } from "./smartInputParser.js";
+import {
+  DEFAULT_TERMINAL_SHORTCUTS,
+  normalizeTerminalShortcuts,
+  terminalShortcutConflict,
+} from "./terminalShortcuts.js";
 
 const STORAGE_KEY = "devcrashflash-station-state";
 const LEGACY_STORAGE_KEY = "dev-crash-flash-ai-studio-state";
@@ -49,6 +54,7 @@ const defaultState = {
     lineHeight: 100,
     horizontalSpacing: 100,
     scrollbackLines: 10_000,
+    shortcuts: { ...DEFAULT_TERMINAL_SHORTCUTS },
     profileDirectory: "~",
   },
 };
@@ -734,6 +740,7 @@ const local = {
     settings.scrollbackLines = Number.isInteger(storedScrollbackLines)
       ? Math.min(100_000, Math.max(0, storedScrollbackLines))
       : defaultState.terminalSettings.scrollbackLines;
+    settings.shortcuts = normalizeTerminalShortcuts(settings.shortcuts);
     return settings;
   },
 
@@ -747,6 +754,16 @@ const local = {
       input.scrollbackLines ?? state.terminalSettings?.scrollbackLines ?? defaultState.terminalSettings.scrollbackLines,
     );
     const requestedFontWeight = Number(input.fontWeight);
+    const requestedShortcuts = input.shortcuts ?? state.terminalSettings?.shortcuts ?? defaultState.terminalSettings.shortcuts;
+    const shortcutConflict = terminalShortcutConflict(requestedShortcuts);
+    if (shortcutConflict) {
+      throw new Error(shortcutConflict.invalid
+        ? "Terminal shortcuts must include Command, Control, Option, or Alt with another key."
+        : shortcutConflict.reserved
+          ? "Terminal shortcuts cannot replace Cmd/Ctrl+T, Cmd/Ctrl+W, or Cmd/Ctrl+0–9."
+          : "Each terminal action must use a unique shortcut.");
+    }
+    const shortcuts = normalizeTerminalShortcuts(requestedShortcuts);
     state.terminalSettings = {
       newTabDirectory: input.newTabDirectory?.trim() || null,
       newPaneDirectory: input.newPaneDirectory?.trim() || null,
@@ -777,6 +794,7 @@ const local = {
       scrollbackLines: Number.isInteger(requestedScrollbackLines)
         ? Math.min(100_000, Math.max(0, requestedScrollbackLines))
         : defaultState.terminalSettings.scrollbackLines,
+      shortcuts,
       profileDirectory: state.terminalSettings?.profileDirectory || "~",
     };
     writeState(state);

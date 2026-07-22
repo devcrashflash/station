@@ -34,6 +34,7 @@ const FONT_SIZE_SETTING_KEY: &str = "terminal_font_size";
 const LINE_HEIGHT_SETTING_KEY: &str = "terminal_line_height";
 const HORIZONTAL_SPACING_SETTING_KEY: &str = "terminal_horizontal_spacing";
 const SCROLLBACK_LINES_SETTING_KEY: &str = "terminal_scrollback_lines";
+const SHORTCUTS_SETTING_KEY: &str = "terminal_shortcuts";
 const DEFAULT_INACTIVE_PANE_OPACITY: f64 = 0.65;
 const DEFAULT_FONT_FAMILY: &str =
     "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
@@ -104,7 +105,32 @@ pub struct TerminalSettings {
     line_height: f64,
     horizontal_spacing: f64,
     scrollback_lines: u32,
+    shortcuts: TerminalShortcuts,
     profile_directory: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalShortcuts {
+    split_columns: String,
+    split_rows: String,
+    search: String,
+    clear: String,
+    zoom_in: String,
+    zoom_out: String,
+}
+
+impl Default for TerminalShortcuts {
+    fn default() -> Self {
+        Self {
+            split_columns: "CommandOrControl+KeyD".into(),
+            split_rows: "CommandOrControl+Shift+KeyD".into(),
+            search: "CommandOrControl+KeyF".into(),
+            clear: "Super+KeyK".into(),
+            zoom_in: "CommandOrControl+Equal".into(),
+            zoom_out: "CommandOrControl+Minus".into(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -122,6 +148,7 @@ pub struct TerminalSettingsInput {
     line_height: Option<f64>,
     horizontal_spacing: Option<f64>,
     scrollback_lines: Option<i64>,
+    shortcuts: Option<TerminalShortcuts>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1743,6 +1770,116 @@ pub fn list_terminal_fonts() -> Vec<TerminalFontFamily> {
     terminal_font_catalog().to_vec()
 }
 
+fn terminal_shortcut_signature(shortcut: &str) -> Option<String> {
+    let mut control = false;
+    let mut alt = false;
+    let mut shift = false;
+    let mut meta = false;
+    let mut primary = false;
+    let mut code = None;
+    for token in shortcut
+        .split('+')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        match token.to_ascii_lowercase().as_str() {
+            "control" | "ctrl" => control = true,
+            "alt" | "option" => alt = true,
+            "shift" => shift = true,
+            "super" | "command" | "cmd" => meta = true,
+            "commandorcontrol" | "commandorctrl" | "cmdorcontrol" | "cmdorctrl" => primary = true,
+            _ if code.is_none() => code = Some(token.to_ascii_lowercase()),
+            _ => return None,
+        }
+    }
+    let code = code?;
+    if !control && !alt && !meta && !primary {
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        meta |= primary;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        control |= primary;
+    }
+    Some(format!(
+        "{}{}{}{}:{code}",
+        u8::from(control),
+        u8::from(alt),
+        u8::from(shift),
+        u8::from(meta)
+    ))
+}
+
+fn terminal_shortcut_entries(shortcuts: &TerminalShortcuts) -> [(&'static str, &str); 6] {
+    [
+        ("Split pane right", &shortcuts.split_columns),
+        ("Split pane down", &shortcuts.split_rows),
+        ("Search terminal output", &shortcuts.search),
+        ("Clear terminal", &shortcuts.clear),
+        ("Increase font size", &shortcuts.zoom_in),
+        ("Decrease font size", &shortcuts.zoom_out),
+    ]
+}
+
+fn validate_terminal_shortcuts(shortcuts: &TerminalShortcuts) -> Result<(), String> {
+    let mut seen = HashMap::new();
+    for (label, shortcut) in terminal_shortcut_entries(shortcuts) {
+        let signature = terminal_shortcut_signature(shortcut)
+            .ok_or_else(|| format!("Invalid shortcut for {label}."))?;
+        if let Some(other) = seen.insert(signature, label) {
+            return Err(format!("{label} uses the same shortcut as {other}."));
+        }
+    }
+
+    let reserved =
+        ["KeyT", "KeyW"]
+            .into_iter()
+            .map(|code| terminal_shortcut_signature(&format!("CommandOrControl+{code}")))
+            .chain((0..=9).map(|number| {
+                terminal_shortcut_signature(&format!("CommandOrControl+Digit{number}"))
+            }))
+            .flatten()
+            .collect::<HashSet<_>>();
+    for (label, shortcut) in terminal_shortcut_entries(shortcuts) {
+        if terminal_shortcut_signature(shortcut).is_some_and(|value| reserved.contains(&value)) {
+            return Err(format!(
+                "{label} cannot replace Cmd/Ctrl+T, Cmd/Ctrl+W, or Cmd/Ctrl+0–9."
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn terminal_shortcuts(db: &SqliteConnection) -> TerminalShortcuts {
+    let defaults = TerminalShortcuts::default();
+    let Ok(Some(stored)) = get_app_setting(db, SHORTCUTS_SETTING_KEY) else {
+        return defaults;
+    };
+    let Ok(serde_json::Value::Object(values)) = serde_json::from_str(&stored) else {
+        return defaults;
+    };
+    let valid_or = |key: &str, fallback: &str| {
+        values
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| terminal_shortcut_signature(value).is_some())
+            .unwrap_or(fallback)
+            .to_string()
+    };
+    let shortcuts = TerminalShortcuts {
+        split_columns: valid_or("splitColumns", &defaults.split_columns),
+        split_rows: valid_or("splitRows", &defaults.split_rows),
+        search: valid_or("search", &defaults.search),
+        clear: valid_or("clear", &defaults.clear),
+        zoom_in: valid_or("zoomIn", &defaults.zoom_in),
+        zoom_out: valid_or("zoomOut", &defaults.zoom_out),
+    };
+    validate_terminal_shortcuts(&shortcuts).map_or(defaults, |_| shortcuts)
+}
+
 #[tauri::command]
 pub fn list_terminal_settings(
     app: tauri::AppHandle,
@@ -1782,6 +1919,7 @@ pub fn list_terminal_settings(
         line_height: terminal_line_height(&db),
         horizontal_spacing: terminal_horizontal_spacing(&db),
         scrollback_lines: terminal_scrollback_lines(&db),
+        shortcuts: terminal_shortcuts(&db),
         profile_directory: profile_directory.to_string_lossy().into_owned(),
     })
 }
@@ -1823,6 +1961,7 @@ pub fn save_terminal_settings(
         .horizontal_spacing
         .unwrap_or(DEFAULT_HORIZONTAL_SPACING);
     let requested_scrollback_lines = input.scrollback_lines;
+    let requested_shortcuts = input.shortcuts;
     if !requested_font_size.is_finite()
         || !requested_line_height.is_finite()
         || !requested_horizontal_spacing.is_finite()
@@ -1855,6 +1994,8 @@ pub fn save_terminal_settings(
         let copy_on_selection = input
             .copy_on_selection
             .unwrap_or_else(|| copy_on_selection(&db));
+        let shortcuts = requested_shortcuts.unwrap_or_else(|| terminal_shortcuts(&db));
+        validate_terminal_shortcuts(&shortcuts)?;
         set_app_setting(
             &db,
             NEW_TAB_DIRECTORY_SETTING_KEY,
@@ -1910,6 +2051,8 @@ pub fn save_terminal_settings(
             Some(&scrollback_lines.to_string()),
         )
         .map_err(db_error)?;
+        let shortcuts_json = serde_json::to_string(&shortcuts).map_err(db_error)?;
+        set_app_setting(&db, SHORTCUTS_SETTING_KEY, Some(&shortcuts_json)).map_err(db_error)?;
     }
     let settings = list_terminal_settings(app.clone(), state)?;
     let _ = app.emit("terminal-settings-changed", &settings);
@@ -3086,6 +3229,41 @@ mod tests {
         assert_eq!(terminal_scrollback_lines(&db), MAX_SCROLLBACK_LINES);
         set_app_setting(&db, SCROLLBACK_LINES_SETTING_KEY, Some("invalid")).unwrap();
         assert_eq!(terminal_scrollback_lines(&db), DEFAULT_SCROLLBACK_LINES);
+    }
+
+    #[test]
+    fn terminal_shortcuts_fall_back_per_field_and_reject_conflicts() {
+        let db = SqliteConnection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );",
+        )
+        .unwrap();
+        set_app_setting(
+            &db,
+            SHORTCUTS_SETTING_KEY,
+            Some(r#"{"splitColumns":"Alt+KeyS","search":"KeyF","zoomOut":42}"#),
+        )
+        .unwrap();
+        let shortcuts = terminal_shortcuts(&db);
+        assert_eq!(shortcuts.split_columns, "Alt+KeyS");
+        assert_eq!(shortcuts.search, TerminalShortcuts::default().search);
+        assert_eq!(shortcuts.zoom_out, TerminalShortcuts::default().zoom_out);
+
+        let mut duplicate = TerminalShortcuts::default();
+        duplicate.search = duplicate.split_columns.clone();
+        assert!(validate_terminal_shortcuts(&duplicate)
+            .unwrap_err()
+            .contains("same shortcut"));
+
+        let mut reserved = TerminalShortcuts::default();
+        reserved.search = "CommandOrControl+KeyW".into();
+        assert!(validate_terminal_shortcuts(&reserved)
+            .unwrap_err()
+            .contains("cannot replace"));
     }
 
     #[test]

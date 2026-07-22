@@ -28,6 +28,7 @@ import {
 import { DEFAULT_PROJECT_COLOR } from "@/lib/projectAvatar";
 import { quickCaptureTitle } from "@/lib/quickCapture";
 import { parseSmartInput } from "@/lib/smartInputParser";
+import { DEFAULT_TERMINAL_SHORTCUTS } from "@/lib/terminalShortcuts";
 import { useTheme } from "@/lib/theme";
 import { InboxView } from "@/views/inbox/InboxView";
 import { ActivityView, useActivityData } from "@/views/activity/ActivityView";
@@ -145,6 +146,7 @@ function App() {
     lineHeight: 100,
     horizontalSpacing: 100,
     scrollbackLines: 10_000,
+    shortcuts: { ...DEFAULT_TERMINAL_SHORTCUTS },
     profileDirectory: "~",
   });
   const [terminalFonts, setTerminalFonts] = useState([]);

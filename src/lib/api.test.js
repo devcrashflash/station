@@ -16,6 +16,7 @@ import {
   getProjectInitial,
   normalizeProjectColor,
 } from "./projectAvatar.js";
+import { DEFAULT_TERMINAL_SHORTCUTS } from "./terminalShortcuts.js";
 import { parseSmartInput } from "./smartInputParser.js";
 
 const connections = [
@@ -210,6 +211,7 @@ test("local fallback stores terminal settings and restores defaults", async () =
     lineHeight: 100,
     horizontalSpacing: 100,
     scrollbackLines: 10000,
+    shortcuts: DEFAULT_TERMINAL_SHORTCUTS,
     profileDirectory: "~",
   });
   assert.deepEqual(await api.saveTerminalSettings({
@@ -240,6 +242,7 @@ test("local fallback stores terminal settings and restores defaults", async () =
     lineHeight: 120,
     horizontalSpacing: 120,
     scrollbackLines: 25000,
+    shortcuts: DEFAULT_TERMINAL_SHORTCUTS,
     profileDirectory: "~",
   });
   assert.deepEqual(await api.saveTerminalSettings({ newTabDirectory: "", newPaneDirectory: "", inactivePaneOpacity: 0.65, closeTerminalsOnAppExit: false, fontFamily: "", fontWeight: 1200, fontStyle: "invalid", fontSize: 13, lineHeight: 1, horizontalSpacing: 3, scrollbackLines: 200000 }), {
@@ -256,9 +259,22 @@ test("local fallback stores terminal settings and restores defaults", async () =
     lineHeight: 100,
     horizontalSpacing: 100,
     scrollbackLines: 100000,
+    shortcuts: DEFAULT_TERMINAL_SHORTCUTS,
     profileDirectory: "~",
   });
   assert.equal((await api.saveTerminalSettings({ copyOnSelection: true })).copyOnSelection, true);
+  const customShortcuts = {
+    ...DEFAULT_TERMINAL_SHORTCUTS,
+    search: "Alt+KeyS",
+  };
+  assert.deepEqual((await api.saveTerminalSettings({ shortcuts: customShortcuts })).shortcuts, customShortcuts);
+  assert.deepEqual((await api.listTerminalSettings()).shortcuts, customShortcuts);
+  await assert.rejects(api.saveTerminalSettings({
+    shortcuts: { ...customShortcuts, clear: "Alt+KeyS" },
+  }), /unique shortcut/);
+  await assert.rejects(api.saveTerminalSettings({
+    shortcuts: { ...customShortcuts, search: "CommandOrControl+KeyW" },
+  }), /cannot replace/);
   assert.deepEqual(await api.listTerminalFonts(), []);
 });
 
