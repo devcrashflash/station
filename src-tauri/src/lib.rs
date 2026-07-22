@@ -9126,14 +9126,19 @@ fn delete_local_resource(state: tauri::State<'_, AppState>, id: String) -> Resul
 }
 
 #[tauri::command]
-fn checkout_pull_request_for_review(
-    state: tauri::State<'_, AppState>,
+async fn checkout_pull_request_for_review(
+    app: tauri::AppHandle,
     local_resource_id: String,
     provider: String,
     pr_url: String,
 ) -> Result<PullRequestCheckoutResult, String> {
-    let db = state.db.lock().map_err(db_error)?;
-    checkout_pull_request_for_review_in_db(&db, local_resource_id, provider, pr_url)
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let db = state.db.lock().map_err(db_error)?;
+        checkout_pull_request_for_review_in_db(&db, local_resource_id, provider, pr_url)
+    })
+    .await
+    .map_err(|error| format!("Review checkout task failed: {error}"))?
 }
 
 #[tauri::command]
