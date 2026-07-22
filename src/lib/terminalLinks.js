@@ -63,6 +63,50 @@ function trimToken(token, start) {
   };
 }
 
+function tokenCandidates(line, offset = 0) {
+  return Array.from(line.slice(offset).matchAll(TOKEN_PATTERN), (match) => (
+    trimToken(match[0], offset + match.index)
+  ));
+}
+
+function normalizeGitDiffPrefix(candidate) {
+  if (candidate.path === "/dev/null") return null;
+  if (candidate.path.startsWith("a/") || candidate.path.startsWith("b/")) {
+    return { ...candidate, path: candidate.path.slice(2) };
+  }
+  return candidate;
+}
+
+function gitDiffPathCandidates(line) {
+  const trimmedStart = line.length - line.trimStart().length;
+  const content = line.slice(trimmedStart);
+  const binaryPrefix = "diff --git ";
+  if (content.startsWith(binaryPrefix)) {
+    return tokenCandidates(line, trimmedStart + binaryPrefix.length)
+      .slice(0, 2)
+      .map(normalizeGitDiffPrefix)
+      .filter(Boolean);
+  }
+
+  for (const prefix of ["--- ", "+++ "]) {
+    if (!content.startsWith(prefix)) continue;
+    const [candidate] = tokenCandidates(line, trimmedStart + prefix.length);
+    const normalized = candidate && normalizeGitDiffPrefix(candidate);
+    return normalized ? [normalized] : [];
+  }
+
+  for (const prefix of ["rename from ", "rename to ", "copy from ", "copy to "]) {
+    if (!content.startsWith(prefix)) continue;
+    const pathStart = trimmedStart + prefix.length;
+    const rawPath = line.slice(pathStart).trimEnd();
+    if (!rawPath) return [];
+    const candidate = trimToken(rawPath, pathStart);
+    return candidate.path === "/dev/null" ? [] : [candidate];
+  }
+
+  return null;
+}
+
 export function terminalPathCandidates(line) {
   if (typeof line !== "string" || !line.trim()) return [];
   const candidates = [];
@@ -78,11 +122,15 @@ export function terminalPathCandidates(line) {
     }
   };
 
+  const diffCandidates = gitDiffPathCandidates(line);
+  if (diffCandidates !== null) {
+    diffCandidates.forEach(addCandidate);
+    return candidates;
+  }
+
   const trimmed = line.trim();
   addCandidate(trimToken(trimmed, line.indexOf(trimmed)));
-  for (const match of line.matchAll(TOKEN_PATTERN)) {
-    addCandidate(trimToken(match[0], match.index));
-  }
+  tokenCandidates(line).forEach(addCandidate);
   return candidates;
 }
 
@@ -91,6 +139,58 @@ export function isPrimaryTerminalLinkEvent(event, platform = globalThis.navigato
   return platform.toLowerCase().startsWith("mac")
     ? Boolean(event.metaKey && !event.ctrlKey)
     : Boolean(event.ctrlKey && !event.metaKey);
+}
+
+export function createTerminalLinkModifierController({
+  target = globalThis.window,
+  platform = globalThis.navigator?.platform || "",
+} = {}) {
+  let active = false;
+  let hoveredLink = null;
+
+  const updateLink = () => {
+    if (!hoveredLink?.decorations) return;
+    hoveredLink.decorations.underline = active;
+    hoveredLink.decorations.pointerCursor = active;
+  };
+  const updateModifier = (event) => {
+    active = isPrimaryTerminalLinkEvent(event, platform);
+    updateLink();
+  };
+  const resetModifier = () => {
+    active = false;
+    updateLink();
+  };
+
+  target?.addEventListener("keydown", updateModifier, true);
+  target?.addEventListener("keyup", updateModifier, true);
+  target?.addEventListener("blur", resetModifier);
+
+  return {
+    decorate(link) {
+      link.decorations = { underline: active, pointerCursor: active };
+      link.hover = (event) => {
+        active = isPrimaryTerminalLinkEvent(event, platform);
+        // xterm replaces decorations with live accessors immediately after
+        // calling hover, so defer tracking until those accessors are installed.
+        queueMicrotask(() => {
+          hoveredLink = link;
+          updateLink();
+        });
+      };
+      link.leave = () => {
+        if (hoveredLink === link) hoveredLink = null;
+      };
+      link.dispose = link.leave;
+      return link;
+    },
+    dispose() {
+      target?.removeEventListener("keydown", updateModifier, true);
+      target?.removeEventListener("keyup", updateModifier, true);
+      target?.removeEventListener("blur", resetModifier);
+      hoveredLink = null;
+    },
+  };
 }
 
 function windowedLineStrings(bufferLineNumber, terminal) {
@@ -158,7 +258,7 @@ function candidateRange(terminal, firstLine, candidate) {
   };
 }
 
-export function createTerminalFileLinkProvider({ terminal, resolvePaths, openPath }) {
+export function createTerminalFileLinkProvider({ terminal, resolvePaths, openPath, linkModifier }) {
   return {
     async provideLinks(bufferLineNumber, callback) {
       const logicalLine = windowedLineStrings(bufferLineNumber, terminal);
@@ -182,13 +282,14 @@ export function createTerminalFileLinkProvider({ terminal, resolvePaths, openPat
           if (!path || !range) return [];
           if (linkedSpans.some(({ start, end }) => candidate.start < end && candidate.end > start)) return [];
           linkedSpans.push(candidate);
-          return [{
+          const link = {
             range,
             text: candidate.path,
             activate: (event) => {
               if (isPrimaryTerminalLinkEvent(event)) void openPath(path);
             },
-          }];
+          };
+          return [linkModifier ? linkModifier.decorate(link) : link];
         });
         callback(links.length ? links : undefined);
       } catch {

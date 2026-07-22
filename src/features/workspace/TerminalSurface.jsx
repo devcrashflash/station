@@ -24,6 +24,7 @@ import {
 import { openExternalUrl } from "@/lib/externalLinks";
 import {
   createTerminalFileLinkProvider,
+  createTerminalLinkModifierController,
   isPrimaryTerminalLinkEvent,
 } from "@/lib/terminalLinks";
 import { terminalCellLetterSpacing } from "@/lib/terminalFonts";
@@ -313,8 +314,10 @@ function TerminalPane({
     fitRef.current = fit;
     searchRef.current = searchAddon;
     serializeRef.current = serialize;
+    const linkModifier = createTerminalLinkModifierController();
     const fileLinksDisposable = terminal.registerLinkProvider(createTerminalFileLinkProvider({
       terminal,
+      linkModifier,
       resolvePaths: (candidates) => invoke("resolve_terminal_paths", {
         tabId,
         paneId: pane.paneId,
@@ -405,6 +408,7 @@ function TerminalPane({
       selectionDisposable.dispose();
       cwdDisposable.dispose();
       fileLinksDisposable.dispose();
+      linkModifier.dispose();
     };
 
     if (searchOpenRef.current && searchQueryRef.current) {

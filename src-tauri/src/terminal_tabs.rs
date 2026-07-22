@@ -1966,7 +1966,13 @@ fn resolve_terminal_path(cwd: &Path, home: &Path, candidate: &str) -> Option<Pat
     } else {
         cwd.join(expanded)
     };
-    absolute.canonicalize().ok()
+    canonical_terminal_entry(&absolute)
+}
+
+fn canonical_terminal_entry(path: &Path) -> Option<PathBuf> {
+    let canonical = path.canonicalize().ok()?;
+    let metadata = canonical.metadata().ok()?;
+    (metadata.is_file() || metadata.is_dir()).then_some(canonical)
 }
 
 #[tauri::command]
@@ -2023,9 +2029,8 @@ pub fn open_terminal_path(
     if !candidate.is_absolute() {
         return Err("Terminal links must resolve to an absolute local path.".to_string());
     }
-    let canonical = candidate
-        .canonicalize()
-        .map_err(|error| format!("Could not resolve terminal link: {error}"))?;
+    let canonical = canonical_terminal_entry(candidate)
+        .ok_or_else(|| "Terminal link must be an existing file or directory.".to_string())?;
     let canonical = canonical
         .to_str()
         .ok_or_else(|| "Terminal link is not valid UTF-8.".to_string())?;
@@ -2671,6 +2676,9 @@ mod tests {
         );
         assert_eq!(resolve_terminal_path(&cwd, &home, "missing.txt"), None);
         assert_eq!(resolve_terminal_path(&cwd, &home, "bad\npath"), None);
+
+        #[cfg(unix)]
+        assert_eq!(resolve_terminal_path(&cwd, &home, "/dev/null"), None);
 
         #[cfg(unix)]
         {

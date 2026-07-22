@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   createTerminalFileLinkProvider,
+  createTerminalLinkModifierController,
   isPrimaryTerminalLinkEvent,
   terminalPathCandidates,
 } from "./terminalLinks.js";
@@ -39,6 +40,35 @@ test("decodes git C-style quoted paths and keeps unicode", () => {
   assert.deepEqual(tokenPaths('?? "docs/Gr\\303\\274\\303\\237e.md"'), ["docs/Grüße.md"]);
 });
 
+test("normalizes standard git diff file prefixes without changing link ranges", () => {
+  assert.deepEqual(terminalPathCandidates("diff --git a/deploy.php b/deploy.php"), [
+    { start: 11, end: 23, path: "deploy.php" },
+    { start: 24, end: 36, path: "deploy.php" },
+  ]);
+  assert.deepEqual(terminalPathCandidates("--- a/public/index.php"), [
+    { start: 4, end: 22, path: "public/index.php" },
+  ]);
+  assert.deepEqual(terminalPathCandidates("+++ b/public/index.php"), [
+    { start: 4, end: 22, path: "public/index.php" },
+  ]);
+});
+
+test("supports quoted, unicode, renamed, copied, and unprefixed git diff paths", () => {
+  assert.deepEqual(paths('diff --git "a/old name.php" "b/new name.php"'), ["old name.php", "new name.php"]);
+  assert.deepEqual(paths('--- "a/Gr\\303\\274\\303\\237e.php"'), ["Grüße.php"]);
+  assert.deepEqual(paths("rename from old name.php"), ["old name.php"]);
+  assert.deepEqual(paths("rename to new name.php"), ["new name.php"]);
+  assert.deepEqual(paths("copy from source file.php"), ["source file.php"]);
+  assert.deepEqual(paths("copy to copied file.php"), ["copied file.php"]);
+  assert.deepEqual(paths("diff --git deploy.php deploy.php"), ["deploy.php", "deploy.php"]);
+});
+
+test("ignores git diff null devices and preserves ordinary prefixed paths", () => {
+  assert.deepEqual(paths("--- /dev/null"), []);
+  assert.deepEqual(paths("+++ /dev/null"), []);
+  assert.deepEqual(tokenPaths("files a/deploy.php b/deploy.php"), ["files", "a/deploy.php", "b/deploy.php"]);
+});
+
 test("ignores web URLs and empty path tokens", () => {
   assert.deepEqual(paths("https://example.com/file.js file:///tmp/test.txt"), []);
 });
@@ -49,6 +79,40 @@ test("requires the platform primary modifier without secondary modifiers", () =>
   assert.equal(isPrimaryTerminalLinkEvent({ ctrlKey: true }, "Linux x86_64"), true);
   assert.equal(isPrimaryTerminalLinkEvent({ ctrlKey: true, shiftKey: true }, "Win32"), false);
   assert.equal(isPrimaryTerminalLinkEvent({}, "MacIntel"), false);
+});
+
+test("shows file link decorations only while the primary modifier is active", async () => {
+  const target = new EventTarget();
+  const controller = createTerminalLinkModifierController({ target, platform: "MacIntel" });
+  const link = controller.decorate({});
+  assert.deepEqual(link.decorations, { underline: false, pointerCursor: false });
+
+  link.hover();
+  await Promise.resolve();
+  const commandDown = new Event("keydown");
+  Object.defineProperties(commandDown, {
+    metaKey: { value: true },
+    ctrlKey: { value: false },
+    altKey: { value: false },
+    shiftKey: { value: false },
+  });
+  target.dispatchEvent(commandDown);
+  assert.deepEqual(link.decorations, { underline: true, pointerCursor: true });
+
+  const commandUp = new Event("keyup");
+  Object.defineProperties(commandUp, {
+    metaKey: { value: false },
+    ctrlKey: { value: false },
+    altKey: { value: false },
+    shiftKey: { value: false },
+  });
+  target.dispatchEvent(commandUp);
+  assert.deepEqual(link.decorations, { underline: false, pointerCursor: false });
+
+  link.hover(commandDown);
+  await Promise.resolve();
+  assert.deepEqual(link.decorations, { underline: true, pointerCursor: true });
+  controller.dispose();
 });
 
 function fakeTerminal(lines) {
