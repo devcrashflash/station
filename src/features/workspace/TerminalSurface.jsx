@@ -5,6 +5,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 
 import {
@@ -292,9 +293,11 @@ function TerminalPane({
     const fit = new FitAddon();
     const searchAddon = new SearchAddon();
     const serialize = new SerializeAddon();
+    const webLinks = new WebLinksAddon((_event, uri) => void openExternalUrl(uri));
     terminal.loadAddon(fit);
     terminal.loadAddon(searchAddon);
     terminal.loadAddon(serialize);
+    terminal.loadAddon(webLinks);
     openTerminalWithConsistentFontMeasurement(terminal, hostRef.current);
     terminal.element.style.fontStyle = fontStyle;
     hostRef.current.style.fontStyle = fontStyle;
