@@ -54,19 +54,21 @@ const defaultState = {
 };
 
 export const api = {
-  quickCaptureShortcutSettings: () => call("quick_capture_shortcut_settings", {}, () => ({
+  quickCaptureSettings: () => call("quick_capture_settings", {}, () => ({
+    enabled: false,
     shortcut: "CommandOrControl+Shift+Space",
     defaultShortcut: "CommandOrControl+Shift+Space",
     supported: false,
     registered: false,
     error: null,
   })),
-  saveQuickCaptureShortcut: (payload) => call("save_quick_capture_shortcut", { input: payload }, () => ({
+  saveQuickCaptureSettings: (payload) => call("save_quick_capture_settings", { input: payload }, () => ({
+    enabled: false,
     shortcut: "CommandOrControl+Shift+Space",
     defaultShortcut: "CommandOrControl+Shift+Space",
     supported: false,
     registered: false,
-    error: "Global shortcuts require the desktop app.",
+    error: "Quick capture requires the desktop app.",
   })),
   hideQuickCapture: ({ restoreFocus = false } = {}) =>
     call("hide_quick_capture", { restoreFocus }, () => null),

@@ -16,6 +16,8 @@ use std::{
 #[cfg(target_os = "macos")]
 use tauri::Emitter;
 use tauri::Manager;
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+use tauri::{WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
 
 #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
@@ -39,6 +41,7 @@ const LEGACY_APP_IDENTIFIER: &str = "com.devcrashflash.aistudio";
 const LEGACY_DATABASE_FILENAME: &str = "studio.sqlite";
 const BROWSER_BUNDLE_ID_SETTING_KEY: &str = "browser_bundle_id";
 const DEFAULT_QUICK_CAPTURE_SHORTCUT: &str = "CommandOrControl+Shift+Space";
+const QUICK_CAPTURE_ENABLED_SETTING_KEY: &str = "quick_capture_enabled";
 const QUICK_CAPTURE_SHORTCUT_SETTING_KEY: &str = "quick_capture_shortcut";
 #[cfg(not(target_os = "macos"))]
 const BLANK_BROWSER_TAB_URL: &str = "about:blank";
@@ -171,11 +174,12 @@ struct AppState {
     db: Mutex<SqliteConnection>,
     db_path: PathBuf,
     ocr_engine: Mutex<Option<ocrs::OcrEngine>>,
-    quick_capture_shortcut: Mutex<QuickCaptureShortcutRuntime>,
+    quick_capture_settings: Mutex<QuickCaptureRuntime>,
 }
 
 #[derive(Debug, Clone)]
-struct QuickCaptureShortcutRuntime {
+struct QuickCaptureRuntime {
+    enabled: bool,
     shortcut: String,
     registered: bool,
     error: Option<String>,
@@ -183,7 +187,8 @@ struct QuickCaptureShortcutRuntime {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct QuickCaptureShortcutSettings {
+struct QuickCaptureSettings {
+    enabled: bool,
     shortcut: String,
     default_shortcut: String,
     supported: bool,
@@ -193,14 +198,14 @@ struct QuickCaptureShortcutSettings {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct QuickCaptureShortcutInput {
-    shortcut: Option<String>,
+struct QuickCaptureSettingsInput {
+    enabled: bool,
+    shortcut: String,
 }
 
-fn quick_capture_shortcut_settings_from_runtime(
-    runtime: &QuickCaptureShortcutRuntime,
-) -> QuickCaptureShortcutSettings {
-    QuickCaptureShortcutSettings {
+fn quick_capture_settings_from_runtime(runtime: &QuickCaptureRuntime) -> QuickCaptureSettings {
+    QuickCaptureSettings {
+        enabled: runtime.enabled,
         shortcut: runtime.shortcut.clone(),
         default_shortcut: DEFAULT_QUICK_CAPTURE_SHORTCUT.to_string(),
         supported: cfg!(any(target_os = "macos", windows, target_os = "linux")),
@@ -210,11 +215,11 @@ fn quick_capture_shortcut_settings_from_runtime(
 }
 
 #[tauri::command]
-fn quick_capture_shortcut_settings(
+fn quick_capture_settings(
     state: tauri::State<'_, AppState>,
-) -> Result<QuickCaptureShortcutSettings, String> {
-    let runtime = state.quick_capture_shortcut.lock().map_err(db_error)?;
-    Ok(quick_capture_shortcut_settings_from_runtime(&runtime))
+) -> Result<QuickCaptureSettings, String> {
+    let runtime = state.quick_capture_settings.lock().map_err(db_error)?;
+    Ok(quick_capture_settings_from_runtime(&runtime))
 }
 
 fn centered_origin(
@@ -362,18 +367,20 @@ fn toggle_quick_capture(app: &tauri::AppHandle) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn setup_quick_capture_panel(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+fn setup_quick_capture_panel(app: &tauri::AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("quick-capture")
-        .ok_or_else(|| std::io::Error::other("Quick capture window is unavailable."))?;
-    let panel = window.to_panel::<QuickCapturePanel>()?;
+        .ok_or_else(|| "Quick capture window is unavailable.".to_string())?;
+    let panel = window
+        .to_panel::<QuickCapturePanel>()
+        .map_err(|error| error.to_string())?;
     panel.set_style_mask(StyleMask::empty().nonactivating_panel().value());
     panel.set_floating_panel(true);
     panel.set_becomes_key_only_if_needed(false);
     panel.set_hides_on_deactivate(false);
 
     let handler = QuickCapturePanelEventHandler::new();
-    let focus_app_handle = app.handle().clone();
+    let focus_app_handle = app.clone();
     handler.window_did_become_key(move |_| {
         if let Some(webview) = focus_app_handle.get_webview("quick-capture") {
             if let Err(error) = webview.set_focus() {
@@ -386,7 +393,7 @@ fn setup_quick_capture_panel(app: &mut tauri::App) -> Result<(), Box<dyn std::er
             eprintln!("Could not notify quick capture about focus: {error}");
         }
     });
-    let blur_app_handle = app.handle().clone();
+    let blur_app_handle = app.clone();
     handler.window_did_resign_key(move |_| {
         if let Err(error) =
             blur_app_handle.emit_to("quick-capture", "quick-capture-focus-changed", false)
@@ -402,12 +409,10 @@ fn setup_quick_capture_panel(app: &mut tauri::App) -> Result<(), Box<dyn std::er
 }
 
 #[cfg(any(windows, target_os = "linux"))]
-fn setup_quick_capture_focus_handler(
-    app: &mut tauri::App,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn setup_quick_capture_focus_handler(app: &tauri::AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("quick-capture")
-        .ok_or_else(|| std::io::Error::other("Quick capture window is unavailable."))?;
+        .ok_or_else(|| "Quick capture window is unavailable.".to_string())?;
     let hide_window = window.clone();
     window.on_window_event(move |event| {
         if matches!(event, tauri::WindowEvent::Focused(false)) {
@@ -416,6 +421,82 @@ fn setup_quick_capture_focus_handler(
             }
         }
     });
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+fn create_quick_capture_window(app: &tauri::AppHandle) -> Result<(), String> {
+    if app.get_webview_window("quick-capture").is_some() {
+        return Ok(());
+    }
+
+    WebviewWindowBuilder::new(
+        app,
+        "quick-capture",
+        WebviewUrl::App("index.html?quick-capture=1".into()),
+    )
+    .title("Quick Capture")
+    .inner_size(640.0, 180.0)
+    .visible(false)
+    .focused(false)
+    .center()
+    .decorations(false)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .closable(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .shadow(false)
+    .transparent(true)
+    .build()
+    .map_err(|error| format!("Could not create quick capture window: {error}"))?;
+
+    #[cfg(target_os = "macos")]
+    if let Err(error) = setup_quick_capture_panel(app) {
+        if let Some(window) = app.get_webview_window("quick-capture") {
+            let _ = window.destroy();
+        }
+        return Err(error);
+    }
+    #[cfg(any(windows, target_os = "linux"))]
+    if let Err(error) = setup_quick_capture_focus_handler(app) {
+        if let Some(window) = app.get_webview_window("quick-capture") {
+            let _ = window.destroy();
+        }
+        return Err(error);
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn destroy_quick_capture_window(app: &tauri::AppHandle) -> Result<(), String> {
+    if let Ok(panel) = app.get_webview_panel("quick-capture") {
+        panel.hide();
+        let window = panel
+            .to_window()
+            .ok_or_else(|| "Could not restore quick capture panel to a window.".to_string())?;
+        return window
+            .close()
+            .map_err(|error| format!("Could not close quick capture window: {error}"));
+    }
+
+    if let Some(window) = app.get_webview_window("quick-capture") {
+        window
+            .close()
+            .map_err(|error| format!("Could not close quick capture window: {error}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn destroy_quick_capture_window(app: &tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("quick-capture") {
+        window
+            .destroy()
+            .map_err(|error| format!("Could not destroy quick capture window: {error}"))?;
+    }
     Ok(())
 }
 
@@ -1199,39 +1280,44 @@ pub fn run() {
                 terminal_tabs::initialize_state(&db).map_err(std::io::Error::other)?;
 
             #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
-            let quick_capture_shortcut = {
-                let shortcut = load_quick_capture_shortcut(&db)?;
-                let error = app
-                    .global_shortcut()
-                    .register(shortcut.as_str())
-                    .err()
-                    .map(|error| format!("Could not register shortcut {shortcut}: {error}"));
-                QuickCaptureShortcutRuntime {
+            let quick_capture_settings = {
+                let (enabled, shortcut) = load_quick_capture_settings(&db)?;
+                let error = if enabled {
+                    create_quick_capture_window(app.handle())
+                        .and_then(|()| {
+                            app.global_shortcut()
+                                .register(shortcut.as_str())
+                                .map_err(|error| {
+                                    let _ = destroy_quick_capture_window(app.handle());
+                                    format!("Could not register shortcut {shortcut}: {error}")
+                                })
+                        })
+                        .err()
+                } else {
+                    None
+                };
+                QuickCaptureRuntime {
+                    enabled,
                     shortcut,
-                    registered: error.is_none(),
+                    registered: enabled && error.is_none(),
                     error,
                 }
             };
             #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
-            let quick_capture_shortcut = QuickCaptureShortcutRuntime {
+            let quick_capture_settings = QuickCaptureRuntime {
+                enabled: false,
                 shortcut: DEFAULT_QUICK_CAPTURE_SHORTCUT.to_string(),
                 registered: false,
-                error: Some(
-                    "Quick capture shortcuts are available in the desktop app only.".to_string(),
-                ),
+                error: Some("Quick capture is available in the desktop app only.".to_string()),
             };
 
             app.manage(AppState {
                 db: Mutex::new(db),
                 db_path,
                 ocr_engine: Mutex::new(None),
-                quick_capture_shortcut: Mutex::new(quick_capture_shortcut),
+                quick_capture_settings: Mutex::new(quick_capture_settings),
             });
             app.manage(terminal_tabs_state);
-            #[cfg(target_os = "macos")]
-            setup_quick_capture_panel(app)?;
-            #[cfg(any(windows, target_os = "linux"))]
-            setup_quick_capture_focus_handler(app)?;
             #[cfg(target_os = "macos")]
             install_workspace_menu(app)?;
             terminal_tabs::setup_workspace_window(app)?;
@@ -1248,8 +1334,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             open_blank_browser_tab,
-            quick_capture_shortcut_settings,
-            save_quick_capture_shortcut,
+            quick_capture_settings,
+            save_quick_capture_settings,
             hide_quick_capture,
             terminal_tabs::list_workspace_tabs,
             terminal_tabs::list_terminal_fonts,
@@ -1979,131 +2065,179 @@ fn normalize_quick_capture_shortcut(value: &str) -> Result<String, String> {
 }
 
 #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
-fn load_quick_capture_shortcut(db: &SqliteConnection) -> Result<String, String> {
+fn load_quick_capture_settings(db: &SqliteConnection) -> Result<(bool, String), String> {
     let default_shortcut = normalize_quick_capture_shortcut(DEFAULT_QUICK_CAPTURE_SHORTCUT)?;
-    let Some(stored_shortcut) =
-        get_app_setting(db, QUICK_CAPTURE_SHORTCUT_SETTING_KEY).map_err(db_error)?
-    else {
-        return Ok(default_shortcut);
-    };
-
-    match normalize_quick_capture_shortcut(&stored_shortcut) {
-        Ok(shortcut) => Ok(shortcut),
-        Err(_) => {
-            set_app_setting(db, QUICK_CAPTURE_SHORTCUT_SETTING_KEY, None).map_err(db_error)?;
-            Ok(default_shortcut)
+    let enabled = match get_app_setting(db, QUICK_CAPTURE_ENABLED_SETTING_KEY).map_err(db_error)? {
+        None => true,
+        Some(value) if value.eq_ignore_ascii_case("true") => true,
+        Some(value) if value.eq_ignore_ascii_case("false") => false,
+        Some(_) => {
+            set_app_setting(db, QUICK_CAPTURE_ENABLED_SETTING_KEY, None).map_err(db_error)?;
+            true
         }
-    }
+    };
+    let stored_shortcut =
+        get_app_setting(db, QUICK_CAPTURE_SHORTCUT_SETTING_KEY).map_err(db_error)?;
+
+    let shortcut = match stored_shortcut {
+        None => default_shortcut,
+        Some(stored_shortcut) => match normalize_quick_capture_shortcut(&stored_shortcut) {
+            Ok(shortcut) => shortcut,
+            Err(_) => {
+                set_app_setting(db, QUICK_CAPTURE_SHORTCUT_SETTING_KEY, None).map_err(db_error)?;
+                default_shortcut
+            }
+        },
+    };
+    Ok((enabled, shortcut))
 }
 
 #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
-fn persist_quick_capture_shortcut(db: &SqliteConnection, shortcut: &str) -> Result<(), String> {
+fn persist_quick_capture_settings(
+    db: &SqliteConnection,
+    enabled: bool,
+    shortcut: &str,
+) -> Result<(), String> {
     let default_shortcut = normalize_quick_capture_shortcut(DEFAULT_QUICK_CAPTURE_SHORTCUT)?;
-    let stored_value = (shortcut != default_shortcut).then_some(shortcut);
-    set_app_setting(db, QUICK_CAPTURE_SHORTCUT_SETTING_KEY, stored_value).map_err(db_error)
+    let transaction = db.unchecked_transaction().map_err(db_error)?;
+    set_app_setting(
+        &transaction,
+        QUICK_CAPTURE_ENABLED_SETTING_KEY,
+        (!enabled).then_some("false"),
+    )
+    .map_err(db_error)?;
+    set_app_setting(
+        &transaction,
+        QUICK_CAPTURE_SHORTCUT_SETTING_KEY,
+        (shortcut != default_shortcut).then_some(shortcut),
+    )
+    .map_err(db_error)?;
+    transaction.commit().map_err(db_error)
+}
+
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+fn restore_quick_capture_runtime(
+    app: &tauri::AppHandle,
+    previous: &QuickCaptureRuntime,
+) -> Result<(), String> {
+    if previous.enabled {
+        create_quick_capture_window(app)?;
+        if previous.registered {
+            app.global_shortcut()
+                .register(previous.shortcut.as_str())
+                .map_err(|error| format!("Could not restore the previous shortcut: {error}"))?;
+        }
+    } else {
+        destroy_quick_capture_window(app)?;
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+fn apply_quick_capture_settings(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    input: QuickCaptureSettingsInput,
+) -> Result<QuickCaptureSettings, String> {
+    let next_shortcut = normalize_quick_capture_shortcut(&input.shortcut)?;
+    let mut runtime = state.quick_capture_settings.lock().map_err(db_error)?;
+    let previous = runtime.clone();
+    let window_existed = app.get_webview_window("quick-capture").is_some();
+    let mut registered_next = false;
+    let mut unregistered_previous = false;
+
+    let transition_result = (|| -> Result<(), String> {
+        if input.enabled {
+            create_quick_capture_window(app)?;
+            if !previous.registered || next_shortcut != previous.shortcut {
+                app.global_shortcut()
+                    .register(next_shortcut.as_str())
+                    .map_err(|error| format!("Could not register shortcut: {error}"))?;
+                registered_next = true;
+            }
+            if previous.registered && next_shortcut != previous.shortcut {
+                if let Err(error) = app.global_shortcut().unregister(previous.shortcut.as_str()) {
+                    if registered_next {
+                        let _ = app.global_shortcut().unregister(next_shortcut.as_str());
+                    }
+                    return Err(format!(
+                        "Could not replace the shortcut: {error}. The previous shortcut remains active."
+                    ));
+                }
+                unregistered_previous = true;
+            }
+        } else {
+            if previous.registered {
+                app.global_shortcut()
+                    .unregister(previous.shortcut.as_str())
+                    .map_err(|error| format!("Could not disable quick capture: {error}"))?;
+                unregistered_previous = true;
+            }
+            destroy_quick_capture_window(app)?;
+        }
+
+        let db = state.db.lock().map_err(db_error)?;
+        persist_quick_capture_settings(&db, input.enabled, &next_shortcut)
+            .map_err(|error| format!("Could not save quick capture settings: {error}"))
+    })();
+
+    if let Err(error) = transition_result {
+        if registered_next {
+            let _ = app.global_shortcut().unregister(next_shortcut.as_str());
+        }
+        if !window_existed && input.enabled {
+            let _ = destroy_quick_capture_window(app);
+        }
+        if unregistered_previous || !window_existed || !input.enabled {
+            if let Err(restore_error) = restore_quick_capture_runtime(app, &previous) {
+                *runtime = previous;
+                runtime.registered = false;
+                runtime.error = Some(restore_error.clone());
+                return Err(format!("{error} {restore_error}"));
+            }
+        }
+        *runtime = previous;
+        return Err(error);
+    }
+
+    *runtime = QuickCaptureRuntime {
+        enabled: input.enabled,
+        shortcut: next_shortcut,
+        registered: input.enabled,
+        error: None,
+    };
+    Ok(quick_capture_settings_from_runtime(&runtime))
 }
 
 #[tauri::command]
-fn save_quick_capture_shortcut(
+async fn save_quick_capture_settings(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
-    input: QuickCaptureShortcutInput,
-) -> Result<QuickCaptureShortcutSettings, String> {
-    #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+    input: QuickCaptureSettingsInput,
+) -> Result<QuickCaptureSettings, String> {
+    #[cfg(target_os = "macos")]
     {
-        let requested = input
-            .shortcut
-            .as_deref()
-            .unwrap_or(DEFAULT_QUICK_CAPTURE_SHORTCUT);
-        let next_shortcut = normalize_quick_capture_shortcut(requested)?;
-        let mut runtime = state.quick_capture_shortcut.lock().map_err(db_error)?;
-        let previous = runtime.clone();
-
-        if next_shortcut == previous.shortcut {
-            if !previous.registered {
-                if let Err(error) = app.global_shortcut().register(next_shortcut.as_str()) {
-                    let message = format!("Could not register shortcut: {error}");
-                    runtime.error = Some(message.clone());
-                    return Err(message);
-                }
-            }
-
-            let persist_result = {
-                let db = state.db.lock().map_err(db_error)?;
-                persist_quick_capture_shortcut(&db, &next_shortcut)
-            };
-            if let Err(error) = persist_result {
-                if !previous.registered {
-                    let _ = app.global_shortcut().unregister(next_shortcut.as_str());
-                }
-                *runtime = previous;
-                return Err(format!("Could not save shortcut: {error}"));
-            }
-
-            runtime.registered = true;
-            runtime.error = None;
-            return Ok(quick_capture_shortcut_settings_from_runtime(&runtime));
-        }
-
-        app.global_shortcut()
-            .register(next_shortcut.as_str())
-            .map_err(|error| {
-                format!(
-                    "Could not register shortcut: {error}. The previous shortcut remains active."
-                )
-            })?;
-
-        if previous.registered {
-            if let Err(error) = app.global_shortcut().unregister(previous.shortcut.as_str()) {
-                let _ = app.global_shortcut().unregister(next_shortcut.as_str());
-                return Err(format!(
-                    "Could not replace the shortcut: {error}. The previous shortcut remains active."
-                ));
-            }
-        }
-
-        let persist_result = {
-            let db = state.db.lock().map_err(db_error)?;
-            persist_quick_capture_shortcut(&db, &next_shortcut)
-        };
-        if let Err(error) = persist_result {
-            let cleanup_error = app
-                .global_shortcut()
-                .unregister(next_shortcut.as_str())
-                .err();
-            let restore_error = if previous.registered {
-                app.global_shortcut()
-                    .register(previous.shortcut.as_str())
-                    .err()
-            } else {
-                None
-            };
-
-            *runtime = previous;
-            if let Some(restore_error) = restore_error {
-                runtime.registered = false;
-                runtime.error = Some(format!(
-                    "Could not restore the previous shortcut: {restore_error}"
-                ));
-            }
-            let cleanup_note = cleanup_error
-                .map(|cleanup_error| format!(" Cleanup also failed: {cleanup_error}."))
-                .unwrap_or_default();
-            return Err(format!("Could not save shortcut: {error}.{cleanup_note}"));
-        }
-
-        *runtime = QuickCaptureShortcutRuntime {
-            shortcut: next_shortcut,
-            registered: true,
-            error: None,
-        };
-        Ok(quick_capture_shortcut_settings_from_runtime(&runtime))
+        let _ = &state;
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let app_handle = app.clone();
+        app.run_on_main_thread(move || {
+            let state = app_handle.state::<AppState>();
+            let result = apply_quick_capture_settings(&app_handle, state.inner(), input);
+            let _ = sender.send(result);
+        })
+        .map_err(|error| format!("Could not schedule quick capture update: {error}"))?;
+        return receiver
+            .recv()
+            .map_err(|error| format!("Could not finish quick capture update: {error}"))?;
     }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    return apply_quick_capture_settings(&app, state.inner(), input);
 
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
         let _ = (app, state, input);
-        Err("Global shortcuts are available in the desktop app only.".to_string())
+        Err("Quick capture is available in the desktop app only.".to_string())
     }
 }
 
@@ -10661,39 +10795,65 @@ mod tests {
 
     #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
     #[test]
-    fn quick_capture_shortcut_setting_persists_and_resets_to_default() {
+    fn quick_capture_settings_default_enabled_and_retain_shortcut_while_disabled() {
         let db = memory_db();
-        persist_quick_capture_shortcut(&db, "alt+KeyK").expect("persist shortcut");
-        assert_eq!(
-            load_quick_capture_shortcut(&db).expect("load shortcut"),
-            "alt+KeyK"
-        );
-
         let default = normalize_quick_capture_shortcut(DEFAULT_QUICK_CAPTURE_SHORTCUT)
             .expect("normalize default");
-        persist_quick_capture_shortcut(&db, &default).expect("reset shortcut");
+        assert_eq!(
+            load_quick_capture_settings(&db).expect("load defaults"),
+            (true, default.clone())
+        );
+
+        persist_quick_capture_settings(&db, false, "alt+KeyK")
+            .expect("disable with custom shortcut");
+        assert_eq!(
+            load_quick_capture_settings(&db).expect("load disabled settings"),
+            (false, "alt+KeyK".to_string())
+        );
+
+        persist_quick_capture_settings(&db, true, "alt+KeyK")
+            .expect("re-enable with custom shortcut");
+        assert_eq!(
+            load_quick_capture_settings(&db).expect("load re-enabled settings"),
+            (true, "alt+KeyK".to_string())
+        );
+
+        persist_quick_capture_settings(&db, true, &default).expect("restore defaults");
         assert_eq!(
             get_app_setting(&db, QUICK_CAPTURE_SHORTCUT_SETTING_KEY).expect("read setting"),
             None
         );
         assert_eq!(
-            load_quick_capture_shortcut(&db).expect("load default"),
-            default
+            get_app_setting(&db, QUICK_CAPTURE_ENABLED_SETTING_KEY).expect("read enabled"),
+            None
+        );
+        assert_eq!(
+            load_quick_capture_settings(&db).expect("load restored defaults"),
+            (true, default)
         );
     }
 
     #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
     #[test]
-    fn malformed_quick_capture_shortcut_falls_back_and_is_removed() {
+    fn malformed_quick_capture_settings_fall_back_and_are_removed() {
         let db = memory_db();
+        set_app_setting(&db, QUICK_CAPTURE_ENABLED_SETTING_KEY, Some("sometimes"))
+            .expect("store malformed enabled setting");
         set_app_setting(&db, QUICK_CAPTURE_SHORTCUT_SETTING_KEY, Some("Shift+KeyK"))
             .expect("store malformed shortcut");
 
-        let loaded = load_quick_capture_shortcut(&db).expect("fall back to default");
+        let loaded = load_quick_capture_settings(&db).expect("fall back to defaults");
         assert_eq!(
             loaded,
-            normalize_quick_capture_shortcut(DEFAULT_QUICK_CAPTURE_SHORTCUT)
-                .expect("normalize default")
+            (
+                true,
+                normalize_quick_capture_shortcut(DEFAULT_QUICK_CAPTURE_SHORTCUT)
+                    .expect("normalize default")
+            )
+        );
+        assert_eq!(
+            get_app_setting(&db, QUICK_CAPTURE_ENABLED_SETTING_KEY).expect("read enabled"),
+            None
         );
         assert_eq!(
             get_app_setting(&db, QUICK_CAPTURE_SHORTCUT_SETTING_KEY).expect("read setting"),

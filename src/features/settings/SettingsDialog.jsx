@@ -13,6 +13,7 @@ import { Kbd } from "@/components/ui/kbd";
 import { Textarea } from "@/components/ui/textarea";
 import { aiPromptIconFor, aiPromptIconOptions } from "@/lib/aiPromptIcons";
 import { formatShortcut, shortcutFromKeyboardEvent } from "@/lib/keyboardShortcut";
+import { quickCaptureStatus } from "@/lib/quickCaptureSettings";
 import { terminalFontFamily, terminalFontOptions, terminalFontStyle, terminalFontStyleOptions } from "@/lib/terminalFonts";
 import { cn } from "@/lib/utils";
 
@@ -63,7 +64,7 @@ const settingsSections = [
   { id: "accounts", label: "Accounts", description: "Connected services", icon: UserRound },
   { id: "ai-prompts", label: "AI Prompts", description: "Reusable AI instructions", icon: Bot },
   { id: "directories", label: "Directories", description: "Local source folders", icon: FolderOpen },
-  { id: "shortcuts", label: "Shortcuts", description: "Global quick capture", icon: Keyboard },
+  { id: "quick-capture", label: "Quick Capture", description: "Global capture overlay", icon: Keyboard },
   { id: "appearance", label: "Appearance", description: "Color theme", icon: Palette },
   { id: "terminal", label: "Terminal", description: "Typography and behavior", icon: SquareTerminal },
   { id: "browser", label: "Browser", description: "New tab behavior", icon: Monitor },
@@ -98,7 +99,7 @@ export function SettingsDialog({
   browserSettings,
   terminalSettings,
   terminalFonts = [],
-  quickCaptureShortcutSettings,
+  quickCaptureSettings,
   themePreference = "system",
   calendarAccounts = [],
   initialSection = "accounts",
@@ -113,7 +114,7 @@ export function SettingsDialog({
   onDeleteDirectory,
   onSaveBrowserSettings,
   onSaveTerminalSettings,
-  onSaveQuickCaptureShortcut,
+  onSaveQuickCaptureSettings,
   onThemePreferenceChange,
   onSaveCalendarSubscription,
   onSaveCalDavAccount,
@@ -375,10 +376,10 @@ export function SettingsDialog({
               />
             )}
 
-            {activeTab === "shortcuts" && (
-              <ShortcutsTab
-                settings={quickCaptureShortcutSettings}
-                onSave={onSaveQuickCaptureShortcut}
+            {activeTab === "quick-capture" && (
+              <QuickCaptureSettingsTab
+                settings={quickCaptureSettings}
+                onSave={onSaveQuickCaptureSettings}
               />
             )}
 
@@ -395,13 +396,14 @@ export function SettingsDialog({
   );
 }
 
-function ShortcutsTab({ settings, onSave }) {
+function QuickCaptureSettingsTab({ settings, onSave }) {
   const [candidate, setCandidate] = useState(settings?.shortcut || "CommandOrControl+Shift+Space");
   const [isRecording, setIsRecording] = useState(false);
   const [notice, setNotice] = useState(settings?.error || "");
   const [noticeIsError, setNoticeIsError] = useState(Boolean(settings?.error));
   const [isSaving, setIsSaving] = useState(false);
   const supported = settings?.supported === true;
+  const status = quickCaptureStatus(settings);
 
   useEffect(() => {
     setCandidate(settings?.shortcut || settings?.defaultShortcut || "CommandOrControl+Shift+Space");
@@ -443,10 +445,32 @@ function ShortcutsTab({ settings, onSave }) {
     setNotice("");
     setNoticeIsError(false);
     try {
-      const nextSettings = await onSave({ shortcut });
+      const nextSettings = await onSave({ enabled: settings.enabled, shortcut });
       setCandidate(nextSettings.shortcut);
-      setNotice(shortcut === null ? "Default shortcut restored." : "Shortcut saved and active.");
+      if (shortcut === settings.defaultShortcut) {
+        setNotice("Default shortcut restored.");
+      } else {
+        setNotice(nextSettings.enabled
+          ? "Shortcut saved and active."
+          : "Shortcut saved for when Quick Capture is enabled.");
+      }
       setNoticeIsError(false);
+    } catch (error) {
+      setNotice(error?.message || String(error));
+      setNoticeIsError(true);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function toggleEnabled(enabled) {
+    setIsSaving(true);
+    setNotice("");
+    setNoticeIsError(false);
+    try {
+      const nextSettings = await onSave({ enabled, shortcut: settings.shortcut });
+      setCandidate(nextSettings.shortcut);
+      setNotice(enabled ? "Quick Capture enabled." : "Quick Capture disabled.");
     } catch (error) {
       setNotice(error?.message || String(error));
       setNoticeIsError(true);
@@ -466,18 +490,32 @@ function ShortcutsTab({ settings, onSave }) {
 
       {!supported ? (
         <p className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
-          Global shortcut configuration requires the desktop app.
+          Quick Capture configuration requires the desktop app.
         </p>
       ) : (
         <>
+          <label className="flex items-start gap-3 rounded-lg border bg-muted/20 p-4">
+            <Checkbox
+              checked={settings.enabled}
+              disabled={isSaving || isRecording}
+              onCheckedChange={(checked) => toggleEnabled(checked === true)}
+            />
+            <span className="grid gap-1">
+              <span className="text-sm font-medium">Enable Quick Capture</span>
+              <span className="text-xs text-muted-foreground">
+                Create the capture overlay and make it available through the global shortcut.
+              </span>
+            </span>
+          </label>
+
           <div className="grid gap-3 rounded-lg border p-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="grid gap-1">
                 <span className="text-xs text-muted-foreground">Current shortcut</span>
                 <div className="flex items-center gap-2">
                   <Kbd className="h-7 px-2 text-sm">{formatShortcut(settings.shortcut)}</Kbd>
-                  <Badge variant={settings.registered ? "secondary" : "destructive"}>
-                    {settings.registered ? "Active" : "Unavailable"}
+                  <Badge variant={status.variant}>
+                    {status.label}
                   </Badge>
                 </div>
               </div>
@@ -518,7 +556,7 @@ function ShortcutsTab({ settings, onSave }) {
               {isSaving && <LoaderCircle className="animate-spin" />}
               Save shortcut
             </Button>
-            <Button type="button" variant="outline" disabled={isSaving || isRecording} onClick={() => save(null)}>
+            <Button type="button" variant="outline" disabled={isSaving || isRecording} onClick={() => save(settings.defaultShortcut)}>
               <RotateCcw />
               Restore default
             </Button>

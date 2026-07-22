@@ -11,27 +11,7 @@
   },
   "app": {
     "macOSPrivateApi": true,
-    "windows": [
-      {
-        "label": "quick-capture",
-        "title": "Quick Capture",
-        "url": "index.html?quick-capture=1",
-        "width": 640,
-        "height": 180,
-        "visible": false,
-        "focus": false,
-        "center": true,
-        "decorations": false,
-        "resizable": false,
-        "maximizable": false,
-        "minimizable": false,
-        "closable": false,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "shadow": false,
-        "transparent": true
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null,
       "assetProtocol": {

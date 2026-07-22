@@ -148,7 +148,8 @@ function App() {
     profileDirectory: "~",
   });
   const [terminalFonts, setTerminalFonts] = useState([]);
-  const [quickCaptureShortcutSettings, setQuickCaptureShortcutSettings] = useState({
+  const [quickCaptureSettings, setQuickCaptureSettings] = useState({
+    enabled: true,
     shortcut: "CommandOrControl+Shift+Space",
     defaultShortcut: "CommandOrControl+Shift+Space",
     supported: false,
@@ -278,7 +279,7 @@ function App() {
   }, [selectedProjectId]);
 
   async function refreshShell() {
-    const [projectList, connectionList, calendarAccountList, aiPromptList, directoryList, browserSettingsResult, terminalSettingsResult, terminalFontList, shortcutSettingsResult, recentFileList, todoList] = await Promise.all([
+    const [projectList, connectionList, calendarAccountList, aiPromptList, directoryList, browserSettingsResult, terminalSettingsResult, terminalFontList, quickCaptureSettingsResult, recentFileList, todoList] = await Promise.all([
       api.listProjects(),
       api.listConnections(),
       api.listCalendarAccounts(),
@@ -287,7 +288,7 @@ function App() {
       api.listBrowserSettings(),
       api.listTerminalSettings(),
       api.listTerminalFonts(),
-      api.quickCaptureShortcutSettings(),
+      api.quickCaptureSettings(),
       api.listRecentDirectoryFiles(),
       api.listSmartInboxTodos(),
     ]);
@@ -299,8 +300,8 @@ function App() {
     setBrowserSettings(browserSettingsResult);
     setTerminalSettings(terminalSettingsResult);
     setTerminalFonts(terminalFontList);
-    setQuickCaptureShortcutSettings(shortcutSettingsResult);
-    if (shortcutSettingsResult.error) showNotice(shortcutSettingsResult.error);
+    setQuickCaptureSettings(quickCaptureSettingsResult);
+    if (quickCaptureSettingsResult.error) showNotice(quickCaptureSettingsResult.error);
     setRecentDirectoryFiles(recentFileList);
     setSmartInboxTodos(todoList);
     await api.listTasks({ projectId: selectedProjectId }).then(setTasks);
@@ -943,7 +944,7 @@ function App() {
           browserSettings={browserSettings}
           terminalSettings={terminalSettings}
           terminalFonts={terminalFonts}
-          quickCaptureShortcutSettings={quickCaptureShortcutSettings}
+          quickCaptureSettings={quickCaptureSettings}
           themePreference={themePreference}
           calendarAccounts={calendarAccounts}
           initialSection={settingsInitialSection}
@@ -1022,11 +1023,16 @@ function App() {
             showNotice("Terminal settings saved.");
             return nextTerminalSettings;
           }}
-          onSaveQuickCaptureShortcut={async (payload) => {
-            const settings = await api.saveQuickCaptureShortcut(payload);
-            setQuickCaptureShortcutSettings(settings);
-            showNotice("Quick capture shortcut saved.");
-            return settings;
+          onSaveQuickCaptureSettings={async (payload) => {
+            try {
+              const settings = await api.saveQuickCaptureSettings(payload);
+              setQuickCaptureSettings(settings);
+              showNotice(payload.enabled ? "Quick capture settings saved." : "Quick capture disabled.");
+              return settings;
+            } catch (error) {
+              setQuickCaptureSettings(await api.quickCaptureSettings());
+              throw error;
+            }
           }}
           onSaveCalendarSubscription={async (payload) => {
             const account = await api.saveCalendarSubscription(payload);
