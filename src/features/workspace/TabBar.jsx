@@ -7,10 +7,12 @@ import {
   workspaceNumberForTab,
   workspaceTabsApi,
 } from "@/lib/workspaceTabs";
+import { useSynchronizedTheme } from "@/lib/theme";
 
 const EMPTY_SNAPSHOT = { tabs: [{ id: "main", kind: "main", title: "Inbox", closable: false }], activeTabId: "main" };
 
 export function TabBar() {
+  useSynchronizedTheme();
   const [snapshot, setSnapshot] = useState(EMPTY_SNAPSHOT);
   const [draggedId, setDraggedId] = useState(null);
 

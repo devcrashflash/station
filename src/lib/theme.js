@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
+import { emit, listen } from "@tauri-apps/api/event";
 
 export const THEME_STORAGE_KEY = "dcf-theme-preference-v1";
+export const THEME_CHANGED_EVENT = "app-theme-changed";
 export const THEME_PREFERENCES = ["system", "light", "dark"];
 
 export function normalizeThemePreference(value) {
@@ -39,6 +41,17 @@ export function applyDocumentTheme(theme, documentRef = globalThis.document) {
   return effectiveTheme;
 }
 
+export function themeFromChangePayload(payload) {
+  return payload?.effectiveTheme === "dark" || payload?.effectiveTheme === "light"
+    ? payload.effectiveTheme
+    : null;
+}
+
+export function applyThemeChangePayload(payload, documentRef = globalThis.document) {
+  const effectiveTheme = themeFromChangePayload(payload);
+  return effectiveTheme ? applyDocumentTheme(effectiveTheme, documentRef) : null;
+}
+
 function systemPrefersDark(windowRef = globalThis.window) {
   return Boolean(windowRef?.matchMedia?.("(prefers-color-scheme: dark)").matches);
 }
@@ -63,6 +76,49 @@ async function applyNativeTheme(preference) {
   }
 }
 
+async function emitThemeChange(effectiveTheme) {
+  if (!globalThis.window?.__TAURI_INTERNALS__) return;
+  try {
+    await emit(THEME_CHANGED_EVENT, { effectiveTheme });
+  } catch (error) {
+    console.warn("Could not synchronize the app theme.", error);
+  }
+}
+
+export function useSynchronizedTheme() {
+  const [effectiveTheme, setEffectiveTheme] = useState(() => (
+    resolveTheme(readThemePreference(), systemPrefersDark())
+  ));
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten = null;
+
+    async function subscribe() {
+      if (!globalThis.window?.__TAURI_INTERNALS__) return;
+      const dispose = await listen(THEME_CHANGED_EVENT, ({ payload }) => {
+        if (disposed) return;
+        const nextTheme = applyThemeChangePayload(payload);
+        if (nextTheme) setEffectiveTheme(nextTheme);
+      });
+      if (disposed) dispose();
+      else unlisten = dispose;
+    }
+
+    applyDocumentTheme(effectiveTheme);
+    subscribe().catch((error) => {
+      console.warn("Could not subscribe to app theme changes.", error);
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  return effectiveTheme;
+}
+
 export function useTheme() {
   const [preference, setStoredPreference] = useState(() => readThemePreference());
   const [effectiveTheme, setEffectiveTheme] = useState(() => (
@@ -76,6 +132,7 @@ export function useTheme() {
       const nextTheme = resolveTheme(preference, mediaQuery.matches);
       applyDocumentTheme(nextTheme);
       setEffectiveTheme(nextTheme);
+      void emitThemeChange(nextTheme);
     }
 
     applyTheme();

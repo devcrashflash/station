@@ -16,6 +16,7 @@ import {
 } from "@/lib/terminalPanes";
 import { openExternalUrl } from "@/lib/externalLinks";
 import { terminalCellLetterSpacing } from "@/lib/terminalFonts";
+import { useSynchronizedTheme } from "@/lib/theme";
 
 const DARK_TERMINAL_THEME = {
   background: "#000000",
@@ -151,6 +152,7 @@ function TerminalPane({
   dragging,
   onMoveStart,
   copyOnSelection,
+  effectiveTheme,
   fontFamily,
   fontWeight,
   fontStyle,
@@ -228,7 +230,7 @@ function TerminalPane({
       lineHeight: lineHeight / 100,
       minimumContrastRatio: 4.5,
       scrollback: scrollbackLines,
-      theme: document.documentElement.classList.contains("dark")
+      theme: effectiveTheme === "dark"
         ? DARK_TERMINAL_THEME
         : LIGHT_TERMINAL_THEME,
     });
@@ -369,6 +371,15 @@ function TerminalPane({
       setLifecycle({ running: false, exitCode: pane.exitCode, error: "" });
     }
   }, [pane.exitCode, pane.running]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    terminal.options.theme = effectiveTheme === "dark"
+      ? DARK_TERMINAL_THEME
+      : LIGHT_TERMINAL_THEME;
+    terminal.refresh(0, terminal.rows - 1);
+  }, [effectiveTheme]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -562,7 +573,7 @@ function normalizeTerminalSettings(settings = {}) {
   };
 }
 
-function TerminalTabSurface({ tabId, layout, active, inactivePaneOpacity, copyOnSelection, typography }) {
+function TerminalTabSurface({ tabId, layout, active, effectiveTheme, inactivePaneOpacity, copyOnSelection, typography }) {
   const [ratioOverrides, setRatioOverrides] = useState({});
   const [paneDrag, setPaneDrag] = useState(null);
   const surfaceRef = useRef(null);
@@ -706,6 +717,7 @@ function TerminalTabSurface({ tabId, layout, active, inactivePaneOpacity, copyOn
           dragging={pane.paneId === paneDrag?.sourcePaneId}
           onMoveStart={startPaneMove}
           copyOnSelection={copyOnSelection}
+          effectiveTheme={effectiveTheme}
           {...typography}
         />
       ))}
@@ -734,6 +746,7 @@ function TerminalTabSurface({ tabId, layout, active, inactivePaneOpacity, copyOn
 }
 
 export function TerminalWorkspace() {
+  const effectiveTheme = useSynchronizedTheme();
   const [snapshot, setSnapshot] = useState({ tabs: [], activeTabId: "main" });
   const [layouts, setLayouts] = useState({});
   const [settings, setSettings] = useState(DEFAULT_TERMINAL_SETTINGS);
@@ -819,6 +832,7 @@ export function TerminalWorkspace() {
           tabId={tab.id}
           layout={layouts[tab.id] || null}
           active={tab.id === snapshot.activeTabId}
+          effectiveTheme={effectiveTheme}
           {...settings}
         />
       ))}

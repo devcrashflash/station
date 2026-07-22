@@ -3,11 +3,13 @@ import assert from "node:assert/strict";
 
 import {
   applyDocumentTheme,
+  applyThemeChangePayload,
   initializeTheme,
   normalizeThemePreference,
   readThemePreference,
   resolveTheme,
   subscribeToSystemThemeChanges,
+  themeFromChangePayload,
   THEME_STORAGE_KEY,
   writeThemePreference,
 } from "./theme.js";
@@ -74,6 +76,21 @@ test("document and initial system theme are applied", () => {
   assert.equal(effectiveTheme, "light");
   assert.equal(documentRef.classes.has("dark"), false);
   assert.equal(documentRef.documentElement.style.colorScheme, "light");
+});
+
+test("cross-webview theme payloads validate before applying", () => {
+  const documentRef = fakeDocument();
+  assert.equal(themeFromChangePayload({ effectiveTheme: "dark" }), "dark");
+  assert.equal(themeFromChangePayload({ effectiveTheme: "light" }), "light");
+  assert.equal(themeFromChangePayload({ effectiveTheme: "system" }), null);
+  assert.equal(themeFromChangePayload(null), null);
+
+  assert.equal(applyThemeChangePayload({ effectiveTheme: "dark" }, documentRef), "dark");
+  assert.equal(documentRef.classes.has("dark"), true);
+  assert.equal(applyThemeChangePayload({ effectiveTheme: "invalid" }, documentRef), null);
+  assert.equal(documentRef.classes.has("dark"), true);
+  assert.equal(applyThemeChangePayload({ effectiveTheme: "light" }, documentRef), "light");
+  assert.equal(documentRef.classes.has("dark"), false);
 });
 
 test("system theme changes can be observed and unsubscribed", () => {
