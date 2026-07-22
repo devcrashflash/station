@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   Bot,
   Check,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
   ClipboardList,
@@ -49,7 +50,12 @@ import {
   normalizeReviewDiffResult,
   normalizeReviewDrafts,
 } from "@/lib/reviewSession";
-import { taskStatusBadgeLabel, taskStatusBadgeStyle } from "@/lib/taskStatus";
+import {
+  isProviderBackedTask,
+  isTaskDone,
+  taskStatusBadgeLabel,
+  taskStatusBadgeStyle,
+} from "@/lib/taskStatus";
 import { canCreateTrelloTicket } from "@/lib/trelloTicket";
 
 const relationTypeOptions = [
@@ -211,6 +217,7 @@ export function TaskDetailView({
   const [activeAiPromptId, setActiveAiPromptId] = useState("");
   const [trelloBoards, setTrelloBoards] = useState([]);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isStatusUpdating, setIsStatusUpdating] = useState(false);
   const [isExternalRefreshing, setIsExternalRefreshing] = useState(false);
   const shortcutKey = shortcutModifier();
   const [externalRefreshState, setExternalRefreshState] = useState({
@@ -464,6 +471,20 @@ export function TaskDetailView({
     }
   }
 
+  async function toggleTaskStatus() {
+    if (!onSave || isStatusUpdating) return;
+
+    setIsStatusUpdating(true);
+    try {
+      await onSave({
+        id: task.id,
+        status: isTaskDone(task) ? "open" : "done",
+      });
+    } finally {
+      setIsStatusUpdating(false);
+    }
+  }
+
   const relationTaskOptions = projectTasks.map((item) => ({
     value: item.id,
     label: item.title,
@@ -491,6 +512,8 @@ export function TaskDetailView({
   const isReviewRequestClosed = isClosedReviewState(taskResource?.externalState);
   const statusBadgeLabel = taskStatusBadgeLabel(task);
   const statusBadgeStyle = taskStatusBadgeStyle(task);
+  const isProviderBacked = isProviderBackedTask(task);
+  const isDone = isTaskDone(task);
   const canReviewResource = Boolean(
     task.projectId &&
     !isReviewRequestClosed &&
@@ -530,6 +553,22 @@ export function TaskDetailView({
           <ExternalLabels labels={taskResource?.labels} />
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-2">
+          {!isProviderBacked && (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={isStatusUpdating}
+              aria-busy={isStatusUpdating}
+              onClick={toggleTaskStatus}
+            >
+              {isStatusUpdating ? (
+                <LoaderCircle className="size-4 animate-spin" />
+              ) : (
+                <CheckCircle2 className="size-4" />
+              )}
+              {isDone ? "Mark open" : "Mark done"}
+            </Button>
+          )}
           {canConvertToTrello && (
             <Button type="button" variant="outline" onClick={() => setShowTrelloWizard(true)}>
               <SquareKanban className="size-4" />
