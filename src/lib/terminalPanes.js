@@ -3,6 +3,34 @@ export function clampSplitRatio(ratio) {
   return Math.min(0.9, Math.max(0.1, ratio));
 }
 
+export function terminalFontZoomDelta(event, platform = globalThis.navigator?.platform || "") {
+  if (event.type && event.type !== "keydown") return null;
+  if (event.altKey) return null;
+  const mac = platform.toLowerCase().startsWith("mac");
+  const primaryModifier = mac
+    ? event.metaKey && !event.ctrlKey
+    : event.ctrlKey && !event.metaKey;
+  if (!primaryModifier) return null;
+
+  const increase = (event.key === "+" && (event.code !== "NumpadAdd" || !event.shiftKey))
+    || (event.key === "=" && !event.shiftKey)
+    || (event.code === "NumpadAdd" && !event.shiftKey);
+  if (increase) return 1;
+
+  const decrease = (event.key === "-" || event.code === "NumpadSubtract") && !event.shiftKey;
+  return decrease ? -1 : null;
+}
+
+export function terminalFontSizeWithZoom(fontSize, zoomOffset) {
+  return Math.min(32, Math.max(1, fontSize + zoomOffset));
+}
+
+export function nextTerminalFontZoomOffset(fontSize, zoomOffset, delta) {
+  const currentSize = terminalFontSizeWithZoom(fontSize, zoomOffset);
+  if (delta < 0 && currentSize === 1) return 0;
+  return terminalFontSizeWithZoom(currentSize, delta) - fontSize;
+}
+
 export function isTerminalClearShortcut(event, platform = globalThis.navigator?.platform || "") {
   return platform.toLowerCase().startsWith("mac")
     && event.type === "keydown"

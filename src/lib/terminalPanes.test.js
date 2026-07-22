@@ -7,9 +7,12 @@ import {
   flattenPaneLayout,
   isTerminalClearShortcut,
   isTerminalSearchShortcut,
+  nextTerminalFontZoomOffset,
   paneDropPosition,
   paneIds,
   parseOsc7Cwd,
+  terminalFontSizeWithZoom,
+  terminalFontZoomDelta,
   terminalPaneDropTarget,
 } from "./terminalPanes.js";
 
@@ -26,6 +29,63 @@ test("clamps persisted and dragged split ratios", () => {
   assert.equal(clampSplitRatio(-1), 0.1);
   assert.equal(clampSplitRatio(2), 0.9);
   assert.equal(clampSplitRatio(Number.NaN), 0.5);
+});
+
+test("recognizes platform-primary terminal font zoom shortcuts", () => {
+  const commandPlus = {
+    type: "keydown",
+    key: "+",
+    code: "Equal",
+    metaKey: true,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: true,
+  };
+
+  assert.equal(terminalFontZoomDelta(commandPlus, "MacIntel"), 1);
+  assert.equal(terminalFontZoomDelta({ ...commandPlus, key: "=", shiftKey: false }, "MacIntel"), 1);
+  assert.equal(terminalFontZoomDelta({ ...commandPlus, key: "-", code: "Minus", shiftKey: false }, "MacIntel"), -1);
+  assert.equal(terminalFontZoomDelta({ ...commandPlus, key: "+", code: "NumpadAdd", shiftKey: false }, "MacIntel"), 1);
+  assert.equal(terminalFontZoomDelta({ ...commandPlus, key: "-", code: "NumpadSubtract", shiftKey: false }, "MacIntel"), -1);
+
+  const controlPlus = { ...commandPlus, metaKey: false, ctrlKey: true };
+  assert.equal(terminalFontZoomDelta(controlPlus, "Win32"), 1);
+  assert.equal(terminalFontZoomDelta(controlPlus, "Linux x86_64"), 1);
+  assert.equal(terminalFontZoomDelta({ ...controlPlus, key: "-", code: "Minus", shiftKey: false }, "Win32"), -1);
+});
+
+test("rejects non-primary and modified terminal font zoom events", () => {
+  const commandPlus = {
+    type: "keydown",
+    key: "+",
+    code: "Equal",
+    metaKey: true,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: true,
+  };
+
+  assert.equal(terminalFontZoomDelta({ ...commandPlus, type: "keyup" }, "MacIntel"), null);
+  assert.equal(terminalFontZoomDelta({ ...commandPlus, metaKey: false }, "MacIntel"), null);
+  assert.equal(terminalFontZoomDelta({ ...commandPlus, ctrlKey: true }, "MacIntel"), null);
+  assert.equal(terminalFontZoomDelta({ ...commandPlus, altKey: true }, "MacIntel"), null);
+  assert.equal(terminalFontZoomDelta({ ...commandPlus, key: "-", code: "Minus" }, "MacIntel"), null);
+  assert.equal(terminalFontZoomDelta({ ...commandPlus, code: "NumpadAdd" }, "MacIntel"), null);
+  assert.equal(terminalFontZoomDelta({ ...commandPlus, key: "0", code: "Digit0", shiftKey: false }, "MacIntel"), null);
+  assert.equal(terminalFontZoomDelta(commandPlus, "Win32"), null);
+});
+
+test("applies and clamps temporary terminal font zoom", () => {
+  assert.equal(terminalFontSizeWithZoom(13, 1), 14);
+  assert.equal(terminalFontSizeWithZoom(13, -1), 12);
+  assert.equal(terminalFontSizeWithZoom(13, 0), 13);
+  assert.equal(terminalFontSizeWithZoom(31, 5), 32);
+  assert.equal(terminalFontSizeWithZoom(9, -20), 1);
+  assert.equal(nextTerminalFontZoomOffset(13, 1 - 13, -1), 0);
+  assert.equal(nextTerminalFontZoomOffset(13, 0, -1), -1);
+  assert.equal(nextTerminalFontZoomOffset(13, -1, 1), 0);
+  assert.equal(nextTerminalFontZoomOffset(31, 1, 1), 1);
+  assert.equal(nextTerminalFontZoomOffset(31, 1, -1), 0);
 });
 
 test("recognizes only unmodified macOS Command+K keydown events", () => {

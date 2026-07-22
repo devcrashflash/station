@@ -13,8 +13,11 @@ import {
   flattenPaneLayout,
   isTerminalClearShortcut,
   isTerminalSearchShortcut,
+  nextTerminalFontZoomOffset,
   paneIds,
   parseOsc7Cwd,
+  terminalFontSizeWithZoom,
+  terminalFontZoomDelta,
   terminalPaneDropTarget,
 } from "@/lib/terminalPanes";
 import { openExternalUrl } from "@/lib/externalLinks";
@@ -940,6 +943,24 @@ export function TerminalWorkspace() {
   const [layouts, setLayouts] = useState({});
   const [settings, setSettings] = useState(DEFAULT_TERMINAL_SETTINGS);
   const [searchTarget, setSearchTarget] = useState(null);
+  const [fontZoomOffset, setFontZoomOffset] = useState(0);
+
+  useEffect(() => {
+    function handleFontZoom(event) {
+      const delta = terminalFontZoomDelta(event);
+      if (delta === null) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setFontZoomOffset((current) => nextTerminalFontZoomOffset(
+        settings.typography.fontSize,
+        current,
+        delta,
+      ));
+    }
+
+    window.addEventListener("keydown", handleFontZoom, true);
+    return () => window.removeEventListener("keydown", handleFontZoom, true);
+  }, [settings.typography.fontSize]);
 
   useEffect(() => {
     let disposed = false;
@@ -995,6 +1016,10 @@ export function TerminalWorkspace() {
   const terminalTabs = snapshot.tabs.filter((tab) => tab.kind === "terminal");
   const terminalTabIds = terminalTabs.map((tab) => tab.id);
   const terminalTabKey = terminalTabIds.join("\0");
+  const typography = {
+    ...settings.typography,
+    fontSize: terminalFontSizeWithZoom(settings.typography.fontSize, fontZoomOffset),
+  };
 
   useEffect(() => {
     if (!searchTarget) return;
@@ -1037,6 +1062,7 @@ export function TerminalWorkspace() {
             current?.tabId === tabId && current?.paneId === paneId ? null : current
           ))}
           {...settings}
+          typography={typography}
         />
       ))}
     </div>
