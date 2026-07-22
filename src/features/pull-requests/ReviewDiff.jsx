@@ -6,7 +6,7 @@ import { Highlight } from "prism-react-renderer";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Prism } from "@/lib/prism";
-import { diffLanguageForPath, parseDiffLines, selectCommentRange, selectedCodeText } from "@/lib/reviewDiff";
+import { diffLanguageForPath, parseDiffLines, reviewCodeCopyText, selectCommentRange } from "@/lib/reviewDiff";
 
 const LINE_CLASS_NAMES = {
   addition: "bg-emerald-500/10",
@@ -53,27 +53,6 @@ function findDraftLineIndex(lines, draft, start) {
     ? (start ? draft.startOldLine ?? draft.oldLine : draft.oldLine)
     : (start ? draft.startNewLine ?? draft.newLine : draft.newLine);
   return lines.findIndex((line) => line.commentable && line.side === side && anchorLine(line, side) === target);
-}
-
-async function copyTextToClipboard(text) {
-  if (navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return;
-    } catch {
-      // Fall back for webviews that expose the Clipboard API without granting access.
-    }
-  }
-
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "");
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  document.body.appendChild(textarea);
-  textarea.select();
-  document.execCommand("copy");
-  document.body.removeChild(textarea);
 }
 
 export const ReviewDiff = forwardRef(function ReviewDiff({
@@ -131,19 +110,18 @@ export const ReviewDiff = forwardRef(function ReviewDiff({
   useImperativeHandle(ref, () => ({ cancelInteraction }));
 
   useEffect(() => {
-    if (!drag || !selection) return undefined;
+    if (!selection) return undefined;
 
-    function handleCopyShortcut(event) {
-      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.key.toLowerCase() !== "c") return;
-      const text = selectedCodeText(selection);
+    function handleCopy(event) {
+      const text = reviewCodeCopyText(event, selection);
       if (!text) return;
       event.preventDefault();
-      void copyTextToClipboard(text);
+      event.clipboardData.setData("text/plain", text);
     }
 
-    window.addEventListener("keydown", handleCopyShortcut);
-    return () => window.removeEventListener("keydown", handleCopyShortcut);
-  }, [drag, selection]);
+    window.addEventListener("copy", handleCopy);
+    return () => window.removeEventListener("copy", handleCopy);
+  }, [selection]);
 
   function updateDrag(clientX, clientY) {
     const container = containerRef.current;

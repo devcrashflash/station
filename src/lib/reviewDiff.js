@@ -187,6 +187,23 @@ export function selectedCodeText(range) {
   return range?.lines?.map((line) => line.content).join("\n") || "";
 }
 
+export function reviewCodeCopyText(event, range) {
+  if (!event || event.type !== "copy" || !event.clipboardData) {
+    return null;
+  }
+
+  const target = event.target;
+  if (
+    typeof target?.selectionStart === "number"
+    && typeof target?.selectionEnd === "number"
+    && target.selectionStart !== target.selectionEnd
+  ) {
+    return null;
+  }
+
+  return selectedCodeText(range) || null;
+}
+
 export function diffLanguageForPath(path) {
   const fileName = String(path || "").split(/[\\/]/).pop() || "";
   const extensionIndex = fileName.lastIndexOf(".");

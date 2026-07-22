@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { Prism } from "./prism.js";
-import { classifyDiffLine, diffLanguageForPath, diffPaths, parseDiffLines, selectCommentRange, selectedCodeText } from "./reviewDiff.js";
+import { classifyDiffLine, diffLanguageForPath, diffPaths, parseDiffLines, reviewCodeCopyText, selectCommentRange, selectedCodeText } from "./reviewDiff.js";
 
 test("classifies unified diff lines without treating file headers as changes", () => {
   assert.deepEqual(classifyDiffLine("diff --git a/app.js b/app.js"), {
@@ -150,4 +150,36 @@ test("copies selected code without diff markers or line numbers", () => {
 
   assert.equal(selectedCodeText(range), "const oldValue = 1;\n  return oldValue;\n  return newValue;");
   assert.equal(selectedCodeText(null), "");
+});
+
+test("copies a selected review range through the native copy event", () => {
+  const lines = parseDiffLines("@@ -1 +1 @@\n-oldValue\n+newValue");
+  const range = selectCommentRange(lines, 1, 2);
+  const expected = "oldValue\nnewValue";
+  const copyEvent = { type: "copy", clipboardData: {} };
+
+  assert.equal(reviewCodeCopyText(copyEvent, range), expected);
+  assert.equal(
+    reviewCodeCopyText({ ...copyEvent, target: { selectionStart: 4, selectionEnd: 4 } }, range),
+    expected,
+  );
+});
+
+test("leaves native comment text copying untouched", () => {
+  const lines = parseDiffLines("@@ -1 +1 @@\n-oldValue\n+newValue");
+  const range = selectCommentRange(lines, 1, 2);
+  const selectedCommentText = { selectionStart: 2, selectionEnd: 8 };
+  const copyEvent = { type: "copy", clipboardData: {}, target: selectedCommentText };
+
+  assert.equal(reviewCodeCopyText(copyEvent, range), null);
+});
+
+test("does not intercept copy without a review range or usable clipboard event", () => {
+  const lines = parseDiffLines("@@ -1 +1 @@\n-oldValue\n+newValue");
+  const range = selectCommentRange(lines, 1, 2);
+  const copyEvent = { type: "copy", clipboardData: {} };
+
+  assert.equal(reviewCodeCopyText(copyEvent, null), null);
+  assert.equal(reviewCodeCopyText({ type: "keydown", clipboardData: {} }, range), null);
+  assert.equal(reviewCodeCopyText({ type: "copy" }, range), null);
 });
