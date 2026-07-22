@@ -9,6 +9,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 
 import {
+  TERMINAL_WORD_SEPARATORS,
   clampSplitRatio,
   copyableTerminalSelection,
   flattenPaneLayout,
@@ -296,6 +297,7 @@ function TerminalPane({
       theme: effectiveTheme === "dark"
         ? DARK_TERMINAL_THEME
         : LIGHT_TERMINAL_THEME,
+      wordSeparator: TERMINAL_WORD_SEPARATORS,
     });
     const fit = new FitAddon();
     const searchAddon = new SearchAddon();

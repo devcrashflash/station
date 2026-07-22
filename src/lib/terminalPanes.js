@@ -1,3 +1,5 @@
+export const TERMINAL_WORD_SEPARATORS = " ()[]{}',\"`|";
+
 export function clampSplitRatio(ratio) {
   if (!Number.isFinite(ratio)) return 0.5;
   return Math.min(0.9, Math.max(0.1, ratio));

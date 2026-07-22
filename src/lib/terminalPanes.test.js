@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  TERMINAL_WORD_SEPARATORS,
   clampSplitRatio,
   copyableTerminalSelection,
   flattenPaneLayout,
@@ -15,6 +16,11 @@ import {
   terminalFontZoomDelta,
   terminalPaneDropTarget,
 } from "./terminalPanes.js";
+
+test("separates prompt metadata without splitting branch names and paths", () => {
+  assert.equal(TERMINAL_WORD_SEPARATORS.includes("|"), true);
+  assert.equal(TERMINAL_WORD_SEPARATORS.includes("/"), false);
+});
 
 test("returns only enabled non-empty terminal selections for copying", () => {
   assert.equal(copyableTerminalSelection(false, "selected"), null);
