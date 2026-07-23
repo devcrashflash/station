@@ -941,9 +941,21 @@ pub async fn create_terminal_tab(
     webview: Webview,
     state: tauri::State<'_, TerminalTabsState>,
     defer_input: bool,
+    cwd: Option<String>,
 ) -> Result<WorkspaceTabsSnapshot, String> {
     validate_management_caller(&webview)?;
-    let new_tab_directory = configured_terminal_directories(&app)?.0;
+    let new_tab_directory = if let Some(cwd) = cwd {
+        let path = PathBuf::from(&cwd);
+        if !path.is_absolute() || !path.is_dir() {
+            return Err(
+                "The terminal working directory must be an existing absolute directory."
+                    .to_string(),
+            );
+        }
+        Some(cwd)
+    } else {
+        configured_terminal_directories(&app)?.0
+    };
     let (tab_id, snapshot) = {
         let mut runtime = state.runtime.lock().map_err(db_error)?;
         let tab_id = super::new_id("terminal_tab");

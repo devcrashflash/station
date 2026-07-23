@@ -1,4 +1,4 @@
-import { Activity, Plus, Settings, Sparkles } from "lucide-react";
+import { Activity, Bot, Plus, Settings, Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { getProjectInitial, normalizeProjectColor } from "@/lib/projectAvatar";
@@ -8,16 +8,18 @@ export function ProjectRail({
   projects,
   selectedProjectId,
   isActivitySelected,
+  isAgentsSelected,
   onSelectProject,
   onShowInbox,
   onAddProject,
   onShowActivity,
+  onShowAgents,
   onShowSettings,
 }) {
   return (
     <aside className="flex h-full w-20 shrink-0 flex-col items-center overflow-hidden border-r bg-sidebar py-4">
       <Button
-        className={cn("mb-4 shrink-0", !selectedProjectId && !isActivitySelected && "bg-sidebar-accent")}
+        className={cn("mb-4 shrink-0", !selectedProjectId && !isActivitySelected && !isAgentsSelected && "bg-sidebar-accent")}
         size="icon"
         variant="ghost"
         type="button"
@@ -65,7 +67,18 @@ export function ProjectRail({
       </div>
 
       <Button
-        className={cn("mt-4 shrink-0", isActivitySelected && "bg-sidebar-accent")}
+        className={cn("mt-4 shrink-0", isAgentsSelected && "bg-sidebar-accent")}
+        size="icon"
+        variant="ghost"
+        type="button"
+        title="AI Agents"
+        onClick={onShowAgents}
+      >
+        <Bot />
+      </Button>
+
+      <Button
+        className={cn("mt-2 shrink-0", isActivitySelected && "bg-sidebar-accent")}
         size="icon"
         variant="ghost"
         type="button"

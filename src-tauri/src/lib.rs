@@ -28,6 +28,7 @@ use objc2_app_kit::NSScreen;
 #[cfg(target_os = "macos")]
 use tauri_nspanel::{tauri_panel, ManagerExt as PanelManagerExt, StyleMask, WebviewWindowExt};
 
+mod ai_sessions;
 mod calendar;
 mod terminal_tabs;
 
@@ -1337,6 +1338,8 @@ pub fn run() {
             quick_capture_settings,
             save_quick_capture_settings,
             hide_quick_capture,
+            ai_sessions::list_ai_sessions,
+            ai_sessions::open_ai_session_desktop,
             terminal_tabs::list_workspace_tabs,
             terminal_tabs::list_terminal_fonts,
             terminal_tabs::list_terminal_settings,

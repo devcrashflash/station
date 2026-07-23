@@ -85,6 +85,11 @@ export const api = {
   listTerminalFonts: () => call("list_terminal_fonts", {}, local.listTerminalFonts),
   saveTerminalSettings: (payload) =>
     call("save_terminal_settings", { input: payload }, () => local.saveTerminalSettings(payload)),
+  listAiSessions: ({ since }) => call("list_ai_sessions", { since }, () => ({ sessions: [], warnings: [] })),
+  openAiSessionDesktop: ({ provider, sessionId }) =>
+    call("open_ai_session_desktop", { provider, sessionId }, () => {
+      throw new Error("Opening AI sessions requires the desktop app.");
+    }),
   listProjects: () => call("list_projects", {}, local.listProjects),
   createProject: (payload) => call("create_project", payload, () => local.createProject(payload)),
   updateProject: (payload) => call("update_project", payload, () => local.updateProject(payload)),

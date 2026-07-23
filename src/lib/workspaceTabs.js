@@ -4,7 +4,7 @@ export const MAIN_WORKSPACE_TAB_ID = "main";
 
 export const workspaceTabsApi = {
   list: () => invoke("list_workspace_tabs"),
-  createTerminal: (deferInput = false) => invoke("create_terminal_tab", { deferInput }),
+  createTerminal: (deferInput = false, cwd = null) => invoke("create_terminal_tab", { deferInput, cwd }),
   completeTerminalStartupInput: (tabId, data) => invoke("complete_terminal_startup_input", { tabId, data }),
   activate: (tabId) => invoke("activate_tab", { tabId }),
   reorder: (tabIds) => invoke("reorder_tabs", { tabIds }),

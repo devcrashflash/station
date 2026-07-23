@@ -19,6 +19,7 @@ export function AppShell({
   title,
   breadcrumbPage,
   isActivitySelected,
+  isAgentsSelected,
   notice,
   noticeKey,
   onClearNotice,
@@ -27,6 +28,7 @@ export function AppShell({
   onShowProject,
   onAddProject,
   onShowActivity,
+  onShowAgents,
   onShowSettings,
   onShowSmartInbox,
   children,
@@ -56,10 +58,12 @@ export function AppShell({
           projects={projects}
           selectedProjectId={selectedProjectId}
           isActivitySelected={isActivitySelected}
+          isAgentsSelected={isAgentsSelected}
           onSelectProject={onSelectProject}
           onShowInbox={onShowInbox}
           onAddProject={onAddProject}
           onShowActivity={onShowActivity}
+          onShowAgents={onShowAgents}
           onShowSettings={onShowSettings}
         />
 

@@ -34,6 +34,7 @@ import { InboxView } from "@/views/inbox/InboxView";
 import { ActivityView, useActivityData } from "@/views/activity/ActivityView";
 import { ProjectWorkspaceView } from "@/views/projects/ProjectWorkspaceView";
 import { TaskDetailView } from "@/views/tasks/TaskDetailView";
+import { AiAgentsView } from "@/views/agents/AiAgentsView";
 import { AppShell } from "./AppShell";
 
 function dedupeProjects(projects) {
@@ -172,7 +173,9 @@ function App() {
   const [smartInboxFocusRequestKey, setSmartInboxFocusRequestKey] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] = useState("accounts");
-  const [showActivity, setShowActivity] = useState(false);
+  const [utilityPage, setUtilityPage] = useState(null);
+  const showActivity = utilityPage === "activity";
+  const showAiAgents = utilityPage === "agents";
   const [activityDate, setActivityDate] = useState(() => formatLocalDate());
   const [notice, setNotice] = useState("");
   const [noticeKey, setNoticeKey] = useState(0);
@@ -204,7 +207,7 @@ function App() {
     onError: reportError,
   });
   const hasCalendarAccounts = calendarAccounts.some((account) => account.calendarEnabled !== false && (account.calendars || []).some((calendar) => account.provider !== "google" || calendar.enabled));
-  const isInboxVisible = !selectedTask && !showActivity && !selectedProject;
+  const isInboxVisible = !selectedTask && !utilityPage && !selectedProject;
   const todayCalendarData = useCalendarData({
     date: formatLocalDate(),
     enabled: isInboxVisible,
@@ -256,7 +259,7 @@ function App() {
     function handleKeyDown(event) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        setShowActivity(false);
+        setUtilityPage(null);
         setSelectedTask(null);
         setSelectedProjectId(null);
         setSmartInboxFocusRequestKey((current) => current + 1);
@@ -561,7 +564,7 @@ function App() {
   }
 
   function openTask(task) {
-    setShowActivity(false);
+    setUtilityPage(null);
     setSelectedTask(task);
     if (task.projectId) {
       setSelectedProjectId(task.projectId);
@@ -569,13 +572,13 @@ function App() {
   }
 
   function selectProject(projectId) {
-    setShowActivity(false);
+    setUtilityPage(null);
     setSelectedTask(null);
     setSelectedProjectId(projectId);
   }
 
   function showDashboard() {
-    setShowActivity(false);
+    setUtilityPage(null);
     setSelectedTask(null);
     setSelectedProjectId(null);
   }
@@ -589,7 +592,13 @@ function App() {
     setSelectedTask(null);
     setSelectedProjectId(null);
     setActivityDate(formatLocalDate());
-    setShowActivity(true);
+    setUtilityPage("activity");
+  }
+
+  function showAiAgentsView() {
+    setSelectedTask(null);
+    setSelectedProjectId(null);
+    setUtilityPage("agents");
   }
 
   function showProjectFromBreadcrumb() {
@@ -616,9 +625,10 @@ function App() {
       selectedProject={selectedProject}
       selectedTask={selectedTask}
       selectedTaskProject={selectedTaskProject}
-      title={showActivity ? "Activity" : undefined}
-      breadcrumbPage={showActivity ? "Activity" : undefined}
+      title={showAiAgents ? "AI Agents" : showActivity ? "Activity" : undefined}
+      breadcrumbPage={showAiAgents ? "AI Agents" : showActivity ? "Activity" : undefined}
       isActivitySelected={showActivity}
+      isAgentsSelected={showAiAgents}
       notice={notice}
       noticeKey={noticeKey}
       onClearNotice={clearNotice}
@@ -627,6 +637,7 @@ function App() {
       onShowProject={showProjectFromBreadcrumb}
       onAddProject={() => setShowProjectForm(true)}
       onShowActivity={showActivityView}
+      onShowAgents={showAiAgentsView}
       onShowSettings={() => {
         setSettingsInitialSection("accounts");
         setShowSettings(true);
@@ -727,6 +738,8 @@ function App() {
             }
           }}
         />
+      ) : showAiAgents ? (
+        <AiAgentsView onNotice={showNotice} />
       ) : showActivity ? (
         <ActivityView
           date={activityDate}
