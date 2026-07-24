@@ -19,6 +19,7 @@ import {
   aiSessionProviderLabel,
   normalizeAiSessionSettings,
 } from "@/lib/aiSessions";
+import { calendarWarnings } from "@/lib/calendar";
 import { formatShortcut, shortcutFromKeyboardEvent } from "@/lib/keyboardShortcut";
 import { quickCaptureStatus } from "@/lib/quickCaptureSettings";
 import { terminalFontFamily, terminalFontOptions, terminalFontStyle, terminalFontStyleOptions } from "@/lib/terminalFonts";
@@ -126,6 +127,7 @@ export function SettingsDialog({
   quickCaptureSettings,
   themePreference = "system",
   calendarAccounts = [],
+  calendarSyncRuns = [],
   initialSection = "accounts",
   onClose,
   onSave,
@@ -225,6 +227,7 @@ export function SettingsDialog({
               <AccountsSettingsTab
                 connections={connections}
                 calendarAccounts={calendarAccounts}
+                calendarSyncRuns={calendarSyncRuns}
                 onSaveConnection={onSave}
                 onDeleteConnection={onDelete}
                 onTestConnection={onTest}
@@ -725,7 +728,7 @@ function QuickCaptureSettingsTab({ settings, onSave }) {
   );
 }
 
-function AccountsSettingsTab({ connections, calendarAccounts, onSaveConnection, onDeleteConnection, onTestConnection, onSaveSubscription, onSaveCalDav, onConnectGoogle, onCancelGoogle, onUpdateService, onRefreshCalendars, onUpdateCollections, onTestCalendar, onDeleteCalendar }) {
+function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, onSaveConnection, onDeleteConnection, onTestConnection, onSaveSubscription, onSaveCalDav, onConnectGoogle, onCancelGoogle, onUpdateService, onRefreshCalendars, onUpdateCollections, onTestCalendar, onDeleteCalendar }) {
   const [editor, setEditor] = useState(null);
   const [fields, setFields] = useState({});
   const [calendarKind, setCalendarKind] = useState("caldav");
@@ -873,6 +876,7 @@ function AccountsSettingsTab({ connections, calendarAccounts, onSaveConnection, 
     ? credentialUrl(editor.type, fields.baseUrl || "", fields.apiKey || "")
     : "";
   const savedCount = connections.length + calendarAccounts.length;
+  const calendarAccountWarnings = calendarWarnings(calendarSyncRuns);
   const groups = [
     { id: "google", label: "Google", icon: AtSign, items: calendarAccounts.filter((item) => item.provider === "google"), kind: "calendar" },
     { id: "github", label: "GitHub", icon: GitPullRequest, items: connections.filter((item) => item.provider === "github"), kind: "developer" },
@@ -955,7 +959,7 @@ function AccountsSettingsTab({ connections, calendarAccounts, onSaveConnection, 
 
       {actionNotice && <p className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">{actionNotice}</p>}
       {savedCount === 0 ? <EmptyState text="No accounts configured." /> : <div className="grid gap-5">
-        {groups.map((group) => group.items.length > 0 && <AccountGroup key={group.id} group={group} busyKey={busyKey} testResults={testResults} onEdit={group.kind === "developer" ? editConnection : editCalendar} onTest={(item) => group.kind === "developer" ? testDeveloper(item.id) : runAction(`test:${item.id}`, () => onTestCalendar(item.id), (message) => message).catch(() => {})} onRefresh={(item) => runAction(`refresh:${item.id}`, () => onRefreshCalendars(item.id), "Calendars refreshed.").catch(() => {})} onDelete={(item) => runAction(`delete:${item.id}`, () => group.kind === "developer" ? onDeleteConnection(item.id) : onDeleteCalendar(item.id), "Account removed.").then(() => { if (editor?.id === item.id) resetEditor(); }).catch(() => {})} onUpdateService={(item, enabled) => runAction(`service:${item.id}`, () => onUpdateService(item.id, enabled), enabled ? "Google Calendar enabled." : "Google Calendar paused.").catch(() => {})} onUpdateCollections={onUpdateCollections} setActionNotice={setActionNotice} />)}
+        {groups.map((group) => group.items.length > 0 && <AccountGroup key={group.id} group={group} busyKey={busyKey} testResults={testResults} calendarWarnings={calendarAccountWarnings} onEdit={group.kind === "developer" ? editConnection : editCalendar} onReconnect={(item) => runAction(`reconnect:${item.id}`, () => onConnectGoogle(item.id), `${item.name} reconnected.`).catch(() => {})} onTest={(item) => group.kind === "developer" ? testDeveloper(item.id) : runAction(`test:${item.id}`, () => onTestCalendar(item.id), (message) => message).catch(() => {})} onRefresh={(item) => runAction(`refresh:${item.id}`, () => onRefreshCalendars(item.id), "Calendars refreshed.").catch(() => {})} onDelete={(item) => runAction(`delete:${item.id}`, () => group.kind === "developer" ? onDeleteConnection(item.id) : onDeleteCalendar(item.id), "Account removed.").then(() => { if (editor?.id === item.id) resetEditor(); }).catch(() => {})} onUpdateService={(item, enabled) => runAction(`service:${item.id}`, () => onUpdateService(item.id, enabled), enabled ? "Google Calendar enabled." : "Google Calendar paused.").catch(() => {})} onUpdateCollections={onUpdateCollections} setActionNotice={setActionNotice} />)}
       </div>}
     </div>
   );
@@ -969,13 +973,88 @@ function EditorFooter({ busy, submitLabel, error, onCancel }) {
   return <><>{error && <p className="rounded-md border bg-background p-3 text-sm text-destructive">{error}</p>}</><div className="flex gap-2"><Button type="submit" disabled={busy}>{busy && <LoaderCircle className="animate-spin" />}{submitLabel}</Button><Button type="button" variant="outline" disabled={busy} onClick={onCancel}>Cancel</Button></div></>;
 }
 
-function AccountGroup({ group, busyKey, testResults, onEdit, onTest, onRefresh, onDelete, onUpdateService, onUpdateCollections, setActionNotice }) {
+function AccountGroup({ group, busyKey, testResults, calendarWarnings: warnings, onEdit, onReconnect, onTest, onRefresh, onDelete, onUpdateService, onUpdateCollections, setActionNotice }) {
   const Icon = group.icon;
-  return <section className="grid gap-2"><div className="flex items-center gap-2"><Icon className="size-4 text-muted-foreground" /><h3 className="font-semibold">{group.label}</h3><Badge variant="secondary">{group.items.length}</Badge></div>{group.items.map((item) => {
-    const isDeveloper = group.kind === "developer";
-    const result = testResults[item.id];
-    return <div key={item.id} className="grid gap-3 rounded-md border p-4"><div className="flex min-w-0 items-start gap-2"><div className="min-w-0 flex-1"><p className="font-medium">{item.name}</p><p className="truncate text-xs text-muted-foreground">{isDeveloper ? (item.provider === "trello" ? "Cloud API" : item.baseUrl) : calendarTypeLabels[item.provider] || "Calendar"}</p>{result && <div className="mt-2 flex items-center gap-2"><Badge variant={result.ok === false ? "destructive" : "secondary"} className={cn(result.ok === true && "bg-green-100 text-green-800 dark:bg-green-950/50 dark:text-green-300")}>{result.ok === null ? "Testing" : result.ok ? "Connected" : "Failed"}</Badge><span className="text-xs text-muted-foreground">{result.message}</span></div>}</div><Button size="icon-sm" variant="ghost" title={item.provider === "google" ? "Reconnect account" : "Edit account"} onClick={() => onEdit(item)}><Pencil /></Button><Button size="icon-sm" variant="ghost" title="Test account" disabled={Boolean(busyKey)} onClick={() => onTest(item)}>{busyKey === `test:${item.id}` ? <LoaderCircle className="animate-spin" /> : <PlugZap />}</Button>{!isDeveloper && <Button size="icon-sm" variant="ghost" title="Refresh calendars" disabled={Boolean(busyKey)} onClick={() => onRefresh(item)}><RefreshCw className={busyKey === `refresh:${item.id}` ? "animate-spin" : ""} /></Button>}<Button size="icon-sm" variant="ghost" title="Delete account" disabled={Boolean(busyKey)} onClick={() => onDelete(item)}><Trash2 /></Button></div>{item.provider === "google" && <label className="flex items-center gap-3 rounded-md border bg-muted/20 p-3"><Checkbox checked={item.calendarEnabled !== false} disabled={Boolean(busyKey)} onCheckedChange={(checked) => onUpdateService(item, checked === true)} /><div><p className="text-sm font-medium">Calendar</p><p className="text-xs text-muted-foreground">Show and sync calendars from this Google account.</p></div></label>}{!isDeveloper && item.provider === "google" && item.calendarEnabled !== false && <div className="grid gap-2">{(item.calendars || []).map((calendar) => <label key={calendar.id} className="flex items-center gap-3 rounded-md border bg-muted/20 p-3"><Checkbox checked={calendar.enabled} onCheckedChange={(checked) => onUpdateCollections([{ id: calendar.id, enabled: checked === true, color: calendar.color }]).catch((error) => setActionNotice(error?.message || String(error)))} /><input className="size-7 cursor-pointer rounded border bg-transparent p-0.5" type="color" value={calendar.color || "#64748b"} onChange={(event) => onUpdateCollections([{ id: calendar.id, enabled: calendar.enabled, color: event.target.value }]).catch((error) => setActionNotice(error?.message || String(error)))} /><span className="min-w-0 flex-1 truncate text-sm font-medium">{calendar.name}</span></label>)}{(item.calendars || []).length === 0 && <EmptyState text="No event calendars discovered." />}</div>}</div>;
-  })}</section>;
+  return (
+    <section className="grid gap-2">
+      <div className="flex items-center gap-2">
+        <Icon className="size-4 text-muted-foreground" />
+        <h3 className="font-semibold">{group.label}</h3>
+        <Badge variant="secondary">{group.items.length}</Badge>
+      </div>
+      {group.items.map((item) => {
+        const isDeveloper = group.kind === "developer";
+        const result = testResults[item.id];
+        const reconnectWarnings = item.provider === "google"
+          ? warnings.filter((warning) => warning.accountId === item.id && warning.reconnectable)
+          : [];
+        return (
+          <div key={item.id} className="grid gap-3 rounded-md border p-4">
+            <div className="flex min-w-0 items-start gap-2">
+              <div className="min-w-0 flex-1">
+                <p className="font-medium">{item.name}</p>
+                <p className="truncate text-xs text-muted-foreground">
+                  {isDeveloper ? (item.provider === "trello" ? "Cloud API" : item.baseUrl) : calendarTypeLabels[item.provider] || "Calendar"}
+                </p>
+                {result && (
+                  <div className="mt-2 flex items-center gap-2">
+                    <Badge variant={result.ok === false ? "destructive" : "secondary"} className={cn(result.ok === true && "bg-green-100 text-green-800 dark:bg-green-950/50 dark:text-green-300")}>
+                      {result.ok === null ? "Testing" : result.ok ? "Connected" : "Failed"}
+                    </Badge>
+                    <span className="text-xs text-muted-foreground">{result.message}</span>
+                  </div>
+                )}
+              </div>
+              <Button size="icon-sm" variant="ghost" title={item.provider === "google" ? "Reconnect account" : "Edit account"} onClick={() => onEdit(item)}>
+                <Pencil />
+              </Button>
+              <Button size="icon-sm" variant="ghost" title="Test account" disabled={Boolean(busyKey)} onClick={() => onTest(item)}>
+                {busyKey === `test:${item.id}` ? <LoaderCircle className="animate-spin" /> : <PlugZap />}
+              </Button>
+              {!isDeveloper && (
+                <Button size="icon-sm" variant="ghost" title="Refresh calendars" disabled={Boolean(busyKey)} onClick={() => onRefresh(item)}>
+                  <RefreshCw className={busyKey === `refresh:${item.id}` ? "animate-spin" : ""} />
+                </Button>
+              )}
+              <Button size="icon-sm" variant="ghost" title="Delete account" disabled={Boolean(busyKey)} onClick={() => onDelete(item)}>
+                <Trash2 />
+              </Button>
+            </div>
+            {reconnectWarnings.map((warning) => (
+              <div key={`${warning.collectionId}:${warning.message}`} className="flex items-start justify-between gap-3 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+                <p className="min-w-0 text-xs text-destructive">{warning.message}</p>
+                <Button type="button" size="sm" variant="outline" disabled={Boolean(busyKey)} onClick={() => onReconnect(item)}>
+                  {busyKey === `reconnect:${item.id}` && <LoaderCircle className="animate-spin" />}
+                  {busyKey === `reconnect:${item.id}` ? "Reconnecting…" : "Reconnect"}
+                </Button>
+              </div>
+            ))}
+            {item.provider === "google" && (
+              <label className="flex items-center gap-3 rounded-md border bg-muted/20 p-3">
+                <Checkbox checked={item.calendarEnabled !== false} disabled={Boolean(busyKey)} onCheckedChange={(checked) => onUpdateService(item, checked === true)} />
+                <div>
+                  <p className="text-sm font-medium">Calendar</p>
+                  <p className="text-xs text-muted-foreground">Show and sync calendars from this Google account.</p>
+                </div>
+              </label>
+            )}
+            {!isDeveloper && item.provider === "google" && item.calendarEnabled !== false && (
+              <div className="grid gap-2">
+                {(item.calendars || []).map((calendar) => (
+                  <label key={calendar.id} className="flex items-center gap-3 rounded-md border bg-muted/20 p-3">
+                    <Checkbox checked={calendar.enabled} onCheckedChange={(checked) => onUpdateCollections([{ id: calendar.id, enabled: checked === true, color: calendar.color }]).catch((error) => setActionNotice(error?.message || String(error)))} />
+                    <input className="size-7 cursor-pointer rounded border bg-transparent p-0.5" type="color" value={calendar.color || "#64748b"} onChange={(event) => onUpdateCollections([{ id: calendar.id, enabled: calendar.enabled, color: event.target.value }]).catch((error) => setActionNotice(error?.message || String(error)))} />
+                    <span className="min-w-0 flex-1 truncate text-sm font-medium">{calendar.name}</span>
+                  </label>
+                ))}
+                {(item.calendars || []).length === 0 && <EmptyState text="No event calendars discovered." />}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </section>
+  );
 }
 
 function CalendarColorFields({ account, onUpdateCollections, setActionNotice }) {

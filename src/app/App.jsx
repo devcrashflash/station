@@ -241,6 +241,15 @@ function App() {
     onError: reportError,
   });
 
+  async function reconnectGoogleCalendarAccount(accountId) {
+    const account = await api.connectGoogleAccount({ accountId });
+    setCalendarAccounts(await api.listCalendarAccounts());
+    await todayCalendarData.refresh();
+    if (showActivity) await activityCalendarData.refresh();
+    showNotice(`${account.name} connected.`);
+    return account;
+  }
+
   useEffect(() => {
     refreshShell().catch(reportError);
   }, []);
@@ -902,6 +911,7 @@ function App() {
           isCalendarSyncing={todayCalendarData.isSyncing}
           hasCalendarAccounts={hasCalendarAccounts}
           onRefreshCalendar={todayCalendarData.refresh}
+          onReconnectCalendarAccount={reconnectGoogleCalendarAccount}
           onShowCalendarSettings={() => {
             setSettingsInitialSection("accounts");
             setShowSettings(true);
@@ -1033,6 +1043,7 @@ function App() {
           quickCaptureSettings={quickCaptureSettings}
           themePreference={themePreference}
           calendarAccounts={calendarAccounts}
+          calendarSyncRuns={todayCalendarData.syncRuns}
           initialSection={settingsInitialSection}
           onClose={() => setShowSettings(false)}
           onThemePreferenceChange={setThemePreference}
@@ -1132,12 +1143,7 @@ function App() {
             showNotice(payload.id ? "Calendar subscription updated." : "Calendar subscription added.");
             return account;
           }}
-          onConnectGoogleAccount={async (accountId) => {
-            const account = await api.connectGoogleAccount({ accountId });
-            setCalendarAccounts(await api.listCalendarAccounts());
-            showNotice(`${account.name} connected.`);
-            return account;
-          }}
+          onConnectGoogleAccount={reconnectGoogleCalendarAccount}
           onCancelGoogleAccount={() => api.cancelGoogleAccountConnection()}
           onUpdateCalendarService={async (accountId, enabled) => {
             const account = await api.updateCalendarService({ accountId, enabled });

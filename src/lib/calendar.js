@@ -1,6 +1,7 @@
 import { formatLocalDate } from "./activity.js";
 
 export const CALENDAR_AUTO_SYNC_STALE_MS = 5 * 60 * 1000;
+export const GOOGLE_AUTHORIZATION_EXPIRED_WARNING = "Google authorization expired or was revoked. Reconnect the account.";
 
 export function sortCalendarEvents(events = []) {
   return [...events].sort((left, right) => (
@@ -20,10 +21,19 @@ export function shouldAutoSyncCalendar(date, syncRuns = [], now = Date.now(), to
   return date === today && now - latest > CALENDAR_AUTO_SYNC_STALE_MS;
 }
 
-export function calendarWarningMessages(syncRuns = []) {
+export function calendarWarnings(syncRuns = []) {
   return syncRuns
     .filter((run) => run.status === "failed" && run.warning)
-    .map((run) => `${run.accountName} · ${run.calendarName}: ${run.warning}`);
+    .map((run) => ({
+      accountId: run.accountId,
+      collectionId: run.collectionId,
+      message: `${run.accountName} · ${run.calendarName}: ${run.warning}`,
+      reconnectable: run.warning === GOOGLE_AUTHORIZATION_EXPIRED_WARNING,
+    }));
+}
+
+export function calendarWarningMessages(syncRuns = []) {
+  return calendarWarnings(syncRuns).map(({ message }) => message);
 }
 
 export function calendarEventTimeLabel(event) {

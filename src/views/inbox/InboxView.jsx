@@ -17,7 +17,7 @@ import { dashboardTaskCreatedAt, dashboardTaskProjectName, latestDashboardTasks 
 import { isSupportedOcrFile } from "@/lib/ocr";
 import { reviewRequestInput, reviewRequestSubtitle } from "@/lib/smartInboxReviewRequests";
 import { cn } from "@/lib/utils";
-import { calendarEventOpenUrl, calendarEventTimeLabel, calendarWarningMessages, sortCalendarEvents } from "@/lib/calendar";
+import { calendarEventOpenUrl, calendarEventTimeLabel, calendarWarnings, sortCalendarEvents } from "@/lib/calendar";
 
 export function InboxView({
   tasks = [],
@@ -43,6 +43,7 @@ export function InboxView({
   isCalendarSyncing = false,
   hasCalendarAccounts = false,
   onRefreshCalendar,
+  onReconnectCalendarAccount,
   onShowCalendarSettings,
 }) {
   const [activeTab, setActiveTab] = useState("todos");
@@ -94,6 +95,7 @@ export function InboxView({
             isSyncing={isCalendarSyncing}
             hasAccounts={hasCalendarAccounts}
             onRefresh={onRefreshCalendar}
+            onReconnect={onReconnectCalendarAccount}
             onShowSettings={onShowCalendarSettings}
           />
         </Panel>
@@ -115,9 +117,23 @@ export function InboxView({
   );
 }
 
-function TodayMeetings({ events, syncRuns, isSyncing, hasAccounts, onRefresh, onShowSettings }) {
-  const warnings = calendarWarningMessages(syncRuns);
+function TodayMeetings({ events, syncRuns, isSyncing, hasAccounts, onRefresh, onReconnect, onShowSettings }) {
+  const [reconnectingAccountId, setReconnectingAccountId] = useState(null);
+  const [reconnectError, setReconnectError] = useState("");
+  const warnings = calendarWarnings(syncRuns);
   const sorted = sortCalendarEvents(events);
+
+  async function reconnect(accountId) {
+    setReconnectingAccountId(accountId);
+    setReconnectError("");
+    try {
+      await onReconnect(accountId);
+    } catch (error) {
+      setReconnectError(error?.message || String(error));
+    } finally {
+      setReconnectingAccountId(null);
+    }
+  }
 
   if (!hasAccounts) {
     return (
@@ -141,7 +157,24 @@ function TodayMeetings({ events, syncRuns, isSyncing, hasAccounts, onRefresh, on
           {isSyncing ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : <RefreshCw aria-hidden="true" />}
         </Button>
       </div>
-      {warnings.map((warning) => <p key={warning} className="text-xs text-destructive">{warning}</p>)}
+      {warnings.map((warning) => (
+        <div key={`${warning.accountId}:${warning.collectionId}:${warning.message}`} className="flex items-start justify-between gap-2">
+          <p className="min-w-0 text-xs text-destructive">{warning.message}</p>
+          {warning.reconnectable && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={Boolean(reconnectingAccountId)}
+              onClick={() => reconnect(warning.accountId)}
+            >
+              {reconnectingAccountId === warning.accountId && <LoaderCircle className="animate-spin" />}
+              {reconnectingAccountId === warning.accountId ? "Reconnecting…" : "Reconnect"}
+            </Button>
+          )}
+        </div>
+      ))}
+      {reconnectError && <p className="text-xs text-destructive">{reconnectError}</p>}
       {sorted.length === 0 ? <EmptyState text={isSyncing ? "Syncing today's meetings…" : "No events today."} /> : (
         <div className="grid gap-2">
           {sorted.map((event) => {
