@@ -278,6 +278,97 @@ test("local fallback stores terminal settings and restores defaults", async () =
   assert.deepEqual(await api.listTerminalFonts(), []);
 });
 
+test("local fallback stores AI session source settings and fills missing defaults", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => { stored = value; },
+  };
+
+  assert.deepEqual(await api.listAiSessionSettings(), {
+    codexCli: true,
+    codexDesktop: true,
+    claudeCli: true,
+    claudeDesktop: true,
+    foregroundRefreshIntervalSeconds: 30,
+    backgroundRefreshIntervalSeconds: 60,
+  });
+  assert.deepEqual(await api.saveAiSessionSettings({
+    codexCli: false,
+    claudeDesktop: false,
+    refreshIntervalSeconds: 60,
+  }), {
+    codexCli: false,
+    codexDesktop: true,
+    claudeCli: true,
+    claudeDesktop: false,
+    foregroundRefreshIntervalSeconds: 60,
+    backgroundRefreshIntervalSeconds: 60,
+  });
+  assert.deepEqual(await api.listAiSessionSettings(), {
+    codexCli: false,
+    codexDesktop: true,
+    claudeCli: true,
+    claudeDesktop: false,
+    foregroundRefreshIntervalSeconds: 60,
+    backgroundRefreshIntervalSeconds: 60,
+  });
+});
+
+test("local fallback archives, upserts, lists, validates, and restores AI sessions", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => { stored = value; },
+  };
+  const session = {
+    id: "session-1",
+    provider: "codex",
+    title: "Finished work",
+    cwd: "/work/app",
+    createdAt: 10,
+    updatedAt: 20,
+    parentId: null,
+    kind: "session",
+    origin: "cli",
+    waitingForInput: false,
+    running: false,
+    completedAt: 20,
+    openTargets: ["terminal"],
+    children: [{ id: "child-1", running: false, waitingForInput: false }],
+  };
+
+  const archived = await api.archiveAiSession({ session });
+  assert.equal(archived.archivedAt > 0, true);
+  assert.equal(archived.archiveScope, "station");
+  assert.deepEqual((await api.listAiSessions({
+    since: 0,
+    settings: {},
+  })).archivedSessions.map(({ id }) => id), ["session-1"]);
+
+  await api.archiveAiSession({ session: { ...session, title: "Updated" } });
+  const listed = await api.listAiSessions({ since: 0, settings: {} });
+  assert.equal(listed.archivedSessions.length, 1);
+  assert.equal(listed.archivedSessions[0].title, "Updated");
+  assert.equal(listed.archivedSessions[0].archiveScope, "station");
+
+  await assert.rejects(api.archiveAiSession({
+    session: { ...session, id: "bad;id" },
+  }), /Invalid/);
+  await assert.rejects(api.archiveAiSession({
+    session: { ...session, children: [{ id: "bad;child" }] },
+  }), /Invalid/);
+  await assert.rejects(api.archiveAiSession({
+    session: { ...session, running: true },
+  }), /cannot be archived/);
+
+  await api.restoreAiSession({ provider: "codex", sessionId: "session-1" });
+  assert.deepEqual((await api.listAiSessions({
+    since: 0,
+    settings: {},
+  })).archivedSessions, []);
+});
+
 test("normalizes base urls without a scheme", () => {
   assert.equal(normalizeBaseUrl("gitlab.example.org"), "https://gitlab.example.org");
   assert.equal(normalizeBaseUrl("https://gitlab.example.org/"), "https://gitlab.example.org");

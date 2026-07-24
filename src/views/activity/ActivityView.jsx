@@ -17,10 +17,10 @@ import {
 } from "lucide-react";
 
 import { EmptyState } from "@/components/common/EmptyState";
+import { CheckboxFilterCard } from "@/components/common/CheckboxFilterCard";
 import { Panel } from "@/components/common/Panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { DaySummaryPreview } from "@/features/activity/DaySummaryPreview";
 import { api } from "@/lib/api";
@@ -665,25 +665,14 @@ function ActivityFilters({
             const enabled = !disabledConnectionKeys.has(connection.key);
 
             return (
-              <label
+              <CheckboxFilterCard
                 key={connection.key}
-                className="flex min-w-0 cursor-pointer items-start gap-3 rounded-md border bg-card p-3 text-card-foreground transition-colors hover:bg-muted/35"
-              >
-                <Checkbox
-                  className="mt-0.5"
-                  checked={enabled}
-                  onCheckedChange={(checked) => onToggle(connection.key, checked === true)}
-                  aria-label={`${enabled ? "Disable" : "Enable"} ${connection.label}`}
-                />
-                <span className="min-w-0">
-                  <span className="block min-w-0 break-words text-sm font-medium [overflow-wrap:anywhere]">
-                    {connection.label}
-                  </span>
-                  <span className="block text-xs text-muted-foreground">
-                    {activityProviderLabel(connection.provider)}
-                  </span>
-                </span>
-              </label>
+                label={connection.label}
+                description={activityProviderLabel(connection.provider)}
+                checked={enabled}
+                ariaLabel={`${enabled ? "Disable" : "Enable"} ${connection.label}`}
+                onCheckedChange={(checked) => onToggle(connection.key, checked === true)}
+              />
             );
           })}
         </div>
@@ -693,34 +682,20 @@ function ActivityFilters({
 
       <div className="grid gap-2 border-t pt-4">
         <p className="text-sm font-medium">Activity</p>
-        <label className="flex min-w-0 cursor-pointer items-start gap-3 rounded-md border bg-card p-3 text-card-foreground transition-colors hover:bg-muted/35">
-          <Checkbox
-            className="mt-0.5"
-            checked={hideMoveOnlyTickets}
-            onCheckedChange={(checked) => onHideMoveOnlyTicketsChange(checked === true)}
-            aria-label="Hide move-only tickets"
-          />
-          <span className="min-w-0">
-            <span className="block text-sm font-medium">Hide move-only tickets</span>
-            <span className="block text-xs text-muted-foreground">
-              Keep tickets with other activity or a related pull request.
-            </span>
-          </span>
-        </label>
-        <label className="flex min-w-0 cursor-pointer items-start gap-3 rounded-md border bg-card p-3 text-card-foreground transition-colors hover:bg-muted/35">
-          <Checkbox
-            className="mt-0.5"
-            checked={hideChangedOnlyTickets}
-            onCheckedChange={(checked) => onHideChangedOnlyTicketsChange(checked === true)}
-            aria-label="Hide changed-only tickets"
-          />
-          <span className="min-w-0">
-            <span className="block text-sm font-medium">Hide changed-only tickets</span>
-            <span className="block text-xs text-muted-foreground">
-              Keep tickets with other activity or a related pull request.
-            </span>
-          </span>
-        </label>
+        <CheckboxFilterCard
+          label="Hide move-only tickets"
+          description="Keep tickets with other activity or a related pull request."
+          checked={hideMoveOnlyTickets}
+          ariaLabel="Hide move-only tickets"
+          onCheckedChange={(checked) => onHideMoveOnlyTicketsChange(checked === true)}
+        />
+        <CheckboxFilterCard
+          label="Hide changed-only tickets"
+          description="Keep tickets with other activity or a related pull request."
+          checked={hideChangedOnlyTickets}
+          ariaLabel="Hide changed-only tickets"
+          onCheckedChange={(checked) => onHideChangedOnlyTicketsChange(checked === true)}
+        />
       </div>
     </div>
   );

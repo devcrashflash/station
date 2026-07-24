@@ -33,7 +33,15 @@ test("returns the unchanged order for invalid drag targets", () => {
 test("recognizes workspace command shortcuts", () => {
   assert.equal(isWorkspaceShortcut({ metaKey: true, ctrlKey: false, altKey: false, key: "T" }, "t"), true);
   assert.equal(isWorkspaceShortcut({ metaKey: false, ctrlKey: true, altKey: false, key: "w" }, "w"), true);
+  assert.equal(isWorkspaceShortcut({ metaKey: true, ctrlKey: false, altKey: false, key: "B" }, "b"), true);
+  assert.equal(isWorkspaceShortcut({ metaKey: false, ctrlKey: true, altKey: false, key: "b" }, "b"), true);
+  assert.equal(isWorkspaceShortcut({ metaKey: true, ctrlKey: false, altKey: false, key: "I" }, "i"), true);
+  assert.equal(isWorkspaceShortcut({ metaKey: false, ctrlKey: true, altKey: false, key: "i" }, "i"), true);
   assert.equal(isWorkspaceShortcut({ metaKey: true, ctrlKey: false, altKey: true, key: "t" }, "t"), false);
+  assert.equal(isWorkspaceShortcut({ metaKey: true, ctrlKey: false, altKey: true, key: "b" }, "b"), false);
+  assert.equal(isWorkspaceShortcut({ metaKey: true, ctrlKey: false, altKey: true, key: "i" }, "i"), false);
+  assert.equal(isWorkspaceShortcut({ metaKey: true, ctrlKey: false, altKey: false, key: "k" }, "b"), false);
+  assert.equal(isWorkspaceShortcut({ metaKey: true, ctrlKey: false, altKey: false, key: "k" }, "i"), false);
 });
 
 test("translates keys typed during terminal creation into terminal input", () => {

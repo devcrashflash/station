@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 
+import {
+  AI_SESSION_WAITING_STATUS_EVENT,
+  AI_SESSION_WAITING_STATUS_REQUEST_EVENT,
+  aiSessionWaitingStatusFromPayload,
+} from "@/lib/aiSessionEvents";
 import {
   reorderTerminalIds,
   requestCloseTerminal,
@@ -15,6 +20,7 @@ export function TabBar() {
   useSynchronizedTheme();
   const [snapshot, setSnapshot] = useState(EMPTY_SNAPSHOT);
   const [draggedId, setDraggedId] = useState(null);
+  const [hasWaitingAiSession, setHasWaitingAiSession] = useState(false);
 
   useEffect(() => {
     let disposed = false;
@@ -27,6 +33,27 @@ export function TabBar() {
     return () => {
       disposed = true;
       unlistenPromise.then((unlisten) => unlisten()).catch(() => {});
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten = null;
+    listen(AI_SESSION_WAITING_STATUS_EVENT, ({ payload }) => {
+      if (!disposed) {
+        setHasWaitingAiSession(aiSessionWaitingStatusFromPayload(payload));
+      }
+    }).then((cleanup) => {
+      if (disposed) {
+        cleanup();
+        return;
+      }
+      unlisten = cleanup;
+      emit(AI_SESSION_WAITING_STATUS_REQUEST_EVENT).catch(console.error);
+    }).catch(console.error);
+    return () => {
+      disposed = true;
+      unlisten?.();
     };
   }, []);
 
@@ -73,8 +100,17 @@ export function TabBar() {
                 aria-selected={active}
                 className="workspace-tab-select"
                 onClick={() => activate(tab.id)}
-                title={tab.title}
+                title={tab.kind === "main" && hasWaitingAiSession
+                  ? `${tab.title} — AI session waiting for you`
+                  : tab.title}
               >
+                {tab.kind === "main" && hasWaitingAiSession && (
+                  <span
+                    className="workspace-tab-waiting-dot"
+                    aria-label="AI session waiting for you"
+                    role="img"
+                  />
+                )}
                 <span className="workspace-tab-title">{tab.title}</span>
                 {shortcutNumber !== null && (
                   <span className="workspace-tab-shortcut" aria-hidden="true">⌘{shortcutNumber}</span>

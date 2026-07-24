@@ -12,6 +12,13 @@ import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { Textarea } from "@/components/ui/textarea";
 import { aiPromptIconFor, aiPromptIconOptions } from "@/lib/aiPromptIcons";
+import {
+  AI_SESSION_BACKGROUND_REFRESH_INTERVALS,
+  AI_SESSION_REFRESH_INTERVALS,
+  AI_SESSION_SOURCE_OPTIONS,
+  aiSessionProviderLabel,
+  normalizeAiSessionSettings,
+} from "@/lib/aiSessions";
 import { formatShortcut, shortcutFromKeyboardEvent } from "@/lib/keyboardShortcut";
 import { quickCaptureStatus } from "@/lib/quickCaptureSettings";
 import { terminalFontFamily, terminalFontOptions, terminalFontStyle, terminalFontStyleOptions } from "@/lib/terminalFonts";
@@ -70,12 +77,21 @@ const TRELLO_BASE_URL = "https://api.trello.com";
 const settingsSections = [
   { id: "accounts", label: "Accounts", description: "Connected services", icon: UserRound },
   { id: "ai-prompts", label: "AI Prompts", description: "Reusable AI instructions", icon: Bot },
+  { id: "ai-sessions", label: "AI Sessions", description: "Visible session sources", icon: Bot },
   { id: "directories", label: "Directories", description: "Local source folders", icon: FolderOpen },
   { id: "quick-capture", label: "Quick Capture", description: "Global capture overlay", icon: Keyboard },
   { id: "appearance", label: "Appearance", description: "Color theme", icon: Palette },
   { id: "terminal", label: "Terminal", description: "Typography and behavior", icon: SquareTerminal },
   { id: "browser", label: "Browser", description: "New tab behavior", icon: Monitor },
 ];
+
+const aiSessionSourceGroups = Array.from(
+  new Set(AI_SESSION_SOURCE_OPTIONS.map(({ provider }) => provider)),
+  (provider) => ({
+    provider,
+    options: AI_SESSION_SOURCE_OPTIONS.filter((option) => option.provider === provider),
+  }),
+);
 
 function normalizeCredentialBaseUrl(value, fallback) {
   const trimmed = value?.trim().replace(/\/+$/, "") || "";
@@ -104,6 +120,7 @@ export function SettingsDialog({
   aiPrompts,
   directories,
   browserSettings,
+  aiSessionSettings,
   terminalSettings,
   terminalFonts = [],
   quickCaptureSettings,
@@ -120,6 +137,7 @@ export function SettingsDialog({
   onSaveDirectory,
   onDeleteDirectory,
   onSaveBrowserSettings,
+  onSaveAiSessionSettings,
   onSaveTerminalSettings,
   onSaveQuickCaptureSettings,
   onThemePreferenceChange,
@@ -315,6 +333,13 @@ export function SettingsDialog({
               </div>
             )}
 
+            {activeTab === "ai-sessions" && (
+              <AiSessionSettingsTab
+                settings={aiSessionSettings}
+                onSave={onSaveAiSessionSettings}
+              />
+            )}
+
             {activeTab === "directories" && (
               <DirectoriesTab
                 directories={directories}
@@ -400,6 +425,132 @@ export function SettingsDialog({
         </main>
       </div>
     </Modal>
+  );
+}
+
+function AiSessionSettingsTab({ settings, onSave }) {
+  const [candidate, setCandidate] = useState(() => normalizeAiSessionSettings(settings));
+  const [notice, setNotice] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
+
+  useEffect(() => {
+    setCandidate(normalizeAiSessionSettings(settings));
+  }, [settings]);
+
+  async function save() {
+    setNotice("");
+    setIsSaving(true);
+    try {
+      const next = await onSave(candidate);
+      setCandidate(normalizeAiSessionSettings(next));
+      setNotice("AI session settings saved.");
+    } catch (error) {
+      setNotice(error?.message || String(error));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <div className="grid gap-5">
+      <div className="grid gap-1">
+        <p className="text-sm font-medium">Visible session sources</p>
+        <p className="text-xs text-muted-foreground">
+          Choose which locally discovered sessions appear in the AI Sessions view.
+          Older sessions without source information remain visible when either source for their provider is enabled.
+        </p>
+      </div>
+
+      <div className="grid gap-3">
+        {aiSessionSourceGroups.map(({ provider, options }) => (
+          <div key={provider} className="grid gap-3 rounded-lg border bg-muted/20 p-4">
+            <p className="text-sm font-medium">{aiSessionProviderLabel(provider)}</p>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {options.map((option) => (
+                <label
+                  key={option.key}
+                  className={cn(
+                    "flex items-start gap-3 rounded-md border bg-background/60 p-3 transition-colors",
+                    isSaving
+                      ? "cursor-not-allowed opacity-60"
+                      : "cursor-pointer hover:bg-muted/35",
+                  )}
+                >
+                  <Checkbox
+                    checked={candidate[option.key]}
+                    disabled={isSaving}
+                    aria-label={`${aiSessionProviderLabel(provider)} ${option.origin === "cli" ? "CLI" : "Desktop"}`}
+                    onCheckedChange={(checked) => setCandidate((current) => ({
+                      ...current,
+                      [option.key]: checked === true,
+                    }))}
+                  />
+                  <span className="grid gap-1">
+                    <span className="text-sm font-medium">
+                      {option.origin === "cli" ? "CLI" : "Desktop"}
+                    </span>
+                    <span className="text-xs text-muted-foreground">{option.description}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <Field>
+          <FieldLabel>Foreground refresh</FieldLabel>
+          <SelectControl
+            value={String(candidate.foregroundRefreshIntervalSeconds)}
+            onValueChange={(value) => setCandidate((current) => ({
+              ...current,
+              foregroundRefreshIntervalSeconds: Number(value),
+            }))}
+            options={AI_SESSION_REFRESH_INTERVALS.map((option) => ({
+              ...option,
+              value: String(option.value),
+            }))}
+            triggerClassName="w-full"
+            disabled={isSaving}
+          />
+          <p className="text-xs text-muted-foreground">
+            Used while AI Agents is visible. Off continues at the background rate.
+          </p>
+        </Field>
+
+        <Field>
+          <FieldLabel>Background refresh</FieldLabel>
+          <SelectControl
+            value={String(candidate.backgroundRefreshIntervalSeconds)}
+            onValueChange={(value) => setCandidate((current) => ({
+              ...current,
+              backgroundRefreshIntervalSeconds: Number(value),
+            }))}
+            options={AI_SESSION_BACKGROUND_REFRESH_INTERVALS.map((option) => ({
+              ...option,
+              value: String(option.value),
+            }))}
+            triggerClassName="w-full"
+            disabled={isSaving}
+          />
+          <p className="text-xs text-muted-foreground">
+            Used everywhere else so waiting sessions can notify you.
+          </p>
+        </Field>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-xs text-muted-foreground">
+          You can disable every source to hide all AI sessions.
+        </p>
+        <Button type="button" disabled={isSaving} onClick={save}>
+          {isSaving && <LoaderCircle className="animate-spin" />}
+          Save
+        </Button>
+      </div>
+      {notice && <p className="text-sm text-muted-foreground">{notice}</p>}
+    </div>
   );
 }
 

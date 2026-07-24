@@ -6,6 +6,7 @@ import { CalendarDays, ClipboardList, ExternalLink, Eye, Files, FileText, GitPul
 import { EmptyState } from "@/components/common/EmptyState";
 import { Modal } from "@/components/common/Modal";
 import { Panel } from "@/components/common/Panel";
+import { SegmentedTabs } from "@/components/common/SegmentedTabs";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -312,30 +313,12 @@ function InboxCaptureTabs({
   return (
     <div className="grid gap-3">
       <div className="flex items-center justify-between gap-3">
-        <div className="inline-flex w-fit rounded-md border bg-muted/30 p-1" role="tablist" aria-label="Smart inbox captures">
-          {tabs.map((tab) => {
-            const Icon = tab.icon;
-            const isActive = activeTab === tab.id;
-
-            return (
-              <button
-                key={tab.id}
-                type="button"
-                role="tab"
-                aria-selected={isActive}
-                className={cn(
-                  "inline-flex h-8 items-center gap-2 rounded-sm px-3 text-sm font-medium text-muted-foreground transition-colors",
-                  "hover:bg-background hover:text-foreground",
-                  isActive && "bg-background text-foreground shadow-xs",
-                )}
-                onClick={() => onActiveTabChange(tab.id)}
-              >
-                <Icon className="size-4" />
-                {tab.label} ({tab.count})
-              </button>
-            );
-          })}
-        </div>
+        <SegmentedTabs
+          tabs={tabs}
+          value={activeTab}
+          onValueChange={onActiveTabChange}
+          ariaLabel="Smart inbox captures"
+        />
         {activeTab === "latest-files" && onRefresh && (
           <Tooltip>
             <TooltipTrigger asChild>

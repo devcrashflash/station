@@ -1,6 +1,7 @@
 import { Activity, Bot, Plus, Settings, Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { shortcutModifier } from "@/lib/keyboardShortcut";
 import { getProjectInitial, normalizeProjectColor } from "@/lib/projectAvatar";
 import { cn } from "@/lib/utils";
 
@@ -9,6 +10,7 @@ export function ProjectRail({
   selectedProjectId,
   isActivitySelected,
   isAgentsSelected,
+  hasWaitingAiSession,
   onSelectProject,
   onShowInbox,
   onAddProject,
@@ -16,17 +18,27 @@ export function ProjectRail({
   onShowAgents,
   onShowSettings,
 }) {
+  const modifier = shortcutModifier();
+  const smartInboxShortcut = modifier === "⌘" ? "⌘I" : `${modifier}+I`;
+  const aiSessionsShortcut = modifier === "⌘" ? "⌘B" : `${modifier}+B`;
+
   return (
     <aside className="flex h-full w-20 shrink-0 flex-col items-center overflow-hidden border-r bg-sidebar py-4">
       <Button
-        className={cn("mb-4 shrink-0", !selectedProjectId && !isActivitySelected && !isAgentsSelected && "bg-sidebar-accent")}
+        className={cn("relative mb-4 shrink-0", !selectedProjectId && !isActivitySelected && !isAgentsSelected && "bg-sidebar-accent")}
         size="icon"
         variant="ghost"
         type="button"
-        title="Smart inbox"
+        title={`Smart inbox (${smartInboxShortcut})`}
         onClick={onShowInbox}
       >
         <Sparkles />
+        <span
+          className="absolute -bottom-1 -right-1 rounded-sm border border-sidebar-border bg-sidebar px-0.5 text-[8px] font-medium leading-3 text-muted-foreground shadow-xs"
+          aria-hidden="true"
+        >
+          {smartInboxShortcut}
+        </span>
       </Button>
 
       <div className="flex min-h-0 flex-1 flex-col items-center gap-3 overflow-y-auto px-3 py-1">
@@ -67,14 +79,31 @@ export function ProjectRail({
       </div>
 
       <Button
-        className={cn("mt-4 shrink-0", isAgentsSelected && "bg-sidebar-accent")}
+        className={cn("relative mt-4 shrink-0", isAgentsSelected && "bg-sidebar-accent")}
         size="icon"
         variant="ghost"
         type="button"
-        title="AI Agents"
+        title={hasWaitingAiSession
+          ? `AI Agents — waiting for you (${aiSessionsShortcut})`
+          : `AI Agents (${aiSessionsShortcut})`}
         onClick={onShowAgents}
       >
         <Bot />
+        {hasWaitingAiSession && (
+          <>
+            <span
+              className="absolute right-1 top-1 size-2 rounded-full bg-orange-500 ring-2 ring-sidebar"
+              aria-hidden="true"
+            />
+            <span className="sr-only">Waiting for you</span>
+          </>
+        )}
+        <span
+          className="absolute -bottom-1 -right-1 rounded-sm border border-sidebar-border bg-sidebar px-0.5 text-[8px] font-medium leading-3 text-muted-foreground shadow-xs"
+          aria-hidden="true"
+        >
+          {aiSessionsShortcut}
+        </span>
       </Button>
 
       <Button

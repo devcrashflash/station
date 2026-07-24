@@ -41,6 +41,7 @@ const APP_DATABASE_MIGRATION_FILENAME: &str = "default.sqlite.migrating";
 const LEGACY_APP_IDENTIFIER: &str = "com.devcrashflash.aistudio";
 const LEGACY_DATABASE_FILENAME: &str = "studio.sqlite";
 const BROWSER_BUNDLE_ID_SETTING_KEY: &str = "browser_bundle_id";
+const AI_SESSION_SETTINGS_KEY: &str = "ai_session_settings";
 const DEFAULT_QUICK_CAPTURE_SHORTCUT: &str = "CommandOrControl+Shift+Space";
 const QUICK_CAPTURE_ENABLED_SETTING_KEY: &str = "quick_capture_enabled";
 const QUICK_CAPTURE_SHORTCUT_SETTING_KEY: &str = "quick_capture_shortcut";
@@ -1074,6 +1075,59 @@ struct BrowserSettingsInput {
     browser_bundle_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct AiSessionSettings {
+    codex_cli: bool,
+    codex_desktop: bool,
+    claude_cli: bool,
+    claude_desktop: bool,
+    #[serde(
+        default = "default_ai_session_foreground_refresh_interval",
+        alias = "refreshIntervalSeconds"
+    )]
+    foreground_refresh_interval_seconds: u64,
+    #[serde(default = "default_ai_session_background_refresh_interval")]
+    background_refresh_interval_seconds: u64,
+}
+
+fn default_ai_session_foreground_refresh_interval() -> u64 {
+    30
+}
+
+fn default_ai_session_background_refresh_interval() -> u64 {
+    60
+}
+
+fn normalize_ai_session_foreground_refresh_interval(value: u64) -> u64 {
+    if matches!(value, 0 | 5 | 15 | 30 | 60 | 300) {
+        value
+    } else {
+        default_ai_session_foreground_refresh_interval()
+    }
+}
+
+fn normalize_ai_session_background_refresh_interval(value: u64) -> u64 {
+    if matches!(value, 5 | 15 | 30 | 60 | 300) {
+        value
+    } else {
+        default_ai_session_background_refresh_interval()
+    }
+}
+
+impl Default for AiSessionSettings {
+    fn default() -> Self {
+        Self {
+            codex_cli: true,
+            codex_desktop: true,
+            claude_cli: true,
+            claude_desktop: true,
+            foreground_refresh_interval_seconds: default_ai_session_foreground_refresh_interval(),
+            background_refresh_interval_seconds: default_ai_session_background_refresh_interval(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ResourceInput {
@@ -1339,6 +1393,8 @@ pub fn run() {
             save_quick_capture_settings,
             hide_quick_capture,
             ai_sessions::list_ai_sessions,
+            ai_sessions::archive_ai_session,
+            ai_sessions::restore_ai_session,
             ai_sessions::open_ai_session_desktop,
             terminal_tabs::list_workspace_tabs,
             terminal_tabs::list_terminal_fonts,
@@ -1416,6 +1472,8 @@ pub fn run() {
             save_ai_prompt,
             delete_ai_prompt,
             open_ai_prompt_thread,
+            list_ai_session_settings,
+            save_ai_session_settings,
             list_browser_settings,
             save_browser_settings,
             test_connection,
@@ -1783,6 +1841,7 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
         ",
     )?;
     calendar::init_database(db)?;
+    ai_sessions::init_database(db)?;
     migrate_ai_agents_to_prompts(db)?;
     add_column_if_missing(db, "ai_prompts", "icon", "TEXT NOT NULL DEFAULT 'sparkles'")?;
     add_column_if_missing(db, "projects", "color", "TEXT NOT NULL DEFAULT '#2563eb'")?;
@@ -2050,6 +2109,52 @@ fn set_app_setting(db: &SqliteConnection, key: &str, value: Option<&str>) -> rus
         db.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
     }
     Ok(())
+}
+
+fn load_ai_session_settings(db: &SqliteConnection) -> Result<AiSessionSettings, String> {
+    let Some(value) = get_app_setting(db, AI_SESSION_SETTINGS_KEY).map_err(db_error)? else {
+        return Ok(AiSessionSettings::default());
+    };
+    match serde_json::from_str::<AiSessionSettings>(&value) {
+        Ok(mut settings) => {
+            settings.foreground_refresh_interval_seconds =
+                normalize_ai_session_foreground_refresh_interval(
+                    settings.foreground_refresh_interval_seconds,
+                );
+            settings.background_refresh_interval_seconds =
+                normalize_ai_session_background_refresh_interval(
+                    settings.background_refresh_interval_seconds,
+                );
+            Ok(settings)
+        }
+        Err(_) => {
+            set_app_setting(db, AI_SESSION_SETTINGS_KEY, None).map_err(db_error)?;
+            Ok(AiSessionSettings::default())
+        }
+    }
+}
+
+#[tauri::command]
+fn list_ai_session_settings(
+    state: tauri::State<'_, AppState>,
+) -> Result<AiSessionSettings, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    load_ai_session_settings(&db)
+}
+
+#[tauri::command]
+fn save_ai_session_settings(
+    state: tauri::State<'_, AppState>,
+    mut input: AiSessionSettings,
+) -> Result<AiSessionSettings, String> {
+    input.foreground_refresh_interval_seconds =
+        normalize_ai_session_foreground_refresh_interval(input.foreground_refresh_interval_seconds);
+    input.background_refresh_interval_seconds =
+        normalize_ai_session_background_refresh_interval(input.background_refresh_interval_seconds);
+    let value = serde_json::to_string(&input).map_err(db_error)?;
+    let db = state.db.lock().map_err(db_error)?;
+    set_app_setting(&db, AI_SESSION_SETTINGS_KEY, Some(&value)).map_err(db_error)?;
+    Ok(input)
 }
 
 #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
@@ -14760,6 +14865,87 @@ mod tests {
 
         assert_eq!(connection.provider, "gitlab");
         assert_eq!(connection.token, "secret");
+    }
+
+    #[test]
+    fn ai_session_settings_default_persist_and_recover_from_malformed_values() {
+        let db = memory_db();
+        assert_eq!(
+            load_ai_session_settings(&db).expect("load defaults"),
+            AiSessionSettings::default()
+        );
+
+        set_app_setting(
+            &db,
+            AI_SESSION_SETTINGS_KEY,
+            Some(
+                r#"{"codexCli":false,"codexDesktop":true,"claudeCli":false,"claudeDesktop":true}"#,
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            load_ai_session_settings(&db).expect("load legacy settings"),
+            AiSessionSettings {
+                codex_cli: false,
+                codex_desktop: true,
+                claude_cli: false,
+                claude_desktop: true,
+                foreground_refresh_interval_seconds: 30,
+                background_refresh_interval_seconds: 60,
+            }
+        );
+
+        set_app_setting(
+            &db,
+            AI_SESSION_SETTINGS_KEY,
+            Some(
+                r#"{"codexCli":true,"codexDesktop":true,"claudeCli":true,"claudeDesktop":true,"refreshIntervalSeconds":999}"#,
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            load_ai_session_settings(&db)
+                .expect("normalize refresh interval")
+                .foreground_refresh_interval_seconds,
+            30
+        );
+
+        set_app_setting(
+            &db,
+            AI_SESSION_SETTINGS_KEY,
+            Some(
+                r#"{"codexCli":true,"codexDesktop":true,"claudeCli":true,"claudeDesktop":true,"refreshIntervalSeconds":5}"#,
+            ),
+        )
+        .unwrap();
+        let migrated = load_ai_session_settings(&db).expect("migrate legacy refresh interval");
+        assert_eq!(migrated.foreground_refresh_interval_seconds, 5);
+        assert_eq!(migrated.background_refresh_interval_seconds, 60);
+
+        let settings = AiSessionSettings {
+            codex_cli: false,
+            codex_desktop: true,
+            claude_cli: true,
+            claude_desktop: false,
+            foreground_refresh_interval_seconds: 60,
+            background_refresh_interval_seconds: 300,
+        };
+        let value = serde_json::to_string(&settings).unwrap();
+        set_app_setting(&db, AI_SESSION_SETTINGS_KEY, Some(&value)).unwrap();
+        assert_eq!(
+            load_ai_session_settings(&db).expect("load stored settings"),
+            settings
+        );
+
+        set_app_setting(&db, AI_SESSION_SETTINGS_KEY, Some("{broken")).unwrap();
+        assert_eq!(
+            load_ai_session_settings(&db).expect("recover defaults"),
+            AiSessionSettings::default()
+        );
+        assert_eq!(
+            get_app_setting(&db, AI_SESSION_SETTINGS_KEY).expect("read recovered setting"),
+            None
+        );
     }
 
     #[test]

@@ -808,6 +808,9 @@ pub fn setup_workspace_window(app: &mut tauri::App) -> Result<(), Box<dyn std::e
             if let Err(error) = layout_webviews(&resize_window) {
                 eprintln!("Could not resize workspace webviews: {error}");
             }
+        } else if let WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            cleanup_app.exit(0);
         } else if matches!(event, WindowEvent::Destroyed) {
             let state = cleanup_app.state::<TerminalTabsState>();
             if let Ok(mut runtime) = state.runtime.lock() {

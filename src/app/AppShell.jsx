@@ -20,6 +20,7 @@ export function AppShell({
   breadcrumbPage,
   isActivitySelected,
   isAgentsSelected,
+  hasWaitingAiSession,
   notice,
   noticeKey,
   onClearNotice,
@@ -59,6 +60,7 @@ export function AppShell({
           selectedProjectId={selectedProjectId}
           isActivitySelected={isActivitySelected}
           isAgentsSelected={isAgentsSelected}
+          hasWaitingAiSession={hasWaitingAiSession}
           onSelectProject={onSelectProject}
           onShowInbox={onShowInbox}
           onAddProject={onAddProject}
@@ -101,11 +103,11 @@ export function AppShell({
                 type="button"
                 variant="outline"
                 onClick={onShowSmartInbox}
-                title={`Open smart inbox with ${shortcutKey} K`}
+                title={`Open smart inbox with ${shortcutKey} I`}
               >
                 <Sparkles />
                 Smart inbox
-                <Kbd>{shortcutKey} K</Kbd>
+                <Kbd>{shortcutKey} I</Kbd>
               </Button>
             </div>
           </header>

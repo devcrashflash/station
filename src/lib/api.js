@@ -3,6 +3,12 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { formatLocalDate, localDayBounds, sortActivities } from "./activity.js";
 import { EMAIL_DESKTOP_REQUIRED_MESSAGE, OCR_DESKTOP_REQUIRED_MESSAGE } from "./ocr.js";
 import { AI_PROMPT_ICON_IDS } from "./aiPromptIcons.js";
+import {
+  aiSessionCanArchive,
+  DEFAULT_AI_SESSION_SETTINGS,
+  normalizeAiSessionSettings,
+  sortArchivedAiSessions,
+} from "./aiSessions.js";
 import { normalizeExternalLabelColor } from "./externalLabels.js";
 import { normalizeProjectColor } from "./projectAvatar.js";
 import { parseSmartInput } from "./smartInputParser.js";
@@ -40,6 +46,8 @@ const defaultState = {
     detectedBrowserBundleId: null,
     browserBundleId: null,
   },
+  aiSessionSettings: { ...DEFAULT_AI_SESSION_SETTINGS },
+  aiSessionArchives: [],
   terminalSettings: {
     newTabDirectory: null,
     newPaneDirectory: null,
@@ -85,7 +93,16 @@ export const api = {
   listTerminalFonts: () => call("list_terminal_fonts", {}, local.listTerminalFonts),
   saveTerminalSettings: (payload) =>
     call("save_terminal_settings", { input: payload }, () => local.saveTerminalSettings(payload)),
-  listAiSessions: ({ since }) => call("list_ai_sessions", { since }, () => ({ sessions: [], warnings: [] })),
+  listAiSessionSettings: () =>
+    call("list_ai_session_settings", {}, local.listAiSessionSettings),
+  saveAiSessionSettings: (payload) =>
+    call("save_ai_session_settings", { input: payload }, () => local.saveAiSessionSettings(payload)),
+  listAiSessions: ({ since, settings }) =>
+    call("list_ai_sessions", { since, settings: normalizeAiSessionSettings(settings) }, local.listAiSessions),
+  archiveAiSession: ({ session }) =>
+    call("archive_ai_session", { session }, () => local.archiveAiSession(session)),
+  restoreAiSession: ({ provider, sessionId }) =>
+    call("restore_ai_session", { provider, sessionId }, () => local.restoreAiSession(provider, sessionId)),
   openAiSessionDesktop: ({ provider, sessionId }) =>
     call("open_ai_session_desktop", { provider, sessionId }, () => {
       throw new Error("Opening AI sessions requires the desktop app.");
@@ -287,6 +304,8 @@ function freshDefaultState() {
     calendarEvents: [],
     calendarSyncRuns: [],
     browserSettings: { ...defaultState.browserSettings },
+    aiSessionSettings: { ...defaultState.aiSessionSettings },
+    aiSessionArchives: [],
     terminalSettings: { ...defaultState.terminalSettings },
   };
 }
@@ -729,6 +748,75 @@ function localCalendarResult(state, { date, startAt, endAt }) {
 const local = {
   listTerminalFonts() {
     return [];
+  },
+
+  listAiSessionSettings() {
+    return normalizeAiSessionSettings(readState().aiSessionSettings);
+  },
+
+  saveAiSessionSettings(input) {
+    const state = readState();
+    state.aiSessionSettings = normalizeAiSessionSettings(input);
+    writeState(state);
+    return state.aiSessionSettings;
+  },
+
+  listAiSessions() {
+    const archivedSessions = (readState().aiSessionArchives || []).map((session) => ({
+      ...session,
+      archiveScope: session.archiveScope === "provider" ? "provider" : "station",
+    }));
+    return {
+      sessions: [],
+      archivedSessions: sortArchivedAiSessions(archivedSessions),
+      warnings: [],
+    };
+  },
+
+  archiveAiSession(session) {
+    const validTreeIds = (candidate) => (
+      /^[A-Za-z0-9_-]{1,128}$/.test(candidate?.id || "")
+      && (candidate.children || []).every(validTreeIds)
+    );
+    if (!["codex", "claude"].includes(session?.provider)) {
+      throw new Error("Unsupported AI session provider.");
+    }
+    if (!validTreeIds(session)) {
+      throw new Error("Invalid AI session identifier.");
+    }
+    if (session?.parentId || session?.kind !== "session") {
+      throw new Error("Only top-level AI sessions can be archived.");
+    }
+    if (!aiSessionCanArchive(session)) {
+      throw new Error("Running sessions and sessions waiting for input cannot be archived.");
+    }
+    const state = readState();
+    const archived = JSON.parse(JSON.stringify({
+      ...session,
+      archivedAt: now(),
+      archiveScope: "station",
+    }));
+    state.aiSessionArchives = (state.aiSessionArchives || []).filter((candidate) => (
+      candidate.provider !== archived.provider || candidate.id !== archived.id
+    ));
+    state.aiSessionArchives.push(archived);
+    writeState(state);
+    return archived;
+  },
+
+  restoreAiSession(provider, sessionId) {
+    if (!["codex", "claude"].includes(provider)) {
+      throw new Error("Unsupported AI session provider.");
+    }
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(sessionId || "")) {
+      throw new Error("Invalid AI session identifier.");
+    }
+    const state = readState();
+    state.aiSessionArchives = (state.aiSessionArchives || []).filter((candidate) => (
+      candidate.provider !== provider || candidate.id !== sessionId
+    ));
+    writeState(state);
+    return null;
   },
 
   listTerminalSettings() {

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { LoaderCircle } from "lucide-react";
@@ -12,9 +13,17 @@ import { ProjectDialog } from "@/features/projects/ProjectDialog";
 import { ProjectPickerDialog } from "@/features/projects/ProjectPickerDialog";
 import { SettingsDialog } from "@/features/settings/SettingsDialog";
 import { useCalendarData } from "@/features/calendar/useCalendarData";
+import { useAiSessionMonitor } from "@/features/ai-sessions/useAiSessionMonitor";
 import { TodoEditDialog } from "@/features/smart-input/TodoEditDialog";
 import { api, toParsedPayload } from "@/lib/api";
+import {
+  AI_SESSIONS_DESTINATION,
+  APP_NAVIGATION_REQUEST_EVENT,
+  SMART_INBOX_DESTINATION,
+  appNavigationDestination,
+} from "@/lib/appNavigation";
 import { formatLocalDate } from "@/lib/activity";
+import { DEFAULT_AI_SESSION_SETTINGS } from "@/lib/aiSessions";
 import {
   EMAIL_DESKTOP_REQUIRED_MESSAGE,
   isDesktopApp,
@@ -30,6 +39,7 @@ import { quickCaptureTitle } from "@/lib/quickCapture";
 import { parseSmartInput } from "@/lib/smartInputParser";
 import { DEFAULT_TERMINAL_SHORTCUTS } from "@/lib/terminalShortcuts";
 import { useTheme } from "@/lib/theme";
+import { isWorkspaceShortcut, workspaceTabsApi } from "@/lib/workspaceTabs";
 import { InboxView } from "@/views/inbox/InboxView";
 import { ActivityView, useActivityData } from "@/views/activity/ActivityView";
 import { ProjectWorkspaceView } from "@/views/projects/ProjectWorkspaceView";
@@ -133,6 +143,10 @@ function App() {
     detectedBrowserBundleId: null,
     browserBundleId: null,
   });
+  const [aiSessionSettings, setAiSessionSettings] = useState({
+    ...DEFAULT_AI_SESSION_SETTINGS,
+  });
+  const [aiSessionSettingsReady, setAiSessionSettingsReady] = useState(false);
   const [terminalSettings, setTerminalSettings] = useState({
     newTabDirectory: null,
     newPaneDirectory: null,
@@ -201,6 +215,12 @@ function App() {
     () => projects.find((project) => project.id === selectedTask?.projectId) || null,
     [projects, selectedTask],
   );
+  const aiSessionMonitor = useAiSessionMonitor({
+    settings: aiSessionSettings,
+    settingsReady: aiSessionSettingsReady,
+    foreground: showAiAgents,
+    onNotice: showNotice,
+  });
   const activityData = useActivityData({
     date: activityDate,
     enabled: showActivity,
@@ -256,13 +276,53 @@ function App() {
   }, [showNotice]);
 
   useEffect(() => {
+    if (!isDesktopApp()) return undefined;
+    let active = true;
+    let unlisten = null;
+    listen(APP_NAVIGATION_REQUEST_EVENT, async ({ payload }) => {
+      if (!active) return;
+      const destination = appNavigationDestination(payload);
+      if (!destination) return;
+      try {
+        flushSync(() => {
+          setSelectedTask(null);
+          setSelectedProjectId(null);
+          if (destination === AI_SESSIONS_DESTINATION) {
+            setUtilityPage("agents");
+          } else if (destination === SMART_INBOX_DESTINATION) {
+            setUtilityPage(null);
+            setSmartInboxFocusRequestKey((current) => current + 1);
+          }
+        });
+        await workspaceTabsApi.activate("main");
+      } catch (error) {
+        if (active) showNotice(error?.message || String(error));
+      }
+    }).then((cleanup) => {
+      if (active) unlisten = cleanup;
+      else cleanup();
+    }).catch((error) => {
+      if (active) showNotice(error?.message || String(error));
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [showNotice]);
+
+  useEffect(() => {
     function handleKeyDown(event) {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+      if (isWorkspaceShortcut(event, "i")) {
         event.preventDefault();
         setUtilityPage(null);
         setSelectedTask(null);
         setSelectedProjectId(null);
         setSmartInboxFocusRequestKey((current) => current + 1);
+      } else if (isWorkspaceShortcut(event, "b")) {
+        event.preventDefault();
+        setSelectedTask(null);
+        setSelectedProjectId(null);
+        setUtilityPage("agents");
       }
     }
 
@@ -284,13 +344,14 @@ function App() {
   }, [selectedProjectId]);
 
   async function refreshShell() {
-    const [projectList, connectionList, calendarAccountList, aiPromptList, directoryList, browserSettingsResult, terminalSettingsResult, terminalFontList, quickCaptureSettingsResult, recentFileList, todoList] = await Promise.all([
+    const [projectList, connectionList, calendarAccountList, aiPromptList, directoryList, browserSettingsResult, aiSessionSettingsResult, terminalSettingsResult, terminalFontList, quickCaptureSettingsResult, recentFileList, todoList] = await Promise.all([
       api.listProjects(),
       api.listConnections(),
       api.listCalendarAccounts(),
       api.listAiPrompts(),
       api.listDirectories(),
       api.listBrowserSettings(),
+      api.listAiSessionSettings(),
       api.listTerminalSettings(),
       api.listTerminalFonts(),
       api.quickCaptureSettings(),
@@ -303,6 +364,8 @@ function App() {
     setAiPrompts(aiPromptList);
     setDirectories(directoryList);
     setBrowserSettings(browserSettingsResult);
+    setAiSessionSettings(aiSessionSettingsResult);
+    setAiSessionSettingsReady(true);
     setTerminalSettings(terminalSettingsResult);
     setTerminalFonts(terminalFontList);
     setQuickCaptureSettings(quickCaptureSettingsResult);
@@ -629,6 +692,7 @@ function App() {
       breadcrumbPage={showAiAgents ? "AI Agents" : showActivity ? "Activity" : undefined}
       isActivitySelected={showActivity}
       isAgentsSelected={showAiAgents}
+      hasWaitingAiSession={aiSessionMonitor.hasWaitingAiSession}
       notice={notice}
       noticeKey={noticeKey}
       onClearNotice={clearNotice}
@@ -739,7 +803,13 @@ function App() {
           }}
         />
       ) : showAiAgents ? (
-        <AiAgentsView onNotice={showNotice} />
+        <AiAgentsView
+          settings={aiSessionSettings}
+          result={aiSessionMonitor.result}
+          loading={aiSessionMonitor.loading}
+          onRefresh={aiSessionMonitor.refresh}
+          onNotice={showNotice}
+        />
       ) : showActivity ? (
         <ActivityView
           date={activityDate}
@@ -957,6 +1027,7 @@ function App() {
           aiPrompts={aiPrompts}
           directories={directories}
           browserSettings={browserSettings}
+          aiSessionSettings={aiSessionSettings}
           terminalSettings={terminalSettings}
           terminalFonts={terminalFonts}
           quickCaptureSettings={quickCaptureSettings}
@@ -1031,6 +1102,12 @@ function App() {
             const nextBrowserSettings = await api.saveBrowserSettings(payload);
             setBrowserSettings(nextBrowserSettings);
             showNotice("Browser settings saved.");
+          }}
+          onSaveAiSessionSettings={async (payload) => {
+            const nextAiSessionSettings = await api.saveAiSessionSettings(payload);
+            setAiSessionSettings(nextAiSessionSettings);
+            showNotice("AI session settings saved.");
+            return nextAiSessionSettings;
           }}
           onSaveTerminalSettings={async (payload) => {
             const nextTerminalSettings = await api.saveTerminalSettings(payload);

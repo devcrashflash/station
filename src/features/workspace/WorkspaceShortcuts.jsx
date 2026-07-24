@@ -1,6 +1,11 @@
 import { useEffect, useRef } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 
+import {
+  AI_SESSIONS_DESTINATION,
+  APP_NAVIGATION_REQUEST_EVENT,
+  SMART_INBOX_DESTINATION,
+} from "@/lib/appNavigation";
 import {
   isWorkspaceShortcut,
   terminalInputFromKeyEvent,
@@ -87,6 +92,20 @@ export function WorkspaceShortcuts() {
         }
       }
       if (event.repeat) return;
+      if (isWorkspaceShortcut(event, "i")) {
+        consume(event);
+        await emit(APP_NAVIGATION_REQUEST_EVENT, {
+          destination: SMART_INBOX_DESTINATION,
+        });
+        return;
+      }
+      if (isWorkspaceShortcut(event, "b")) {
+        consume(event);
+        await emit(APP_NAVIGATION_REQUEST_EVENT, {
+          destination: AI_SESSIONS_DESTINATION,
+        });
+        return;
+      }
       const splitAxis = matchesTerminalShortcut(event, shortcutsRef.current.splitRows)
         ? "rows"
         : matchesTerminalShortcut(event, shortcutsRef.current.splitColumns) ? "columns" : null;

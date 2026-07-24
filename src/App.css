@@ -234,6 +234,14 @@ body.terminal-window #root {
   white-space: nowrap;
 }
 
+.workspace-tab-waiting-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--color-orange-500);
+}
+
 .workspace-tab-shortcut {
   flex: none;
   color: var(--muted-foreground);
