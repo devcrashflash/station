@@ -185,6 +185,7 @@ function App() {
   const [isEmailReading, setIsEmailReading] = useState(false);
   const [showProjectForm, setShowProjectForm] = useState(false);
   const [smartInboxFocusRequestKey, setSmartInboxFocusRequestKey] = useState(0);
+  const [aiSessionsActiveViewRequestKey, setAiSessionsActiveViewRequestKey] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] = useState("accounts");
   const [utilityPage, setUtilityPage] = useState(null);
@@ -298,6 +299,7 @@ function App() {
           setSelectedProjectId(null);
           if (destination === AI_SESSIONS_DESTINATION) {
             setUtilityPage("agents");
+            setAiSessionsActiveViewRequestKey((current) => current + 1);
           } else if (destination === SMART_INBOX_DESTINATION) {
             setUtilityPage(null);
             setSmartInboxFocusRequestKey((current) => current + 1);
@@ -332,6 +334,7 @@ function App() {
         setSelectedTask(null);
         setSelectedProjectId(null);
         setUtilityPage("agents");
+        setAiSessionsActiveViewRequestKey((current) => current + 1);
       }
     }
 
@@ -816,6 +819,7 @@ function App() {
           settings={aiSessionSettings}
           result={aiSessionMonitor.result}
           loading={aiSessionMonitor.loading}
+          activeViewRequestKey={aiSessionsActiveViewRequestKey}
           onRefresh={aiSessionMonitor.refresh}
           onNotice={showNotice}
         />

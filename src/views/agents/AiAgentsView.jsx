@@ -83,7 +83,14 @@ async function openSessionInTerminal(session) {
   }
 }
 
-export function AiAgentsView({ settings, result, loading, onRefresh, onNotice }) {
+export function AiAgentsView({
+  settings,
+  result,
+  loading,
+  activeViewRequestKey = 0,
+  onRefresh,
+  onNotice,
+}) {
   const [hours, setHours] = useState(24);
   const [sessionView, setSessionView] = useState("active");
   const [sourceFilters, setSourceFilters] = useState(() => aiSessionViewFilters(settings));
@@ -95,6 +102,10 @@ export function AiAgentsView({ settings, result, loading, onRefresh, onNotice })
   useEffect(() => {
     setSourceFilters(aiSessionViewFilters(settings));
   }, [settings]);
+
+  useEffect(() => {
+    if (activeViewRequestKey > 0) setSessionView("active");
+  }, [activeViewRequestKey]);
 
   useEffect(() => {
     const interval = window.setInterval(() => setDisplayNow(Date.now()), 60_000);
