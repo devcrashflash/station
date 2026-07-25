@@ -7,7 +7,7 @@ import { SelectControl } from "@/components/common/SelectControl";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Field, FieldLabel } from "@/components/ui/field";
+import { Field, FieldLabel, FieldLegend, FieldSet } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { Textarea } from "@/components/ui/textarea";
@@ -78,7 +78,7 @@ const TRELLO_BASE_URL = "https://api.trello.com";
 const settingsSections = [
   { id: "accounts", label: "Accounts", description: "Connected services", icon: UserRound },
   { id: "ai-prompts", label: "AI Prompts", description: "Reusable AI instructions", icon: Bot },
-  { id: "ai-sessions", label: "AI Sessions", description: "Visible session sources", icon: Bot },
+  { id: "ai-sessions", label: "AI Sessions", description: "Runners and refresh rate", icon: Bot },
   { id: "directories", label: "Directories", description: "Local source folders", icon: FolderOpen },
   { id: "quick-capture", label: "Quick Capture", description: "Global capture overlay", icon: Keyboard },
   { id: "appearance", label: "Appearance", description: "Color theme", icon: Palette },
@@ -456,97 +456,105 @@ function AiSessionSettingsTab({ settings, onSave }) {
 
   return (
     <div className="grid gap-5">
-      <div className="grid gap-1">
-        <p className="text-sm font-medium">Visible session sources</p>
+      <FieldSet className="gap-4 rounded-lg border p-4">
+        <FieldLegend className="mb-0 px-1">Local AI Runners</FieldLegend>
         <p className="text-xs text-muted-foreground">
-          Choose which locally discovered sessions appear in the AI Sessions view.
+          Choose which locally discovered AI sessions appear in the AI Sessions view.
           Older sessions without source information remain visible when either source for their provider is enabled.
         </p>
-      </div>
 
-      <div className="grid gap-3">
-        {aiSessionSourceGroups.map(({ provider, options }) => (
-          <div key={provider} className="grid gap-3 rounded-lg border bg-muted/20 p-4">
-            <p className="text-sm font-medium">{aiSessionProviderLabel(provider)}</p>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {options.map((option) => (
-                <label
-                  key={option.key}
-                  className={cn(
-                    "flex items-start gap-3 rounded-md border bg-background/60 p-3 transition-colors",
-                    isSaving
-                      ? "cursor-not-allowed opacity-60"
-                      : "cursor-pointer hover:bg-muted/35",
-                  )}
-                >
-                  <Checkbox
-                    checked={candidate[option.key]}
-                    disabled={isSaving}
-                    aria-label={`${aiSessionProviderLabel(provider)} ${option.origin === "cli" ? "CLI" : "Desktop"}`}
-                    onCheckedChange={(checked) => setCandidate((current) => ({
-                      ...current,
-                      [option.key]: checked === true,
-                    }))}
-                  />
-                  <span className="grid gap-1">
-                    <span className="text-sm font-medium">
-                      {option.origin === "cli" ? "CLI" : "Desktop"}
+        <div className="grid gap-3">
+          {aiSessionSourceGroups.map(({ provider, options }) => (
+            <div key={provider} className="grid gap-3 rounded-lg border bg-muted/20 p-4">
+              <p className="text-sm font-medium">{aiSessionProviderLabel(provider)}</p>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {options.map((option) => (
+                  <label
+                    key={option.key}
+                    className={cn(
+                      "flex items-start gap-3 rounded-md border bg-background/60 p-3 transition-colors",
+                      isSaving
+                        ? "cursor-not-allowed opacity-60"
+                        : "cursor-pointer hover:bg-muted/35",
+                    )}
+                  >
+                    <Checkbox
+                      checked={candidate[option.key]}
+                      disabled={isSaving}
+                      aria-label={`${aiSessionProviderLabel(provider)} ${option.origin === "cli" ? "CLI" : "Desktop"}`}
+                      onCheckedChange={(checked) => setCandidate((current) => ({
+                        ...current,
+                        [option.key]: checked === true,
+                      }))}
+                    />
+                    <span className="grid gap-1">
+                      <span className="text-sm font-medium">
+                        {option.origin === "cli" ? "CLI" : "Desktop"}
+                      </span>
+                      <span className="text-xs text-muted-foreground">{option.description}</span>
                     </span>
-                    <span className="text-xs text-muted-foreground">{option.description}</span>
-                  </span>
-                </label>
-              ))}
+                  </label>
+                ))}
+              </div>
             </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
 
-      <div className="grid gap-4 sm:grid-cols-2">
-        <Field>
-          <FieldLabel>Foreground refresh</FieldLabel>
-          <SelectControl
-            value={String(candidate.foregroundRefreshIntervalSeconds)}
-            onValueChange={(value) => setCandidate((current) => ({
-              ...current,
-              foregroundRefreshIntervalSeconds: Number(value),
-            }))}
-            options={AI_SESSION_REFRESH_INTERVALS.map((option) => ({
-              ...option,
-              value: String(option.value),
-            }))}
-            triggerClassName="w-full"
-            disabled={isSaving}
-          />
-          <p className="text-xs text-muted-foreground">
-            Used while AI Agents is visible. Off continues at the background rate.
-          </p>
-        </Field>
-
-        <Field>
-          <FieldLabel>Background refresh</FieldLabel>
-          <SelectControl
-            value={String(candidate.backgroundRefreshIntervalSeconds)}
-            onValueChange={(value) => setCandidate((current) => ({
-              ...current,
-              backgroundRefreshIntervalSeconds: Number(value),
-            }))}
-            options={AI_SESSION_BACKGROUND_REFRESH_INTERVALS.map((option) => ({
-              ...option,
-              value: String(option.value),
-            }))}
-            triggerClassName="w-full"
-            disabled={isSaving}
-          />
-          <p className="text-xs text-muted-foreground">
-            Used everywhere else so waiting sessions can notify you.
-          </p>
-        </Field>
-      </div>
-
-      <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-xs text-muted-foreground">
-          You can disable every source to hide all AI sessions.
+          You can disable every local runner to hide all locally discovered AI sessions.
         </p>
+      </FieldSet>
+
+      <FieldSet className="gap-4 rounded-lg border p-4">
+        <FieldLegend className="mb-0 px-1">Refresh rate</FieldLegend>
+        <p className="text-xs text-muted-foreground">
+          Control how often Station checks AI runners for session updates.
+        </p>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field>
+            <FieldLabel>Foreground refresh</FieldLabel>
+            <SelectControl
+              value={String(candidate.foregroundRefreshIntervalSeconds)}
+              onValueChange={(value) => setCandidate((current) => ({
+                ...current,
+                foregroundRefreshIntervalSeconds: Number(value),
+              }))}
+              options={AI_SESSION_REFRESH_INTERVALS.map((option) => ({
+                ...option,
+                value: String(option.value),
+              }))}
+              triggerClassName="w-full"
+              disabled={isSaving}
+            />
+            <p className="text-xs text-muted-foreground">
+              Used while AI Agents is visible. Off continues at the background rate.
+            </p>
+          </Field>
+
+          <Field>
+            <FieldLabel>Background refresh</FieldLabel>
+            <SelectControl
+              value={String(candidate.backgroundRefreshIntervalSeconds)}
+              onValueChange={(value) => setCandidate((current) => ({
+                ...current,
+                backgroundRefreshIntervalSeconds: Number(value),
+              }))}
+              options={AI_SESSION_BACKGROUND_REFRESH_INTERVALS.map((option) => ({
+                ...option,
+                value: String(option.value),
+              }))}
+              triggerClassName="w-full"
+              disabled={isSaving}
+            />
+            <p className="text-xs text-muted-foreground">
+              Used everywhere else so waiting sessions can notify you.
+            </p>
+          </Field>
+        </div>
+      </FieldSet>
+
+      <div className="flex justify-end">
         <Button type="button" disabled={isSaving} onClick={save}>
           {isSaving && <LoaderCircle className="animate-spin" />}
           Save
@@ -642,19 +650,17 @@ function QuickCaptureSettingsTab({ settings, onSave }) {
 
   return (
     <div className="grid gap-5">
-      <div className="grid gap-1">
-        <p className="text-sm font-medium">Quick capture overlay</p>
+      <FieldSet className="gap-4 rounded-lg border p-4">
+        <FieldLegend className="mb-0 px-1">Quick Capture overlay</FieldLegend>
         <p className="text-xs text-muted-foreground">
           Open the capture overlay from any application while Station is running.
         </p>
-      </div>
 
-      {!supported ? (
-        <p className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
-          Quick Capture configuration requires the desktop app.
-        </p>
-      ) : (
-        <>
+        {!supported ? (
+          <p className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">
+            Quick Capture configuration requires the desktop app.
+          </p>
+        ) : (
           <label className="flex items-start gap-3 rounded-lg border bg-muted/20 p-4">
             <Checkbox
               checked={settings.enabled}
@@ -668,8 +674,17 @@ function QuickCaptureSettingsTab({ settings, onSave }) {
               </span>
             </span>
           </label>
+        )}
+      </FieldSet>
 
-          <div className="grid gap-3 rounded-lg border p-4">
+      {supported && (
+        <>
+          <FieldSet className="gap-4 rounded-lg border p-4">
+            <FieldLegend className="mb-0 px-1">Global shortcut</FieldLegend>
+            <p className="text-xs text-muted-foreground">
+              Include Command, Control, Option, or Alt with another key. Shift can be added as an extra modifier.
+            </p>
+
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="grid gap-1">
                 <span className="text-xs text-muted-foreground">Current shortcut</span>
@@ -701,11 +716,8 @@ function QuickCaptureSettingsTab({ settings, onSave }) {
               <Keyboard />
               {isRecording ? "Press shortcut…" : "Record shortcut"}
             </Button>
-          </div>
+          </FieldSet>
 
-          <p className="text-xs text-muted-foreground">
-            Include Command, Control, Option, or Alt with another key. Shift can be added as an extra modifier.
-          </p>
           {notice && (
             <p className={cn("text-sm text-muted-foreground", noticeIsError && "text-destructive")} role="status">
               {notice}
@@ -1093,43 +1105,44 @@ function SettingsMenuButton({ section, active, onClick }) {
 function DirectoriesTab({ directories, isChoosing, notice, onChooseDirectory, onDeleteDirectory }) {
   return (
     <div className="grid gap-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <p className="text-sm font-medium">Configured directories</p>
+      <FieldSet className="gap-4 rounded-lg border p-4">
+        <FieldLegend className="mb-0 px-1">Configured directories</FieldLegend>
+
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-xs text-muted-foreground">{directories.length} configured</p>
+          <Button type="button" variant="outline" disabled={isChoosing} onClick={onChooseDirectory}>
+            <FolderOpen className="size-4" />
+            {isChoosing ? "Choosing..." : "Choose directory"}
+          </Button>
         </div>
-        <Button type="button" variant="outline" disabled={isChoosing} onClick={onChooseDirectory}>
-          <FolderOpen className="size-4" />
-          {isChoosing ? "Choosing..." : "Choose directory"}
-        </Button>
-      </div>
+
+        {directories.length === 0 ? (
+          <EmptyState text="No directories configured." />
+        ) : (
+          <div className="flex flex-col gap-2">
+            {directories.map((directory) => (
+              <div key={directory.id} className="flex min-w-0 items-center gap-2 rounded-md border p-3">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium">{directory.name}</p>
+                  <p className="truncate text-xs text-blue-700 dark:text-blue-300">{directory.path}</p>
+                </div>
+                <Button
+                  className="shrink-0"
+                  size="icon-xs"
+                  variant="ghost"
+                  type="button"
+                  title="Remove directory"
+                  onClick={() => onDeleteDirectory(directory.id)}
+                >
+                  <Trash2 />
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </FieldSet>
 
       {notice && <p className="text-sm text-muted-foreground">{notice}</p>}
-
-      {directories.length === 0 ? (
-        <EmptyState text="No directories configured." />
-      ) : (
-        <div className="flex flex-col gap-2">
-          {directories.map((directory) => (
-            <div key={directory.id} className="flex min-w-0 items-center gap-2 rounded-md border p-3">
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium">{directory.name}</p>
-                <p className="truncate text-xs text-blue-700 dark:text-blue-300">{directory.path}</p>
-              </div>
-              <Button
-                className="shrink-0"
-                size="icon-xs"
-                variant="ghost"
-                type="button"
-                title="Remove directory"
-                onClick={() => onDeleteDirectory(directory.id)}
-              >
-                <Trash2 />
-              </Button>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
@@ -1146,23 +1159,23 @@ function BrowserTab({
 
   return (
     <div className="grid gap-4">
-      <div className="grid gap-1">
-        <p className="text-sm font-medium">Browser for new tabs</p>
+      <FieldSet className="gap-4 rounded-lg border p-4">
+        <FieldLegend className="mb-0 px-1">Browser for new tabs</FieldLegend>
         <p className="text-xs text-muted-foreground">Detected default: {detectedBrowserBundleId || "Unavailable"}</p>
         <p className="text-xs text-muted-foreground">Effective browser: {effectiveBrowser}</p>
-      </div>
 
-      <Field>
-        <FieldLabel>Browser bundle id override</FieldLabel>
-        <Input
-          value={browserBundleId}
-          placeholder={detectedBrowserBundleId || "org.mozilla.firefox"}
-          onChange={(event) => onBrowserBundleIdChange(event.target.value)}
-        />
-        <p className="text-xs text-muted-foreground">
-          Leave empty to use the macOS default browser detected from http/https handlers.
-        </p>
-      </Field>
+        <Field>
+          <FieldLabel>Browser bundle id override</FieldLabel>
+          <Input
+            value={browserBundleId}
+            placeholder={detectedBrowserBundleId || "org.mozilla.firefox"}
+            onChange={(event) => onBrowserBundleIdChange(event.target.value)}
+          />
+          <p className="text-xs text-muted-foreground">
+            Leave empty to use the macOS default browser detected from http/https handlers.
+          </p>
+        </Field>
+      </FieldSet>
 
       {notice && <p className="text-sm text-muted-foreground">{notice}</p>}
 
@@ -1349,150 +1362,157 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
 
   return (
     <div className="grid gap-5">
-      <div className="grid gap-1">
-        <p className="text-sm font-medium">Terminal typography</p>
+      <FieldSet className="gap-4 rounded-lg border p-4">
+        <FieldLegend className="mb-0 px-1">Typography</FieldLegend>
         <p className="text-xs text-muted-foreground">Saved changes apply to all open terminal panes.</p>
-      </div>
 
-      <div className="grid gap-4 sm:grid-cols-3">
-        <Field>
-          <FieldLabel>Font family</FieldLabel>
-          <SelectControl
-            value={selectedFont?.family || ""}
-            placeholder="Select a local font"
-            disabled={!fonts.length}
-            onValueChange={chooseFontFamily}
-            options={terminalFontOptions(fonts)}
-          />
-          <p className="text-xs text-muted-foreground">
-            {fonts.length ? "Installed monospaced fonts only." : "Local font discovery requires the desktop app."}
-          </p>
-        </Field>
-        <Field>
-          <FieldLabel>Font style</FieldLabel>
-          <SelectControl
-            value={selectedStyle?.id || ""}
-            placeholder="Select a style"
-            disabled={!selectedFont}
-            onValueChange={chooseFontStyle}
-            options={terminalFontStyleOptions(selectedFont)}
-          />
-          <p className="text-xs text-muted-foreground">Only styles installed for this family.</p>
-        </Field>
-        <Field>
-          <FieldLabel>Font size</FieldLabel>
-          <Input type="number" min="8" max="32" step="1" value={fontSize} onChange={(event) => setFontSize(event.target.value)} />
-          <p className="text-xs text-muted-foreground">8–32 pixels</p>
-        </Field>
-      </div>
+        <div className="grid gap-4 sm:grid-cols-3">
+          <Field>
+            <FieldLabel>Font family</FieldLabel>
+            <SelectControl
+              value={selectedFont?.family || ""}
+              placeholder="Select a local font"
+              disabled={!fonts.length}
+              onValueChange={chooseFontFamily}
+              options={terminalFontOptions(fonts)}
+            />
+            <p className="text-xs text-muted-foreground">
+              {fonts.length ? "Installed monospaced fonts only." : "Local font discovery requires the desktop app."}
+            </p>
+          </Field>
+          <Field>
+            <FieldLabel>Font style</FieldLabel>
+            <SelectControl
+              value={selectedStyle?.id || ""}
+              placeholder="Select a style"
+              disabled={!selectedFont}
+              onValueChange={chooseFontStyle}
+              options={terminalFontStyleOptions(selectedFont)}
+            />
+            <p className="text-xs text-muted-foreground">Only styles installed for this family.</p>
+          </Field>
+          <Field>
+            <FieldLabel>Font size</FieldLabel>
+            <Input type="number" min="8" max="32" step="1" value={fontSize} onChange={(event) => setFontSize(event.target.value)} />
+            <p className="text-xs text-muted-foreground">8–32 pixels</p>
+          </Field>
+        </div>
 
-      <div className="grid gap-4 sm:grid-cols-2">
-        <Field>
-          <FieldLabel>Vertical spacing</FieldLabel>
-          <Input type="number" min="100" max="200" step="1" value={lineHeight} onChange={(event) => setLineHeight(event.target.value)} />
-          <p className="text-xs text-muted-foreground">100–200 percent</p>
-        </Field>
-        <Field>
-          <FieldLabel>Horizontal spacing</FieldLabel>
-          <Input type="number" min="100" max="200" step="1" value={horizontalSpacing} onChange={(event) => setHorizontalSpacing(event.target.value)} />
-          <p className="text-xs text-muted-foreground">100–200 percent</p>
-        </Field>
-      </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field>
+            <FieldLabel>Vertical spacing</FieldLabel>
+            <Input type="number" min="100" max="200" step="1" value={lineHeight} onChange={(event) => setLineHeight(event.target.value)} />
+            <p className="text-xs text-muted-foreground">100–200 percent</p>
+          </Field>
+          <Field>
+            <FieldLabel>Horizontal spacing</FieldLabel>
+            <Input type="number" min="100" max="200" step="1" value={horizontalSpacing} onChange={(event) => setHorizontalSpacing(event.target.value)} />
+            <p className="text-xs text-muted-foreground">100–200 percent</p>
+          </Field>
+        </div>
+      </FieldSet>
 
-      <div className="grid gap-1">
-        <p className="text-sm font-medium">Terminal start directories</p>
+      <FieldSet className="gap-4 rounded-lg border p-4">
+        <FieldLegend className="mb-0 px-1">Start directories</FieldLegend>
         <p className="text-xs text-muted-foreground">
           These defaults apply when creating new terminal tabs and panes. Existing terminals keep their current directory.
         </p>
-      </div>
 
-      <Field>
-        <FieldLabel>New tabs</FieldLabel>
-        <div className="flex gap-2">
+        <Field>
+          <FieldLabel>New tabs</FieldLabel>
+          <div className="flex gap-2">
+            <Input
+              value={newTabDirectory}
+              placeholder={settings?.profileDirectory || "~"}
+              onChange={(event) => setNewTabDirectory(event.target.value)}
+            />
+            <Button type="button" variant="outline" disabled={choosingFor !== null} onClick={() => choose(setNewTabDirectory, "tab")}>
+              {choosingFor === "tab" ? <LoaderCircle className="animate-spin" /> : <FolderOpen />}
+              Choose
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">Leave empty to start in the profile directory (~).</p>
+        </Field>
+
+        <Field>
+          <FieldLabel>New panes</FieldLabel>
+          <div className="flex gap-2">
+            <Input
+              value={newPaneDirectory}
+              placeholder="Current directory"
+              onChange={(event) => setNewPaneDirectory(event.target.value)}
+            />
+            <Button type="button" variant="outline" disabled={choosingFor !== null} onClick={() => choose(setNewPaneDirectory, "pane")}>
+              {choosingFor === "pane" ? <LoaderCircle className="animate-spin" /> : <FolderOpen />}
+              Choose
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">Leave empty to inherit the focused pane's current directory.</p>
+        </Field>
+      </FieldSet>
+
+      <FieldSet className="gap-4 rounded-lg border p-4">
+        <FieldLegend className="mb-0 px-1">Terminal behavior</FieldLegend>
+        <p className="text-xs text-muted-foreground">
+          Control terminal history, focus treatment, clipboard behavior, and restored layouts.
+        </p>
+
+        <Field>
+          <FieldLabel>Scrollback lines</FieldLabel>
           <Input
-            value={newTabDirectory}
-            placeholder={settings?.profileDirectory || "~"}
-            onChange={(event) => setNewTabDirectory(event.target.value)}
+            type="number"
+            min="0"
+            max="100000"
+            step="1000"
+            value={scrollbackLines}
+            onChange={(event) => setScrollbackLines(event.target.value)}
           />
-          <Button type="button" variant="outline" disabled={choosingFor !== null} onClick={() => choose(setNewTabDirectory, "tab")}>
-            {choosingFor === "tab" ? <LoaderCircle className="animate-spin" /> : <FolderOpen />}
-            Choose
-          </Button>
-        </div>
-        <p className="text-xs text-muted-foreground">Leave empty to start in the profile directory (~).</p>
-      </Field>
+          <p className="text-xs text-muted-foreground">0 disables history; maximum 100,000 lines.</p>
+        </Field>
 
-      <Field>
-        <FieldLabel>New panes</FieldLabel>
-        <div className="flex gap-2">
-          <Input
-            value={newPaneDirectory}
-            placeholder="Current directory"
-            onChange={(event) => setNewPaneDirectory(event.target.value)}
+        <Field>
+          <div className="flex items-center justify-between gap-3">
+            <FieldLabel>Inactive pane opacity</FieldLabel>
+            <span className="text-xs tabular-nums text-muted-foreground">{Math.round(inactivePaneOpacity * 100)}%</span>
+          </div>
+          <input
+            type="range"
+            min="0.2"
+            max="0.95"
+            step="0.05"
+            value={inactivePaneOpacity}
+            className="w-full accent-primary"
+            onChange={(event) => setInactivePaneOpacity(Number(event.target.value))}
           />
-          <Button type="button" variant="outline" disabled={choosingFor !== null} onClick={() => choose(setNewPaneDirectory, "pane")}>
-            {choosingFor === "pane" ? <LoaderCircle className="animate-spin" /> : <FolderOpen />}
-            Choose
-          </Button>
-        </div>
-        <p className="text-xs text-muted-foreground">Leave empty to inherit the focused pane's current directory.</p>
-      </Field>
+          <p className="text-xs text-muted-foreground">Controls how strongly terminal panes without focus are dimmed.</p>
+        </Field>
 
-      <Field>
-        <FieldLabel>Scrollback lines</FieldLabel>
-        <Input
-          type="number"
-          min="0"
-          max="100000"
-          step="1000"
-          value={scrollbackLines}
-          onChange={(event) => setScrollbackLines(event.target.value)}
-        />
-        <p className="text-xs text-muted-foreground">0 disables history; maximum 100,000 lines.</p>
-      </Field>
+        <label className="flex items-start gap-3 rounded-md border bg-muted/20 p-3">
+          <Checkbox
+            checked={copyOnSelection}
+            onCheckedChange={(checked) => setCopyOnSelection(checked === true)}
+          />
+          <div>
+            <p className="text-sm font-medium">Copy selected text to clipboard</p>
+            <p className="text-xs text-muted-foreground">
+              Automatically copy completed terminal selections to the system clipboard.
+            </p>
+          </div>
+        </label>
 
-      <Field>
-        <div className="flex items-center justify-between gap-3">
-          <FieldLabel>Inactive pane opacity</FieldLabel>
-          <span className="text-xs tabular-nums text-muted-foreground">{Math.round(inactivePaneOpacity * 100)}%</span>
-        </div>
-        <input
-          type="range"
-          min="0.2"
-          max="0.95"
-          step="0.05"
-          value={inactivePaneOpacity}
-          className="w-full accent-primary"
-          onChange={(event) => setInactivePaneOpacity(Number(event.target.value))}
-        />
-        <p className="text-xs text-muted-foreground">Controls how strongly terminal panes without focus are dimmed.</p>
-      </Field>
-
-      <label className="flex items-start gap-3 rounded-md border bg-muted/20 p-3">
-        <Checkbox
-          checked={copyOnSelection}
-          onCheckedChange={(checked) => setCopyOnSelection(checked === true)}
-        />
-        <div>
-          <p className="text-sm font-medium">Copy selected text to clipboard</p>
-          <p className="text-xs text-muted-foreground">
-            Automatically copy completed terminal selections to the system clipboard.
-          </p>
-        </div>
-      </label>
-
-      <label className="flex items-start gap-3 rounded-md border bg-muted/20 p-3">
-        <Checkbox
-          checked={closeTerminalsOnAppExit}
-          onCheckedChange={(checked) => setCloseTerminalsOnAppExit(checked === true)}
-        />
-        <div>
-          <p className="text-sm font-medium">Close terminal tabs when quitting</p>
-          <p className="text-xs text-muted-foreground">
-            Discard saved terminal tabs and pane layouts so every app launch starts on Main with no terminals.
-          </p>
-        </div>
-      </label>
+        <label className="flex items-start gap-3 rounded-md border bg-muted/20 p-3">
+          <Checkbox
+            checked={closeTerminalsOnAppExit}
+            onCheckedChange={(checked) => setCloseTerminalsOnAppExit(checked === true)}
+          />
+          <div>
+            <p className="text-sm font-medium">Close terminal tabs when quitting</p>
+            <p className="text-xs text-muted-foreground">
+              Discard saved terminal tabs and pane layouts so every app launch starts on Main with no terminals.
+            </p>
+          </div>
+        </label>
+      </FieldSet>
 
       <details
         className="group rounded-lg border"
@@ -1507,8 +1527,8 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
           </span>
           <ChevronDown className="size-4 text-muted-foreground transition-transform group-open:rotate-180" />
         </summary>
-        <fieldset className="grid gap-3 border-t p-4">
-          <legend className="sr-only">Terminal shortcuts</legend>
+        <FieldSet className="grid gap-3 border-t p-4">
+          <FieldLegend className="sr-only">Terminal shortcuts</FieldLegend>
           <p className="text-xs text-muted-foreground">
             Cmd/Ctrl+T, Cmd/Ctrl+W, and Cmd/Ctrl+0–9 remain fixed.
           </p>
@@ -1537,7 +1557,7 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
             ))}
           </div>
           {shortcutError && <p className="text-sm text-destructive" role="alert">{shortcutError}</p>}
-        </fieldset>
+        </FieldSet>
       </details>
 
       {notice && <p className="text-sm text-muted-foreground">{notice}</p>}
@@ -1559,21 +1579,21 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
 function AppearanceTab({ themePreference, onThemePreferenceChange }) {
   return (
     <div className="grid gap-4">
-      <div className="grid gap-1">
-        <p className="text-sm font-medium">Color theme</p>
+      <FieldSet className="gap-4 rounded-lg border p-4">
+        <FieldLegend className="mb-0 px-1">Color theme</FieldLegend>
         <p className="text-xs text-muted-foreground">
           System follows your operating system and updates automatically when it changes.
         </p>
-      </div>
-      <Field>
-        <FieldLabel>Appearance</FieldLabel>
-        <SelectControl
-          value={themePreference}
-          onValueChange={onThemePreferenceChange}
-          options={themeOptions}
-          triggerClassName="w-full sm:max-w-xs"
-        />
-      </Field>
+        <Field>
+          <FieldLabel>Appearance</FieldLabel>
+          <SelectControl
+            value={themePreference}
+            onValueChange={onThemePreferenceChange}
+            options={themeOptions}
+            triggerClassName="w-full sm:max-w-xs"
+          />
+        </Field>
+      </FieldSet>
     </div>
   );
 }
