@@ -471,6 +471,28 @@ fn codex_function_call_requires_approval(payload: &Value) -> bool {
     }
 }
 
+fn codex_custom_exec_requires_approval(payload: &Value) -> bool {
+    if payload.get("name").and_then(Value::as_str) != Some("exec") {
+        return false;
+    }
+    let Some(input) = payload.get("input").and_then(Value::as_str) else {
+        return false;
+    };
+    input
+        .split("tools.exec_command(")
+        .skip(1)
+        .filter_map(|arguments| {
+            serde_json::Deserializer::from_str(arguments.trim_start())
+                .into_iter::<Value>()
+                .next()
+        })
+        .filter_map(Result::ok)
+        .any(|arguments| {
+            arguments.get("sandbox_permissions").and_then(Value::as_str)
+                == Some("require_escalated")
+        })
+}
+
 fn update_codex_session_state(value: &Value, state: &mut CodexSessionState) {
     if value.get("type").and_then(Value::as_str) == Some("event_msg") {
         match value.pointer("/payload/type").and_then(Value::as_str) {
@@ -519,7 +541,12 @@ fn update_codex_session_state(value: &Value, state: &mut CodexSessionState) {
                 state.pending_approvals.insert(call_id.to_string());
             }
         }
-        Some("function_call_output") => {
+        Some("custom_tool_call") if codex_custom_exec_requires_approval(payload) => {
+            if let Some(call_id) = payload.get("call_id").and_then(Value::as_str) {
+                state.pending_approvals.insert(call_id.to_string());
+            }
+        }
+        Some("function_call_output") | Some("custom_tool_call_output") => {
             if let Some(call_id) = payload.get("call_id").and_then(Value::as_str) {
                 state.pending_inputs.remove(call_id);
                 state.pending_approvals.remove(call_id);
@@ -1626,6 +1653,97 @@ mod tests {
 
         fs::write(&path, prefix).unwrap();
         assert!(!codex_session_state(&path).waiting_for_input());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn detects_only_unanswered_wrapped_codex_approval_requests() {
+        let directory = fixture_dir("codex-wrapped-approval");
+        let path = directory.join("rollout.jsonl");
+        let prefix = [
+            serde_json::json!({
+                "type": "session_meta",
+                "timestamp": "2026-07-24T06:20:00Z",
+                "payload": {
+                    "id": "wrapped-approval-session",
+                    "cwd": "/work/app",
+                    "source": "vscode",
+                    "originator": "Codex Desktop"
+                }
+            }),
+            serde_json::json!({
+                "type": "event_msg",
+                "payload": {"type": "task_started"}
+            }),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "exec",
+                    "call_id": "ordinary-call",
+                    "input": r#"const r = await tools.exec_command({"cmd":"npm test","sandbox_permissions":"use_default"}); text(r.output);"#
+                }
+            }),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "exec",
+                    "call_id": "search-call",
+                    "input": r#"const r = await tools.exec_command({"cmd":"rg -n '\"sandbox_permissions\":\"require_escalated\"' .","sandbox_permissions":"use_default"}); text(r.output);"#
+                }
+            }),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "other",
+                    "call_id": "unrelated-call",
+                    "input": r#"const r = await tools.exec_command({"cmd":"npm run dev","sandbox_permissions":"require_escalated"}); text(r.output);"#
+                }
+            }),
+        ]
+        .into_iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        fs::write(&path, format!("{prefix}\n")).unwrap();
+
+        assert!(!codex_session_state(&path).waiting_for_input());
+        assert!(!read_codex_transcript(&path).unwrap().waiting_for_input);
+
+        let approval = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": "approval-call",
+                "input": r#"const r = await tools.exec_command({"cmd":"npm run dev -- --host 127.0.0.1","sandbox_permissions":"require_escalated","justification":"Allow the local preview server?"}); text(r.output);"#
+            }
+        })
+        .to_string();
+        fs::write(&path, format!("{prefix}\n{approval}\n")).unwrap();
+
+        let state = codex_session_state(&path);
+        assert!(state.running);
+        assert!(state.waiting_for_input());
+        assert!(read_codex_transcript(&path).unwrap().waiting_for_input);
+
+        let denied = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "approval-call",
+                "output": "permission denied"
+            }
+        })
+        .to_string();
+        fs::write(&path, format!("{prefix}\n{approval}\n{denied}\n")).unwrap();
+
+        let state = codex_session_state(&path);
+        assert!(state.running);
+        assert!(!state.waiting_for_input());
+        assert!(!read_codex_transcript(&path).unwrap().waiting_for_input);
         fs::remove_dir_all(directory).unwrap();
     }
 
