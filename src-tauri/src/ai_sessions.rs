@@ -429,13 +429,18 @@ struct CodexSessionState {
     pending_inputs: HashSet<String>,
     pending_approvals: HashSet<String>,
     proposed_plan: bool,
+    current_turn_plan: bool,
+    completed_plan_turn: bool,
     running: bool,
     completed_at: Option<i64>,
 }
 
 impl CodexSessionState {
     fn waiting_for_input(&self) -> bool {
-        self.proposed_plan || !self.pending_inputs.is_empty() || !self.pending_approvals.is_empty()
+        self.proposed_plan
+            || self.completed_plan_turn
+            || !self.pending_inputs.is_empty()
+            || !self.pending_approvals.is_empty()
     }
 }
 
@@ -566,10 +571,17 @@ fn update_codex_session_state(value: &Value, state: &mut CodexSessionState) {
     if value.get("type").and_then(Value::as_str) == Some("event_msg") {
         match value.pointer("/payload/type").and_then(Value::as_str) {
             Some("task_started") => {
+                state.current_turn_plan = value
+                    .pointer("/payload/collaboration_mode_kind")
+                    .and_then(Value::as_str)
+                    == Some("plan");
+                state.completed_plan_turn = false;
                 state.running = true;
                 state.completed_at = None;
             }
             Some("task_complete") => {
+                state.completed_plan_turn = state.current_turn_plan;
+                state.current_turn_plan = false;
                 state.running = false;
                 state.completed_at = Some(timestamp_millis(
                     value.get("timestamp").and_then(Value::as_str),
@@ -588,6 +600,7 @@ fn update_codex_session_state(value: &Value, state: &mut CodexSessionState) {
     match payload.get("type").and_then(Value::as_str) {
         Some("message") if payload.get("role").and_then(Value::as_str) == Some("user") => {
             state.proposed_plan = false;
+            state.completed_plan_turn = false;
         }
         Some("message")
             if payload.get("role").and_then(Value::as_str) == Some("assistant")
@@ -1648,6 +1661,7 @@ mod tests {
         fs::write(&path, format!("{prefix}{complete}")).unwrap();
         let completed_without_timestamp = codex_session_state(&path);
         assert!(!completed_without_timestamp.running);
+        assert!(!completed_without_timestamp.waiting_for_input());
         assert!(completed_without_timestamp.completed_at.is_some());
         assert!(read_codex_transcript(&path).unwrap().completed_at.is_some());
 
@@ -1663,6 +1677,65 @@ mod tests {
         let restarted = codex_session_state(&path);
         assert!(restarted.running);
         assert_eq!(restarted.completed_at, None);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn detects_completed_plan_mode_turns_until_user_input_or_another_task() {
+        let directory = fixture_dir("codex-plan-mode");
+        let path = directory.join("rollout.jsonl");
+        let prefix = concat!(
+            "{\"type\":\"session_meta\",\"timestamp\":\"2026-07-27T16:49:55Z\",\"payload\":{\"id\":\"plan-mode-session\",\"cwd\":\"/work/app\",\"source\":\"vscode\",\"originator\":\"Codex Desktop\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"collaboration_mode_kind\":\"plan\"}}\n",
+        );
+        let resolved_input = concat!(
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"request_user_input\",\"call_id\":\"direction-choice\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"call_id\":\"direction-choice\",\"output\":\"auto-resolved\"}}\n",
+        );
+        let ordinary_final = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"The provider contract still needs a decision.\"}]}}\n";
+        let complete = "{\"type\":\"event_msg\",\"timestamp\":\"2026-07-27T16:57:40Z\",\"payload\":{\"type\":\"task_complete\"}}\n";
+        let completed_plan = format!("{prefix}{resolved_input}{ordinary_final}{complete}");
+        fs::write(&path, &completed_plan).unwrap();
+
+        let state = codex_session_state(&path);
+        assert!(!state.running);
+        assert!(state.waiting_for_input());
+        assert!(read_codex_transcript(&path).unwrap().waiting_for_input);
+
+        let next_user = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Use the verified Codex mode.\"}]}}\n";
+        fs::write(&path, format!("{completed_plan}{next_user}")).unwrap();
+        assert!(!codex_session_state(&path).waiting_for_input());
+        assert!(!read_codex_transcript(&path).unwrap().waiting_for_input);
+
+        let default_start = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"collaboration_mode_kind\":\"default\"}}\n";
+        fs::write(&path, format!("{completed_plan}{default_start}")).unwrap();
+        let default_running = codex_session_state(&path);
+        assert!(default_running.running);
+        assert!(!default_running.waiting_for_input());
+
+        let default_complete =
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n";
+        fs::write(
+            &path,
+            format!("{completed_plan}{default_start}{default_complete}"),
+        )
+        .unwrap();
+        let default_completed = codex_session_state(&path);
+        assert!(!default_completed.running);
+        assert!(!default_completed.waiting_for_input());
+
+        let legacy_start = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n";
+        fs::write(
+            &path,
+            format!("{completed_plan}{legacy_start}{default_complete}"),
+        )
+        .unwrap();
+        assert!(!codex_session_state(&path).waiting_for_input());
+
+        fs::write(&path, prefix).unwrap();
+        let plan_running = codex_session_state(&path);
+        assert!(plan_running.running);
+        assert!(!plan_running.waiting_for_input());
         fs::remove_dir_all(directory).unwrap();
     }
 
