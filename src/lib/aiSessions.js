@@ -217,7 +217,13 @@ export function aiSessionTreeWaitingForInput(session) {
 }
 
 export function aiSessionsWaitingForInput(sessions) {
-  return (sessions || []).some(aiSessionTreeWaitingForInput);
+  return aiSessionsWaitingForInputCount(sessions) > 0;
+}
+
+export function aiSessionsWaitingForInputCount(sessions) {
+  return (sessions || []).filter((session) => (
+    session?.archivedAt == null && aiSessionTreeWaitingForInput(session)
+  )).length;
 }
 
 export function aiSessionState(session, now = Date.now()) {

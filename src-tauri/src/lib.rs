@@ -1119,6 +1119,23 @@ fn default_ai_session_background_refresh_interval() -> u64 {
     60
 }
 
+#[tauri::command]
+fn set_ai_session_dock_badge(app: tauri::AppHandle, count: u32) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let window = app
+            .get_window("main")
+            .ok_or_else(|| "Could not find the main application window.".to_string())?;
+        let badge_count = (count > 0).then_some(i64::from(count));
+        window.set_badge_count(badge_count).map_err(db_error)?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, count);
+    }
+    Ok(())
+}
+
 fn normalize_ai_session_foreground_refresh_interval(value: u64) -> u64 {
     if matches!(value, 0 | 5 | 15 | 30 | 60 | 300) {
         value
@@ -1413,6 +1430,7 @@ pub fn run() {
             save_quick_capture_settings,
             hide_quick_capture,
             ai_sessions::list_ai_sessions,
+            set_ai_session_dock_badge,
             ai_sessions::archive_ai_session,
             ai_sessions::restore_ai_session,
             ai_sessions::open_ai_session_desktop,

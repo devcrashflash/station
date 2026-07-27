@@ -105,6 +105,8 @@ export const api = {
     call("save_ai_session_settings", { input: payload }, () => local.saveAiSessionSettings(payload)),
   listAiSessions: ({ since, settings }) =>
     call("list_ai_sessions", { since, settings: normalizeAiSessionSettings(settings) }, local.listAiSessions),
+  setAiSessionDockBadgeCount: ({ count }) =>
+    call("set_ai_session_dock_badge", { count }, () => null),
   archiveAiSession: ({ session }) =>
     call("archive_ai_session", { session }, () => local.archiveAiSession(session)),
   restoreAiSession: ({ provider, sessionId }) =>

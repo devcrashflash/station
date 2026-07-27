@@ -17,6 +17,7 @@ import {
   aiSessionTreeState,
   aiSessionTreeWaitingForInput,
   aiSessionsWaitingForInput,
+  aiSessionsWaitingForInputCount,
   aiSessionViewFilters,
   aiSessionViewFiltersDisabled,
   aiSessionWindowCounts,
@@ -257,6 +258,31 @@ test("migrates legacy refresh settings and detects waiting child sessions", () =
   assert.equal(aiSessionsWaitingForInput([
     { waitingForInput: false, children: [{ waitingForInput: false }] },
   ]), false);
+});
+
+test("counts waiting top-level AI session groups", () => {
+  assert.equal(aiSessionsWaitingForInputCount([]), 0);
+  assert.equal(aiSessionsWaitingForInputCount([
+    { waitingForInput: true, children: [] },
+    { waitingForInput: false, children: [] },
+  ]), 1);
+  assert.equal(aiSessionsWaitingForInputCount([
+    { waitingForInput: true, children: [] },
+    { waitingForInput: false, children: [{ waitingForInput: true }] },
+  ]), 2);
+  assert.equal(aiSessionsWaitingForInputCount([
+    {
+      waitingForInput: false,
+      children: [
+        { waitingForInput: true },
+        { waitingForInput: true },
+      ],
+    },
+  ]), 1);
+  assert.equal(aiSessionsWaitingForInputCount([
+    { waitingForInput: true, archivedAt: Date.now(), children: [] },
+    { waitingForInput: false, children: [{ waitingForInput: false }] },
+  ]), 0);
 });
 
 test("filters session trees by temporary source selections", () => {

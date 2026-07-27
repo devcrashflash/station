@@ -5,7 +5,7 @@ import { api } from "@/lib/api";
 import {
   AI_SESSION_MAX_WINDOW_HOURS,
   aiSessionPollingIntervalMs,
-  aiSessionsWaitingForInput,
+  aiSessionsWaitingForInputCount,
   normalizeAiSessionSettings,
 } from "@/lib/aiSessions";
 import {
@@ -37,10 +37,11 @@ export function useAiSessionMonitor({
   const activeRun = useRef(0);
   const started = useRef(false);
   const waitingRef = useRef(false);
-  const hasWaitingAiSession = useMemo(
-    () => aiSessionsWaitingForInput(result.sessions),
+  const waitingAiSessionCount = useMemo(
+    () => aiSessionsWaitingForInputCount(result.sessions),
     [result.sessions],
   );
+  const hasWaitingAiSession = waitingAiSessionCount > 0;
   waitingRef.current = hasWaitingAiSession;
 
   const refresh = useCallback(async ({ quiet = false } = {}) => {
@@ -80,6 +81,13 @@ export function useAiSessionMonitor({
     );
     return () => window.clearInterval(interval);
   }, [foreground, normalizedSettings, refresh, settingsReady]);
+
+  useEffect(() => {
+    if (!isDesktopApp() || result.lastRefreshedAt === null) return;
+    api.setAiSessionDockBadgeCount({
+      count: waitingAiSessionCount,
+    }).catch(console.error);
+  }, [result.lastRefreshedAt, waitingAiSessionCount]);
 
   useEffect(() => {
     if (!isDesktopApp() || result.lastRefreshedAt === null) return;
