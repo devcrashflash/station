@@ -104,7 +104,7 @@ try {
 const appName = `${tauriConfig.productName}.app`;
 const appPath = join(BUNDLE_PATH, "macos", appName);
 const dmgDirectory = join(BUNDLE_PATH, "dmg");
-const dmgPath = join(dmgDirectory, dmgFilename(nextVersion));
+const dmgPath = join(dmgDirectory, dmgFilename(nextVersion, process.arch));
 const stagingDirectory = await mkdtemp(join(tmpdir(), "station-release-"));
 let dmgError = null;
 
