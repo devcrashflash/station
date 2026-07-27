@@ -12090,6 +12090,43 @@ mod tests {
     }
 
     #[test]
+    fn saves_local_resource_without_expected_repository_from_git_root() {
+        let db = memory_db();
+        let project = create_project_in_db(&db, "Access".to_string(), None, None).expect("project");
+        let repo_path = git_repo_with_origin("git@github.com:owner/repo.git");
+        run_git_test(
+            &repo_path,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                "https://gitlab.example.org/group/app.git",
+            ],
+        );
+        let nested_path = repo_path.join("packages/app");
+        fs::create_dir_all(&nested_path).expect("create nested repository directory");
+
+        let resource = save_local_resource_in_db(
+            &db,
+            LocalResourceInput {
+                project_id: project.id,
+                path: nested_path.to_string_lossy().to_string(),
+                expected_provider: None,
+                expected_repo_url: None,
+                name: None,
+            },
+        )
+        .expect("save local resource");
+
+        assert_eq!(
+            PathBuf::from(&resource.path),
+            fs::canonicalize(&repo_path).expect("canonical repository path")
+        );
+        assert_eq!(resource.provider, "github");
+        assert_eq!(resource.repo_url, "https://github.com/owner/repo");
+    }
+
+    #[test]
     fn local_resources_can_match_non_origin_remotes() {
         let repo_path = git_repo_with_remote("upstream", "git@gitlab.example.org:group/app.git");
 

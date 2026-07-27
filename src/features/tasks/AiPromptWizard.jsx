@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Check, ChevronLeft, ExternalLink, FolderGit2, LoaderCircle } from "lucide-react";
+import { Check, ChevronLeft, ExternalLink, FolderGit2, FolderOpen, LoaderCircle } from "lucide-react";
 
 import { EmptyState } from "@/components/common/EmptyState";
 import { Modal } from "@/components/common/Modal";
@@ -20,26 +20,30 @@ export function AiPromptWizard({
   initialPromptId = "",
   localResources,
   homeDirectory,
+  onChooseLocalResourceDirectory,
+  onSaveLocalResource,
   onClose,
   onStart,
 }) {
   const [step, setStep] = useState(initialPromptId ? "workspace" : "prompt");
   const [selectedPromptId, setSelectedPromptId] = useState(initialPromptId);
   const [selectedPath, setSelectedPath] = useState("");
+  const [isAddingDirectory, setIsAddingDirectory] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState("");
   const workspaces = useMemo(() => aiPromptWorkspaceOptions(localResources), [localResources]);
   const selectedPrompt = prompts.find((prompt) => prompt.id === selectedPromptId);
+  const isBusy = isAddingDirectory || isStarting;
 
-  async function startThread() {
-    if (!selectedPromptId || !selectedPath || isStarting) return;
+  async function startThread(path = selectedPath) {
+    if (!selectedPromptId || !path || isStarting) return;
     setIsStarting(true);
     setError("");
     try {
       await onStart({
         aiPromptId: selectedPromptId,
         taskId: task.id,
-        path: selectedPath,
+        path,
       });
       onClose();
     } catch (nextError) {
@@ -48,8 +52,29 @@ export function AiPromptWizard({
     }
   }
 
+  async function addDirectoryAndStart() {
+    if (!task.projectId || isBusy) return;
+    setIsAddingDirectory(true);
+    setError("");
+    try {
+      const path = await onChooseLocalResourceDirectory();
+      if (!path) return;
+      const savedResource = await onSaveLocalResource({
+        projectId: task.projectId,
+        path,
+      });
+      setSelectedPath(savedResource.path);
+      setIsAddingDirectory(false);
+      await startThread(savedResource.path);
+    } catch (nextError) {
+      setError(nextError?.message || String(nextError));
+    } finally {
+      setIsAddingDirectory(false);
+    }
+  }
+
   return (
-    <Modal title="Start AI thread" onClose={() => !isStarting && onClose()}>
+    <Modal title="Start AI thread" onClose={() => !isBusy && onClose()}>
       <div className="grid gap-5">
         <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
           <span className={cn(step === "prompt" && "text-foreground")}>1. AI Prompt</span>
@@ -93,8 +118,26 @@ export function AiPromptWizard({
                 {selectedPrompt?.name} will use this folder as its working directory.
               </p>
             </div>
+            {task.projectId && (
+              <Button
+                className="justify-start"
+                type="button"
+                variant="outline"
+                disabled={isBusy}
+                onClick={addDirectoryAndStart}
+              >
+                {isAddingDirectory
+                  ? <LoaderCircle className="size-4 animate-spin" />
+                  : <FolderOpen className="size-4" />}
+                {isAddingDirectory ? "Choosing..." : "Choose other directory"}
+              </Button>
+            )}
             {workspaces.length === 0 ? (
-              <EmptyState text="No linked repositories are available. Link one before starting a thread." />
+              <EmptyState
+                text={task.projectId
+                  ? "No linked repositories yet. Choose a repository directory above to add one and start the thread."
+                  : "No linked repositories are available. Link one before starting a thread."}
+              />
             ) : (
               <div className="grid max-h-80 gap-2 overflow-y-auto pr-1">
                 {workspaces.map((workspace) => (
@@ -106,6 +149,7 @@ export function AiPromptWizard({
                     detail={workspace.detail}
                     path={workspace.path}
                     displayPath={compactWorkspacePath(workspace.path, homeDirectory)}
+                    disabled={isBusy}
                     onClick={() => setSelectedPath(workspace.path)}
                   />
                 ))}
@@ -113,11 +157,11 @@ export function AiPromptWizard({
             )}
             {error && <p className="text-sm text-destructive">{error}</p>}
             <div className="flex flex-wrap justify-between gap-2">
-              <Button type="button" variant="outline" disabled={isStarting} onClick={() => setStep("prompt")}>
+              <Button type="button" variant="outline" disabled={isBusy} onClick={() => setStep("prompt")}>
                 <ChevronLeft className="size-4" />
                 Back
               </Button>
-              <Button type="button" disabled={!selectedPath || isStarting} onClick={startThread}>
+              <Button type="button" disabled={!selectedPath || isBusy} onClick={() => startThread()}>
                 {isStarting ? <LoaderCircle className="size-4 animate-spin" /> : <ExternalLink className="size-4" />}
                 {isStarting ? "Opening..." : `Open ${selectedPrompt?.name || "AI Prompt"}`}
               </Button>
@@ -129,13 +173,14 @@ export function AiPromptWizard({
   );
 }
 
-function ChoiceButton({ selected, icon: Icon, title, detail, path, displayPath, onClick }) {
+function ChoiceButton({ selected, icon: Icon, title, detail, path, displayPath, disabled = false, onClick }) {
   return (
     <button
       type="button"
       title={path}
+      disabled={disabled}
       className={cn(
-        "flex min-w-0 items-center gap-3 rounded-md border p-3 text-left transition-colors hover:bg-accent",
+        "flex min-w-0 items-center gap-3 rounded-md border p-3 text-left transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60",
         selected && "border-primary bg-primary/5",
       )}
       aria-pressed={selected}

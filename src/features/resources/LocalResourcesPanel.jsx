@@ -53,7 +53,7 @@ export function ProjectLocalResourcesEditor({
     <div className="grid gap-4">
       <Button type="button" variant="outline" disabled={isChoosing} onClick={chooseDirectory}>
         <FolderOpen className="size-4" />
-        {isChoosing ? "Choosing..." : "Choose repository directory"}
+        {isChoosing ? "Choosing..." : "Add directory"}
       </Button>
 
       {notice && <p className="text-sm text-muted-foreground" role="status">{notice}</p>}

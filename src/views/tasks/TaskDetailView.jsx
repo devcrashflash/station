@@ -808,6 +808,8 @@ export function TaskDetailView({
           initialPromptId={activeAiPromptId}
           localResources={localResources}
           homeDirectory={homeDirectory}
+          onChooseLocalResourceDirectory={onChooseLocalResourceDirectory}
+          onSaveLocalResource={onSaveLocalResource}
           onClose={() => setActiveAiPromptId("")}
           onStart={onOpenAiPromptThread}
         />
