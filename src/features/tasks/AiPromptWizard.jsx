@@ -5,7 +5,7 @@ import { EmptyState } from "@/components/common/EmptyState";
 import { Modal } from "@/components/common/Modal";
 import { Button } from "@/components/ui/button";
 import { aiPromptIconFor } from "@/lib/aiPromptIcons";
-import { aiPromptWorkspaceOptions } from "@/lib/aiPromptThread";
+import { aiPromptWorkspaceOptions, compactWorkspacePath } from "@/lib/aiPromptThread";
 import { cn } from "@/lib/utils";
 
 const agentTypeLabels = {
@@ -13,7 +13,15 @@ const agentTypeLabels = {
   claude: "Claude",
 };
 
-export function AiPromptWizard({ task, prompts, initialPromptId = "", localResources, onClose, onStart }) {
+export function AiPromptWizard({
+  task,
+  prompts,
+  initialPromptId = "",
+  localResources,
+  homeDirectory,
+  onClose,
+  onStart,
+}) {
   const [step, setStep] = useState(initialPromptId ? "workspace" : "prompt");
   const [selectedPromptId, setSelectedPromptId] = useState(initialPromptId);
   const [selectedPath, setSelectedPath] = useState("");
@@ -95,6 +103,8 @@ export function AiPromptWizard({ task, prompts, initialPromptId = "", localResou
                     icon={FolderGit2}
                     title={workspace.name}
                     detail={workspace.detail}
+                    path={workspace.path}
+                    displayPath={compactWorkspacePath(workspace.path, homeDirectory)}
                     onClick={() => setSelectedPath(workspace.path)}
                   />
                 ))}
@@ -118,10 +128,11 @@ export function AiPromptWizard({ task, prompts, initialPromptId = "", localResou
   );
 }
 
-function ChoiceButton({ selected, icon: Icon, title, detail, onClick }) {
+function ChoiceButton({ selected, icon: Icon, title, detail, path, displayPath, onClick }) {
   return (
     <button
       type="button"
+      title={path}
       className={cn(
         "flex min-w-0 items-center gap-3 rounded-md border p-3 text-left transition-colors hover:bg-accent",
         selected && "border-primary bg-primary/5",
@@ -132,6 +143,7 @@ function ChoiceButton({ selected, icon: Icon, title, detail, onClick }) {
       <Icon className="size-5 shrink-0 text-muted-foreground" />
       <span className="min-w-0 flex-1">
         <span className="block truncate text-sm font-medium">{title}</span>
+        {path && <span className="block truncate text-xs text-foreground/80">{displayPath || path}</span>}
         <span className="block truncate text-xs text-muted-foreground">{detail}</span>
       </span>
       {selected && <Check className="size-4 shrink-0 text-primary" />}

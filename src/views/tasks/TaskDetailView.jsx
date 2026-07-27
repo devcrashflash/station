@@ -181,6 +181,7 @@ export function TaskDetailView({
   aiPrompts = [],
   commandSettings = { reviewEnabled: true },
   localResources = [],
+  homeDirectory = "~",
   onOpenAiPromptThread,
   onRefreshExternalDetails,
   onLoadLinks,
@@ -805,6 +806,7 @@ export function TaskDetailView({
           prompts={aiPrompts}
           initialPromptId={activeAiPromptId}
           localResources={localResources}
+          homeDirectory={homeDirectory}
           onClose={() => setActiveAiPromptId("")}
           onStart={onOpenAiPromptThread}
         />

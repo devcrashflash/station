@@ -17,3 +17,15 @@ export function aiPromptWorkspaceOptions(localResources = []) {
     left.name.localeCompare(right.name, undefined, { sensitivity: "base" })
   ));
 }
+
+export function compactWorkspacePath(path, homeDirectory) {
+  if (!path || !homeDirectory || homeDirectory === "~") return path;
+
+  const normalizedHome = homeDirectory.replace(/[\\/]+$/, "");
+  if (path === normalizedHome) return "~";
+  if (path.startsWith(`${normalizedHome}/`) || path.startsWith(`${normalizedHome}\\`)) {
+    return `~${path.slice(normalizedHome.length)}`;
+  }
+
+  return path;
+}

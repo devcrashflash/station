@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { aiPromptWorkspaceOptions } from "./aiPromptThread.js";
+import { aiPromptWorkspaceOptions, compactWorkspacePath } from "./aiPromptThread.js";
 
 test("returns linked repository choices", () => {
   const options = aiPromptWorkspaceOptions([
@@ -28,4 +28,20 @@ test("does not include configured directories", () => {
     aiPromptWorkspaceOptions([], [{ id: "dir", name: "Notes", path: "/work/notes" }]),
     [],
   );
+});
+
+test("compacts paths inside the current user's home directory", () => {
+  assert.equal(
+    compactWorkspacePath("/Users/alex/Projects/station", "/Users/alex"),
+    "~/Projects/station",
+  );
+  assert.equal(compactWorkspacePath("/Users/alex", "/Users/alex/"), "~");
+});
+
+test("does not compact paths outside the current user's home directory", () => {
+  assert.equal(
+    compactWorkspacePath("/Users/alexander/Projects/station", "/Users/alex"),
+    "/Users/alexander/Projects/station",
+  );
+  assert.equal(compactWorkspacePath("/work/station", "~"), "/work/station");
 });

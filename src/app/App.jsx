@@ -732,6 +732,7 @@ function App() {
           aiPrompts={aiPrompts}
           commandSettings={commandSettings}
           localResources={localResources}
+          homeDirectory={terminalSettings.profileDirectory}
           onOpenAiPromptThread={async (payload) => {
             const taskToKeep = selectedTask;
             try {
