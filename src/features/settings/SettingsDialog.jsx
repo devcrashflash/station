@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { Textarea } from "@/components/ui/textarea";
 import { aiPromptIconFor, aiPromptIconOptions } from "@/lib/aiPromptIcons";
+import { AI_PROMPT_MODE_OPTIONS, aiPromptModeLabel, defaultAiPromptMode } from "@/lib/aiPromptMode";
 import {
   AI_SESSION_BACKGROUND_REFRESH_INTERVALS,
   AI_SESSION_REFRESH_INTERVALS,
@@ -159,6 +160,7 @@ export function SettingsDialog({
   const [aiPromptAgentType, setAiPromptAgentType] = useState("codex");
   const [aiPromptName, setAiPromptName] = useState("");
   const [aiPromptIcon, setAiPromptIcon] = useState("sparkles");
+  const [aiPromptMode, setAiPromptMode] = useState("plan");
   const [aiPromptText, setAiPromptText] = useState("");
   const [editingAiPromptId, setEditingAiPromptId] = useState(null);
   const [aiPromptEditorMode, setAiPromptEditorMode] = useState(null);
@@ -176,6 +178,7 @@ export function SettingsDialog({
     setAiPromptAgentType("codex");
     setAiPromptName("");
     setAiPromptIcon("sparkles");
+    setAiPromptMode("plan");
     setAiPromptText("");
     setEditingAiPromptId(null);
     setAiPromptEditorMode(null);
@@ -185,6 +188,7 @@ export function SettingsDialog({
     setAiPromptAgentType(agentType);
     setAiPromptName("");
     setAiPromptIcon("sparkles");
+    setAiPromptMode(defaultAiPromptMode(agentType));
     setAiPromptText("");
     setEditingAiPromptId(null);
     setAiPromptEditorMode("create");
@@ -194,6 +198,7 @@ export function SettingsDialog({
     setAiPromptAgentType(prompt.agentType);
     setAiPromptName(prompt.name);
     setAiPromptIcon(prompt.icon || "sparkles");
+    setAiPromptMode(prompt.mode || defaultAiPromptMode(prompt.agentType));
     setAiPromptText(prompt.promptText || "");
     setEditingAiPromptId(prompt.id);
     setAiPromptEditorMode("edit");
@@ -207,6 +212,7 @@ export function SettingsDialog({
         agentType: aiPromptAgentType,
         name: aiPromptName,
         icon: aiPromptIcon,
+        mode: aiPromptMode,
         promptText: aiPromptText,
       });
       resetAiPromptForm();
@@ -299,14 +305,32 @@ export function SettingsDialog({
                               : "Configure reusable instructions for this provider."}
                           </p>
                         </div>
-                        <div className={cn("grid gap-3", aiPromptEditorMode === "edit" && "sm:grid-cols-2")}>
+                        <div
+                          className={cn(
+                            "grid gap-3",
+                            (aiPromptEditorMode === "edit" || aiPromptAgentType === "codex") && "sm:grid-cols-2",
+                          )}
+                        >
                           {aiPromptEditorMode === "edit" && (
                             <Field>
                               <FieldLabel>AI Agent</FieldLabel>
                               <SelectControl
                                 value={aiPromptAgentType}
-                                onValueChange={setAiPromptAgentType}
+                                onValueChange={(agentType) => {
+                                  setAiPromptAgentType(agentType);
+                                  if (agentType === "claude") setAiPromptMode("agent");
+                                }}
                                 options={aiAgentTypeOptions}
+                              />
+                            </Field>
+                          )}
+                          {aiPromptAgentType === "codex" && (
+                            <Field>
+                              <FieldLabel>AI mode</FieldLabel>
+                              <SelectControl
+                                value={aiPromptMode}
+                                onValueChange={setAiPromptMode}
+                                options={AI_PROMPT_MODE_OPTIONS}
                               />
                             </Field>
                           )}
@@ -358,6 +382,8 @@ export function SettingsDialog({
                             <p className="truncate font-medium">{prompt.name}</p>
                             <p className="text-xs text-muted-foreground">
                               {aiAgentTypeOptions.find((option) => option.value === prompt.agentType)?.label || prompt.agentType}
+                              {" · "}
+                              {aiPromptModeLabel(prompt.mode)}
                             </p>
                             {prompt.promptText && (
                               <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{prompt.promptText}</p>

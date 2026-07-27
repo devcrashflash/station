@@ -40,6 +40,7 @@ import { AiPromptWizard } from "@/features/tasks/AiPromptWizard";
 import { TrelloTicketWizard } from "@/features/tasks/TrelloTicketWizard";
 import { isPullRequestResource } from "@/lib/api";
 import { aiPromptIconFor } from "@/lib/aiPromptIcons";
+import { aiPromptModeLabel } from "@/lib/aiPromptMode";
 import { externalLabelStyle } from "@/lib/externalLabels";
 import { shortcutModifier } from "@/lib/keyboardShortcut";
 import { parseSmartInput } from "@/lib/smartInputParser";
@@ -720,7 +721,7 @@ export function TaskDetailView({
                     <PromptIcon className="size-4" />
                     <span className="min-w-0 flex-1 truncate text-left">{prompt.name}</span>
                     <span className="text-xs text-muted-foreground">
-                      {aiAgentLabels[prompt.agentType] || prompt.agentType}
+                      {aiAgentLabels[prompt.agentType] || prompt.agentType} · {aiPromptModeLabel(prompt.mode)}
                     </span>
                   </Button>
                 );
