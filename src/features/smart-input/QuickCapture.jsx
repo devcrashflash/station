@@ -28,7 +28,6 @@ export function QuickCapture() {
         window.requestAnimationFrame(focusInput);
         window.setTimeout(focusInput, 50);
       } else {
-        setValue("");
         setError("");
       }
     }
