@@ -183,6 +183,7 @@ export function TaskDetailView({
   commandSettings = { reviewEnabled: true },
   localResources = [],
   homeDirectory = "~",
+  onInspectAiPromptBranches,
   onOpenAiPromptThread,
   onRefreshExternalDetails,
   onLoadLinks,
@@ -810,6 +811,7 @@ export function TaskDetailView({
           homeDirectory={homeDirectory}
           onChooseLocalResourceDirectory={onChooseLocalResourceDirectory}
           onSaveLocalResource={onSaveLocalResource}
+          onInspectBranches={onInspectAiPromptBranches}
           onClose={() => setActiveAiPromptId("")}
           onStart={onOpenAiPromptThread}
         />

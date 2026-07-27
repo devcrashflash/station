@@ -1,5 +1,15 @@
 import { useMemo, useState } from "react";
-import { Check, ChevronLeft, ExternalLink, FolderGit2, FolderOpen, LoaderCircle } from "lucide-react";
+import {
+  Check,
+  ChevronLeft,
+  ExternalLink,
+  FolderGit2,
+  FolderOpen,
+  GitBranch,
+  GitPullRequest,
+  LoaderCircle,
+  Plus,
+} from "lucide-react";
 
 import { EmptyState } from "@/components/common/EmptyState";
 import { Modal } from "@/components/common/Modal";
@@ -22,28 +32,60 @@ export function AiPromptWizard({
   homeDirectory,
   onChooseLocalResourceDirectory,
   onSaveLocalResource,
+  onInspectBranches,
   onClose,
   onStart,
 }) {
   const [step, setStep] = useState(initialPromptId ? "workspace" : "prompt");
   const [selectedPromptId, setSelectedPromptId] = useState(initialPromptId);
   const [selectedPath, setSelectedPath] = useState("");
+  const [branchOptions, setBranchOptions] = useState(null);
+  const [selectedBranchMode, setSelectedBranchMode] = useState("");
   const [isAddingDirectory, setIsAddingDirectory] = useState(false);
+  const [isInspecting, setIsInspecting] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState("");
   const workspaces = useMemo(() => aiPromptWorkspaceOptions(localResources), [localResources]);
   const selectedPrompt = prompts.find((prompt) => prompt.id === selectedPromptId);
-  const isBusy = isAddingDirectory || isStarting;
+  const isBusy = isAddingDirectory || isInspecting || isStarting;
 
-  async function startThread(path = selectedPath) {
-    if (!selectedPromptId || !path || isStarting) return;
+  function selectPath(path) {
+    setSelectedPath(path);
+    setBranchOptions(null);
+    setSelectedBranchMode("");
+    setError("");
+  }
+
+  async function inspectBranches(path = selectedPath) {
+    if (!selectedPromptId || !path || isBusy) return;
+    setIsInspecting(true);
+    setError("");
+    try {
+      const options = await onInspectBranches({
+        taskId: task.id,
+        path,
+      });
+      setSelectedPath(path);
+      setBranchOptions(options);
+      setSelectedBranchMode("");
+      setStep("branch");
+    } catch (nextError) {
+      setError(nextError?.message || String(nextError));
+    } finally {
+      setIsInspecting(false);
+    }
+  }
+
+  async function startThread() {
+    if (!selectedPromptId || !selectedPath || !selectedBranchMode || isStarting) return;
     setIsStarting(true);
     setError("");
     try {
       await onStart({
         aiPromptId: selectedPromptId,
         taskId: task.id,
-        path,
+        path: selectedPath,
+        branchMode: selectedBranchMode,
       });
       onClose();
     } catch (nextError) {
@@ -52,7 +94,7 @@ export function AiPromptWizard({
     }
   }
 
-  async function addDirectoryAndStart() {
+  async function addRepositoryAndContinue() {
     if (!task.projectId || isBusy) return;
     setIsAddingDirectory(true);
     setError("");
@@ -63,9 +105,9 @@ export function AiPromptWizard({
         projectId: task.projectId,
         path,
       });
-      setSelectedPath(savedResource.path);
+      selectPath(savedResource.path);
       setIsAddingDirectory(false);
-      await startThread(savedResource.path);
+      await inspectBranches(savedResource.path);
     } catch (nextError) {
       setError(nextError?.message || String(nextError));
     } finally {
@@ -79,7 +121,9 @@ export function AiPromptWizard({
         <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
           <span className={cn(step === "prompt" && "text-foreground")}>1. AI Prompt</span>
           <span>→</span>
-          <span className={cn(step === "workspace" && "text-foreground")}>2. Repository or directory</span>
+          <span className={cn(step === "workspace" && "text-foreground")}>2. Repository</span>
+          <span>→</span>
+          <span className={cn(step === "branch" && "text-foreground")}>3. Branch</span>
         </div>
 
         {step === "prompt" ? (
@@ -110,7 +154,7 @@ export function AiPromptWizard({
               </Button>
             </div>
           </div>
-        ) : (
+        ) : step === "workspace" ? (
           <div className="grid gap-3">
             <div>
               <p className="text-sm font-medium">Choose where to start the thread</p>
@@ -124,18 +168,18 @@ export function AiPromptWizard({
                 type="button"
                 variant="outline"
                 disabled={isBusy}
-                onClick={addDirectoryAndStart}
+                onClick={addRepositoryAndContinue}
               >
                 {isAddingDirectory
                   ? <LoaderCircle className="size-4 animate-spin" />
                   : <FolderOpen className="size-4" />}
-                {isAddingDirectory ? "Choosing..." : "Choose other directory"}
+                {isAddingDirectory ? "Choosing..." : "Choose other repository"}
               </Button>
             )}
             {workspaces.length === 0 ? (
               <EmptyState
                 text={task.projectId
-                  ? "No linked repositories yet. Choose a repository directory above to add one and start the thread."
+                  ? "No linked repositories yet. Choose a repository above to add one and continue."
                   : "No linked repositories are available. Link one before starting a thread."}
               />
             ) : (
@@ -150,7 +194,7 @@ export function AiPromptWizard({
                     path={workspace.path}
                     displayPath={compactWorkspacePath(workspace.path, homeDirectory)}
                     disabled={isBusy}
-                    onClick={() => setSelectedPath(workspace.path)}
+                    onClick={() => selectPath(workspace.path)}
                   />
                 ))}
               </div>
@@ -161,7 +205,69 @@ export function AiPromptWizard({
                 <ChevronLeft className="size-4" />
                 Back
               </Button>
-              <Button type="button" disabled={!selectedPath || isBusy} onClick={() => startThread()}>
+              <Button type="button" disabled={!selectedPath || isBusy} onClick={() => inspectBranches()}>
+                {isInspecting && <LoaderCircle className="size-4 animate-spin" />}
+                {isInspecting ? "Inspecting..." : "Continue"}
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="grid gap-3">
+            <div>
+              <p className="text-sm font-medium">Choose which branch to use</p>
+              <p className="text-xs text-muted-foreground">
+                The repository will be prepared before {selectedPrompt?.name} opens.
+              </p>
+            </div>
+            {!branchOptions?.isClean && (
+              <p className="rounded-md bg-muted p-3 text-xs text-muted-foreground">
+                This repository has uncommitted or untracked changes. Current Branch remains available,
+                but changing branches requires committing, stashing, or cleaning them first.
+              </p>
+            )}
+            <div className="grid gap-2">
+              {branchOptions?.checkoutBranch && (
+                <ChoiceButton
+                  selected={selectedBranchMode === "checkout"}
+                  icon={GitPullRequest}
+                  title={`Checkout Branch (${branchOptions.checkoutBranch})`}
+                  detail="Use the source branch of this task's open pull or merge request."
+                  disabled={isBusy || !branchOptions.isClean}
+                  onClick={() => setSelectedBranchMode("checkout")}
+                />
+              )}
+              <ChoiceButton
+                selected={selectedBranchMode === "current"}
+                icon={GitBranch}
+                title={`Current Branch (${branchOptions?.currentBranch || ""})`}
+                detail="Start from the branch currently checked out in this repository."
+                disabled={isBusy}
+                onClick={() => setSelectedBranchMode("current")}
+              />
+              <ChoiceButton
+                selected={selectedBranchMode === "new"}
+                icon={Plus}
+                title={`New Branch (${branchOptions?.newBranch || ""})`}
+                detail="Create a new branch from the current HEAD."
+                disabled={isBusy || !branchOptions?.isClean}
+                onClick={() => setSelectedBranchMode("new")}
+              />
+            </div>
+            {error && <p className="text-sm text-destructive">{error}</p>}
+            <div className="flex flex-wrap justify-between gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={isBusy}
+                onClick={() => {
+                  setSelectedBranchMode("");
+                  setStep("workspace");
+                }}
+              >
+                <ChevronLeft className="size-4" />
+                Back
+              </Button>
+              <Button type="button" disabled={!selectedBranchMode || isBusy} onClick={startThread}>
                 {isStarting ? <LoaderCircle className="size-4 animate-spin" /> : <ExternalLink className="size-4" />}
                 {isStarting ? "Opening..." : `Open ${selectedPrompt?.name || "AI Prompt"}`}
               </Button>

@@ -208,6 +208,9 @@ export const api = {
   listAiPrompts: () => call("list_ai_prompts", {}, local.listAiPrompts),
   saveAiPrompt: (payload) => call("save_ai_prompt", { input: payload }, () => local.saveAiPrompt(payload)),
   deleteAiPrompt: (payload) => call("delete_ai_prompt", payload, () => local.deleteAiPrompt(payload)),
+  inspectAiPromptBranches: (payload) => call("inspect_ai_prompt_branches", { input: payload }, () => {
+    throw new Error("Inspecting AI Prompt branches requires the desktop app.");
+  }),
   openAiPromptThread: (payload) => call("open_ai_prompt_thread", { input: payload }, () => {
     throw new Error("Opening an AI Prompt thread requires the desktop app.");
   }),

@@ -716,6 +716,7 @@ struct TaskLink {
     external_state: Option<String>,
     external_state_color: Option<String>,
     target_branch: Option<String>,
+    source_branch: Option<String>,
     fetched_at: Option<i64>,
     files: Vec<TaskFile>,
     comments: Vec<TaskComment>,
@@ -837,6 +838,7 @@ struct PullRequestRecord {
     external_body: Option<String>,
     external_state: Option<String>,
     target_branch: Option<String>,
+    source_branch: Option<String>,
     fetched_at: Option<i64>,
     created_at: i64,
     updated_at: i64,
@@ -1232,6 +1234,23 @@ struct OpenAiPromptThreadInput {
     ai_prompt_id: String,
     task_id: String,
     path: String,
+    branch_mode: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InspectAiPromptBranchesInput {
+    task_id: String,
+    path: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct AiPromptBranchOptions {
+    current_branch: String,
+    new_branch: String,
+    checkout_branch: Option<String>,
+    is_clean: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1280,6 +1299,7 @@ struct ProviderMetadata {
     state: Option<String>,
     state_color: Option<String>,
     target_branch: Option<String>,
+    source_branch: Option<String>,
     url: Option<String>,
     fetched_at: Option<i64>,
     files: Vec<TaskFile>,
@@ -1511,6 +1531,7 @@ pub fn run() {
             list_ai_prompts,
             save_ai_prompt,
             delete_ai_prompt,
+            inspect_ai_prompt_branches,
             open_ai_prompt_thread,
             list_command_settings,
             save_command_settings,
@@ -1823,6 +1844,7 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
             external_state TEXT,
             external_state_color TEXT,
             target_branch TEXT,
+            source_branch TEXT,
             fetched_at INTEGER,
             files_json TEXT NOT NULL DEFAULT '[]',
             comments_json TEXT NOT NULL DEFAULT '[]',
@@ -1877,6 +1899,7 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
             external_body TEXT,
             external_state TEXT,
             target_branch TEXT,
+            source_branch TEXT,
             fetched_at INTEGER,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
@@ -1931,6 +1954,7 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
     add_column_if_missing(db, "task_links", "external_state", "TEXT")?;
     add_column_if_missing(db, "task_links", "external_state_color", "TEXT")?;
     add_column_if_missing(db, "task_links", "target_branch", "TEXT")?;
+    add_column_if_missing(db, "task_links", "source_branch", "TEXT")?;
     add_column_if_missing(db, "task_links", "fetched_at", "INTEGER")?;
     add_column_if_missing(db, "task_links", "files_json", "TEXT NOT NULL DEFAULT '[]'")?;
     add_column_if_missing(
@@ -1967,6 +1991,7 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
     add_column_if_missing(db, "pull_requests", "external_body", "TEXT")?;
     add_column_if_missing(db, "pull_requests", "external_state", "TEXT")?;
     add_column_if_missing(db, "pull_requests", "target_branch", "TEXT")?;
+    add_column_if_missing(db, "pull_requests", "source_branch", "TEXT")?;
     add_column_if_missing(db, "pull_requests", "fetched_at", "INTEGER")?;
     add_column_if_missing(db, "activities", "subject_json", "TEXT")?;
     add_column_if_missing(db, "review_comment_drafts", "start_old_line", "INTEGER")?;
@@ -2580,9 +2605,9 @@ fn row_to_smart_inbox_todo(row: &rusqlite::Row<'_>) -> rusqlite::Result<SmartInb
 }
 
 fn row_to_task_link(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskLink> {
-    let files_json = row.get::<_, Option<String>>(12)?;
-    let comments_json = row.get::<_, Option<String>>(13)?;
-    let labels_json = row.get::<_, Option<String>>(14)?;
+    let files_json = row.get::<_, Option<String>>(13)?;
+    let comments_json = row.get::<_, Option<String>>(14)?;
+    let labels_json = row.get::<_, Option<String>>(15)?;
     Ok(TaskLink {
         task_id: row.get(0)?,
         provider: row.get(1)?,
@@ -2595,7 +2620,8 @@ fn row_to_task_link(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskLink> {
         external_state: row.get(8)?,
         external_state_color: row.get(9)?,
         target_branch: row.get(10)?,
-        fetched_at: row.get(11)?,
+        source_branch: row.get(11)?,
+        fetched_at: row.get(12)?,
         files: task_files_from_json(files_json.as_deref()),
         comments: task_comments_from_json(comments_json.as_deref()),
         labels: external_labels_from_json(labels_json.as_deref()),
@@ -2649,9 +2675,10 @@ fn row_to_pull_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<PullRequestR
         external_body: row.get(11)?,
         external_state: row.get(12)?,
         target_branch: row.get(13)?,
-        fetched_at: row.get(14)?,
-        created_at: row.get(15)?,
-        updated_at: row.get(16)?,
+        source_branch: row.get(14)?,
+        fetched_at: row.get(15)?,
+        created_at: row.get(16)?,
+        updated_at: row.get(17)?,
     })
 }
 
@@ -4982,6 +5009,284 @@ fn ai_prompt_deep_link(
     Ok(url.to_string())
 }
 
+#[derive(Debug)]
+struct AiPromptWorkspace {
+    task: Task,
+    resource: LocalResource,
+    path: PathBuf,
+}
+
+#[derive(Debug)]
+struct AiPromptCheckout {
+    provider: String,
+    url: String,
+    branch: String,
+}
+
+fn ai_prompt_branch_slug(title: &str) -> String {
+    let mut slug = String::new();
+    let mut needs_separator = false;
+
+    for character in title.chars().flat_map(char::to_lowercase) {
+        if character.is_alphanumeric() {
+            if needs_separator && !slug.is_empty() {
+                slug.push('-');
+            }
+            slug.push(character);
+            needs_separator = false;
+        } else if !slug.is_empty() {
+            needs_separator = true;
+        }
+    }
+
+    if slug.is_empty() {
+        slug.push_str("task");
+    }
+    format!("agent/{slug}")
+}
+
+fn git_branch_name_is_valid(path: &Path, branch: &str) -> bool {
+    run_git(path, &["check-ref-format", "--branch", branch]).is_ok()
+}
+
+fn git_worktree_is_clean(path: &Path) -> Result<bool, String> {
+    Ok(run_git(
+        path,
+        &["status", "--porcelain=v1", "--untracked-files=normal"],
+    )?
+    .trim()
+    .is_empty())
+}
+
+fn ai_prompt_workspace_in_db(
+    db: &SqliteConnection,
+    task_id: &str,
+    input_path: &str,
+) -> Result<AiPromptWorkspace, String> {
+    let task = get_task(db, task_id)
+        .map_err(db_error)?
+        .ok_or_else(|| "Task not found.".to_string())?;
+    let project_id = task
+        .project_id
+        .as_deref()
+        .ok_or_else(|| "This task is not assigned to a project.".to_string())?;
+    let trimmed_path = input_path.trim();
+    if trimmed_path.is_empty() {
+        return Err("Repository is required.".to_string());
+    }
+    let path = fs::canonicalize(trimmed_path)
+        .map_err(|_| "The selected repository no longer exists.".to_string())?;
+    if !path.is_dir() {
+        return Err("The selected repository must be a directory.".to_string());
+    }
+    let canonical_path = path.to_string_lossy().to_string();
+    let resource = db
+        .query_row(
+            "SELECT id, project_id, provider, repo_url, path, name, created_at, updated_at
+             FROM local_resources WHERE project_id = ?1 AND path = ?2 LIMIT 1",
+            params![project_id, canonical_path],
+            row_to_local_resource,
+        )
+        .optional()
+        .map_err(db_error)?
+        .ok_or_else(|| "The selected repository is not configured for this task.".to_string())?;
+
+    current_git_branch(&path)?;
+
+    Ok(AiPromptWorkspace {
+        task,
+        resource,
+        path,
+    })
+}
+
+fn review_request_normalized_repo(provider: &str, url: &str) -> Option<String> {
+    let without_query = url.split(['?', '#']).next().unwrap_or(url);
+    let repo_url = match provider {
+        "github" => without_query.split_once("/pull/")?.0,
+        "gitlab" => without_query.split_once("/-/merge_requests/")?.0,
+        _ => return None,
+    };
+    normalize_repository_url(repo_url)
+}
+
+fn ai_prompt_checkout_for_workspace(
+    db: &SqliteConnection,
+    workspace: &AiPromptWorkspace,
+) -> Result<Option<AiPromptCheckout>, String> {
+    let Some(link) = list_task_links_in_db(db, &workspace.task.id)
+        .map_err(db_error)?
+        .into_iter()
+        .next()
+    else {
+        return Ok(None);
+    };
+    if !matches!(
+        (link.provider.as_str(), link.kind.as_str()),
+        ("github", "pull_request") | ("gitlab", "merge_request")
+    ) {
+        return Ok(None);
+    }
+    if !matches!(
+        link.external_state
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("open" | "opened")
+    ) {
+        return Ok(None);
+    }
+    let Some(branch) = link
+        .source_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(review_repo) = review_request_normalized_repo(&link.provider, &link.url) else {
+        return Ok(None);
+    };
+    let Some(resource_repo) = normalize_repository_url(&workspace.resource.repo_url) else {
+        return Ok(None);
+    };
+    if review_repo != resource_repo || !git_branch_name_is_valid(&workspace.path, branch) {
+        return Ok(None);
+    }
+
+    Ok(Some(AiPromptCheckout {
+        provider: link.provider,
+        url: link.url,
+        branch: branch.to_string(),
+    }))
+}
+
+fn inspect_ai_prompt_branches_in_db(
+    db: &SqliteConnection,
+    input: &InspectAiPromptBranchesInput,
+) -> Result<AiPromptBranchOptions, String> {
+    let workspace = ai_prompt_workspace_in_db(db, &input.task_id, &input.path)?;
+    let current_branch = current_git_branch(&workspace.path)?;
+    let new_branch = ai_prompt_branch_slug(&workspace.task.title);
+    let checkout_branch =
+        ai_prompt_checkout_for_workspace(db, &workspace)?.map(|checkout| checkout.branch);
+
+    Ok(AiPromptBranchOptions {
+        current_branch,
+        new_branch,
+        checkout_branch,
+        is_clean: git_worktree_is_clean(&workspace.path)?,
+    })
+}
+
+fn prepare_ai_prompt_checkout(
+    workspace: &AiPromptWorkspace,
+    checkout: AiPromptCheckout,
+) -> Result<(), String> {
+    if !git_worktree_is_clean(&workspace.path)? {
+        return Err(
+            "Repository has uncommitted or untracked changes. Commit, stash, or clean it before checking out the pull or merge request branch."
+                .to_string(),
+        );
+    }
+    let normalized_resource = normalize_repository_url(&workspace.resource.repo_url)
+        .ok_or_else(|| "Could not normalize the saved local resource URL.".to_string())?;
+    let remote = select_git_remote(&workspace.path, Some(&normalized_resource))?;
+    let (remote_head, _, remote_review_branch) =
+        checkout_target(&checkout.provider, &checkout.url)?;
+    let remote_ref = format!("refs/remotes/{}/{}", remote.name, remote_review_branch);
+    let remote_head_ref = format!("refs/{remote_head}");
+    let remote_head_sha = run_git(
+        &workspace.path,
+        &["ls-remote", &remote.name, &remote_head_ref],
+    )
+    .map_err(|error| format!("Could not check the remote review branch: {error}"))?;
+    if remote_head_sha.trim().is_empty() {
+        return Err(
+            "Remote review branch not found. The pull or merge request may be closed, merged, or removed."
+                .to_string(),
+        );
+    }
+    let fetch_refspec = format!("+{remote_head}:{remote_ref}");
+    run_git(&workspace.path, &["fetch", &remote.name, &fetch_refspec]).map_err(|error| {
+        format!(
+            "Could not fetch review branch from {}: {error}",
+            remote.name
+        )
+    })?;
+
+    let local_ref = format!("refs/heads/{}", checkout.branch);
+    if !verify_ref(&workspace.path, &local_ref) {
+        run_git(
+            &workspace.path,
+            &["switch", "-c", &checkout.branch, &remote_ref],
+        )
+        .map_err(|error| format!("Could not create pull or merge request branch: {error}"))?;
+        return Ok(());
+    }
+
+    let local_is_behind = run_git(
+        &workspace.path,
+        &["merge-base", "--is-ancestor", &local_ref, &remote_ref],
+    )
+    .is_ok();
+    let local_is_ahead = run_git(
+        &workspace.path,
+        &["merge-base", "--is-ancestor", &remote_ref, &local_ref],
+    )
+    .is_ok();
+    if !local_is_behind && !local_is_ahead {
+        return Err(format!(
+            "Local branch {} has diverged from the pull or merge request branch. Reconcile it before starting the AI thread.",
+            checkout.branch
+        ));
+    }
+
+    run_git(&workspace.path, &["switch", &checkout.branch])
+        .map_err(|error| format!("Could not switch to pull or merge request branch: {error}"))?;
+    if local_is_behind && !local_is_ahead {
+        run_git(&workspace.path, &["merge", "--ff-only", &remote_ref]).map_err(|error| {
+            format!("Could not fast-forward pull or merge request branch: {error}")
+        })?;
+    }
+    Ok(())
+}
+
+fn prepare_ai_prompt_branch_in_db(
+    db: &SqliteConnection,
+    task_id: &str,
+    path: &str,
+    branch_mode: &str,
+) -> Result<String, String> {
+    let workspace = ai_prompt_workspace_in_db(db, task_id, path)?;
+    match branch_mode {
+        "current" => {}
+        "new" => {
+            if !git_worktree_is_clean(&workspace.path)? {
+                return Err(
+                    "Repository has uncommitted or untracked changes. Commit, stash, or clean it before creating a branch."
+                        .to_string(),
+                );
+            }
+            let branch = ai_prompt_branch_slug(&workspace.task.title);
+            if verify_ref(&workspace.path, &format!("refs/heads/{branch}")) {
+                return Err(format!("Branch {branch} already exists."));
+            }
+            run_git(&workspace.path, &["switch", "-c", &branch])
+                .map_err(|error| format!("Could not create branch {branch}: {error}"))?;
+        }
+        "checkout" => {
+            let checkout = ai_prompt_checkout_for_workspace(db, &workspace)?
+                .ok_or_else(|| "No confirmed open pull or merge request branch is available for this task and repository.".to_string())?;
+            prepare_ai_prompt_checkout(&workspace, checkout)?;
+        }
+        _ => return Err("AI Prompt branch mode is not supported.".to_string()),
+    }
+
+    Ok(workspace.path.to_string_lossy().to_string())
+}
+
 fn prepare_ai_prompt_thread_in_db(
     db: &SqliteConnection,
     input: &OpenAiPromptThreadInput,
@@ -4992,31 +5297,8 @@ fn prepare_ai_prompt_thread_in_db(
         .map_err(db_error)?
         .ok_or_else(|| "Task not found.".to_string())?;
 
-    let trimmed_path = input.path.trim();
-    if trimmed_path.is_empty() {
-        return Err("Repository or directory is required.".to_string());
-    }
-    let canonical_path = fs::canonicalize(trimmed_path)
-        .map_err(|_| "The selected repository or directory no longer exists.".to_string())?;
-    if !canonical_path.is_dir() {
-        return Err("The selected workspace must be a directory.".to_string());
-    }
-    let canonical_path = canonical_path.to_string_lossy().to_string();
-    let path_is_available: bool = db
-        .query_row(
-            "SELECT
-                EXISTS(SELECT 1 FROM directories WHERE path = ?1)
-                OR EXISTS(
-                    SELECT 1 FROM local_resources
-                    WHERE path = ?1 AND project_id = ?2
-                )",
-            params![canonical_path, task.project_id],
-            |row| row.get(0),
-        )
-        .map_err(db_error)?;
-    if !path_is_available {
-        return Err("The selected workspace is not configured for this task.".to_string());
-    }
+    let canonical_path =
+        prepare_ai_prompt_branch_in_db(db, &task.id, &input.path, &input.branch_mode)?;
 
     ai_prompt_deep_link(
         &prompt.agent_type,
@@ -5848,8 +6130,8 @@ fn link_task_resource_in_db(
     let labels_json = external_labels_to_json(&metadata.labels);
     db.execute(
         "INSERT INTO task_links
-            (task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, external_state_color, target_branch, fetched_at, files_json, comments_json, labels_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            (task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, external_state_color, target_branch, source_branch, fetched_at, files_json, comments_json, labels_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
          ON CONFLICT(task_id) DO UPDATE SET
             provider = excluded.provider,
             kind = excluded.kind,
@@ -5861,6 +6143,7 @@ fn link_task_resource_in_db(
             external_state = excluded.external_state,
             external_state_color = excluded.external_state_color,
             target_branch = excluded.target_branch,
+            source_branch = excluded.source_branch,
             fetched_at = excluded.fetched_at,
             files_json = excluded.files_json,
             comments_json = excluded.comments_json,
@@ -5877,6 +6160,7 @@ fn link_task_resource_in_db(
             &metadata.state,
             &metadata.state_color,
             &metadata.target_branch,
+            &metadata.source_branch,
             &metadata.fetched_at,
             &files_json,
             &comments_json,
@@ -5892,7 +6176,7 @@ fn link_task_resource_in_db(
 
 fn list_task_links_in_db(db: &SqliteConnection, task_id: &str) -> rusqlite::Result<Vec<TaskLink>> {
     let mut statement = db.prepare(
-        "SELECT task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, external_state_color, target_branch, fetched_at, files_json, comments_json, labels_json
+        "SELECT task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, external_state_color, target_branch, source_branch, fetched_at, files_json, comments_json, labels_json
          FROM task_links WHERE task_id = ?1 ORDER BY provider ASC, kind ASC",
     )?;
     let links = statement
@@ -6148,7 +6432,7 @@ fn refresh_task_external_details_in_db(
 
 fn migrate_pull_requests_into_tasks(db: &SqliteConnection) -> rusqlite::Result<()> {
     let mut statement = db.prepare(
-        "SELECT id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, target_branch, fetched_at, created_at, updated_at
+        "SELECT id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, target_branch, source_branch, fetched_at, created_at, updated_at
          FROM pull_requests ORDER BY created_at ASC",
     )?;
     let pull_requests = statement
@@ -6189,6 +6473,7 @@ fn migrate_pull_requests_into_tasks(db: &SqliteConnection) -> rusqlite::Result<(
             state: pull_request.external_state.clone(),
             state_color: None,
             target_branch: pull_request.target_branch.clone(),
+            source_branch: pull_request.source_branch.clone(),
             url: Some(pull_request.pr_url.clone()),
             fetched_at: pull_request.fetched_at,
             files: Vec::new(),
@@ -6671,6 +6956,7 @@ impl ProviderMetadata {
             state: None,
             state_color: None,
             target_branch: None,
+            source_branch: None,
             url: None,
             fetched_at: None,
             files: Vec::new(),
@@ -8970,6 +9256,10 @@ fn github_pull_request_target_branch(json: &Value) -> Option<String> {
     json.get("base").and_then(|base| json_string(base, "ref"))
 }
 
+fn github_pull_request_source_branch(json: &Value) -> Option<String> {
+    json.get("head").and_then(|head| json_string(head, "ref"))
+}
+
 fn fetch_github_pull_request(
     connection: &ConnectionRecord,
     parsed: &ParsedInputPayload,
@@ -8990,6 +9280,7 @@ fn fetch_github_pull_request(
         body: json_string(&json, "body"),
         state: github_pull_request_state(&json),
         target_branch: github_pull_request_target_branch(&json),
+        source_branch: github_pull_request_source_branch(&json),
         url: json_string(&json, "html_url").or_else(|| parsed.url.clone()),
         comments,
         labels: github_labels(&json),
@@ -9046,6 +9337,7 @@ fn fetch_gitlab_merge_request(
         body: json_string(&json, "description"),
         state: json_string(&json, "state"),
         target_branch: json_string(&json, "target_branch"),
+        source_branch: json_string(&json, "source_branch"),
         url: merge_request_url,
         comments,
         labels,
@@ -10484,6 +10776,15 @@ fn save_ai_prompt(
 fn delete_ai_prompt(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
     let db = state.db.lock().map_err(db_error)?;
     delete_ai_prompt_in_db(&db, &id)
+}
+
+#[tauri::command]
+fn inspect_ai_prompt_branches(
+    state: tauri::State<'_, AppState>,
+    input: InspectAiPromptBranchesInput,
+) -> Result<AiPromptBranchOptions, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    inspect_ai_prompt_branches_in_db(&db, &input)
 }
 
 #[tauri::command]
@@ -11977,6 +12278,33 @@ mod tests {
         path
     }
 
+    fn ai_prompt_pull_request_repo() -> (PathBuf, PathBuf) {
+        let root = unique_temp_dir("ai-prompt-pr");
+        let remote = root.join("remote.git");
+        let repository = root.join("repository");
+        fs::create_dir_all(&remote).expect("create remote directory");
+        fs::create_dir_all(&repository).expect("create repository directory");
+        run_git_test(&remote, &["init", "--bare"]);
+        run_git_test(&repository, &["init"]);
+        run_git_test(&repository, &["config", "user.email", "test@example.org"]);
+        run_git_test(&repository, &["config", "user.name", "Test User"]);
+        run_git_test(&repository, &["checkout", "-b", "main"]);
+        fs::write(repository.join("app.txt"), "base\n").expect("write base");
+        run_git_test(&repository, &["add", "app.txt"]);
+        run_git_test(&repository, &["commit", "-m", "base"]);
+        let remote_path = remote.to_string_lossy().to_string();
+        run_git_test(&repository, &["remote", "add", "origin", &remote_path]);
+        run_git_test(&repository, &["push", "origin", "main"]);
+        run_git_test(&repository, &["checkout", "-b", "feature/asdf"]);
+        fs::write(repository.join("app.txt"), "feature\n").expect("write feature");
+        run_git_test(&repository, &["add", "app.txt"]);
+        run_git_test(&repository, &["commit", "-m", "feature"]);
+        run_git_test(&repository, &["push", "origin", "HEAD:refs/pull/42/head"]);
+        run_git_test(&repository, &["checkout", "main"]);
+        run_git_test(&repository, &["branch", "-D", "feature/asdf"]);
+        (root, repository)
+    }
+
     fn save_test_local_resource(
         db: &SqliteConnection,
         project_id: &str,
@@ -12449,11 +12777,13 @@ mod tests {
         assert!(column_exists(&db, "task_links", "connection_id"));
         assert!(column_exists(&db, "task_links", "external_state_color"));
         assert!(column_exists(&db, "task_links", "target_branch"));
+        assert!(column_exists(&db, "task_links", "source_branch"));
         assert!(column_exists(&db, "task_links", "files_json"));
         assert!(column_exists(&db, "task_links", "comments_json"));
         assert!(column_exists(&db, "task_links", "labels_json"));
         assert!(column_exists(&db, "pull_requests", "external_state"));
         assert!(column_exists(&db, "pull_requests", "target_branch"));
+        assert!(column_exists(&db, "pull_requests", "source_branch"));
         assert!(column_exists(&db, "directories", "path"));
         assert!(column_exists(&db, "directories", "name"));
         assert!(column_exists(&db, "activities", "occurred_at"));
@@ -14264,7 +14594,7 @@ mod tests {
 
         let mut statement = db
             .prepare(
-                "SELECT task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, external_state_color, target_branch, fetched_at, files_json, comments_json, labels_json
+                "SELECT task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, external_state_color, target_branch, source_branch, fetched_at, files_json, comments_json, labels_json
                  FROM task_links WHERE task_id = ?1",
             )
             .expect("prepare task links query");
@@ -14623,6 +14953,7 @@ mod tests {
             state: Some("Doing".to_string()),
             state_color: Some("#61bd4f".to_string()),
             target_branch: None,
+            source_branch: None,
             url: Some("https://trello.com/c/card123/fetched".to_string()),
             fetched_at: Some(123),
             files: vec![TaskFile {
@@ -14718,6 +15049,7 @@ mod tests {
                 state: Some("Done".to_string()),
                 state_color: None,
                 target_branch: None,
+                source_branch: None,
                 url: None,
                 fetched_at: Some(123),
                 files: Vec::new(),
@@ -15000,9 +15332,9 @@ mod tests {
 
         db.execute(
             "INSERT INTO pull_requests
-                (id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, target_branch, fetched_at, created_at, updated_at)
+                (id, project_id, provider, repo_url, pr_url, title, status, review_notes, test_state, connection_id, external_title, external_body, external_state, target_branch, source_branch, fetched_at, created_at, updated_at)
              VALUES
-                ('pr_1', ?1, 'github', 'https://github.com/owner/repo', ?2, 'Fallback title', 'reviewing', 'Review note', '{}', NULL, 'Fetched title', 'Fetched body', 'open', 'main', 10, 1, 2)",
+                ('pr_1', ?1, 'github', 'https://github.com/owner/repo', ?2, 'Fallback title', 'reviewing', 'Review note', '{}', NULL, 'Fetched title', 'Fetched body', 'open', 'main', 'feature/asdf', 10, 1, 2)",
             params![project.id, pr_url],
         )
         .expect("insert pull request");
@@ -15014,6 +15346,12 @@ mod tests {
             .expect("PR task");
         assert_ne!(pr_task.id, existing_task.id);
         assert_eq!(pr_task.title, "Fetched title");
+        assert_eq!(
+            list_task_links_in_db(&db, &pr_task.id).expect("migrated links")[0]
+                .source_branch
+                .as_deref(),
+            Some("feature/asdf")
+        );
 
         let relation_count: i64 = db
             .query_row(
@@ -15499,17 +15837,23 @@ mod tests {
     }
 
     #[test]
-    fn prepares_ai_prompt_thread_for_a_configured_directory() {
+    fn prepares_ai_prompt_thread_for_a_configured_repository() {
         let db = memory_db();
-        let directory_path = temp_test_path("ai-prompt-workspace");
-        fs::create_dir_all(&directory_path).expect("create workspace");
-        let directory = save_directory_in_db(
+        let repository_path = review_diff_repo_with_origin("git@github.com:acme/app.git");
+        run_git_test(&repository_path, &["checkout", "main"]);
+        let project =
+            create_project_in_db(&db, "App".to_string(), None, None).expect("create project");
+        let resource = save_local_resource_in_db(
             &db,
-            DirectoryInput {
-                path: directory_path.to_string_lossy().to_string(),
+            LocalResourceInput {
+                project_id: project.id.clone(),
+                path: repository_path.to_string_lossy().to_string(),
+                expected_provider: None,
+                expected_repo_url: None,
+                name: None,
             },
         )
-        .expect("save directory");
+        .expect("save repository");
         let prompt = save_ai_prompt_in_db(
             &db,
             AiPromptInput {
@@ -15524,7 +15868,7 @@ mod tests {
         .expect("save prompt");
         let task = create_task_in_db(
             &db,
-            None,
+            Some(project.id),
             "Task title".to_string(),
             "Task content".to_string(),
             Some("https://github.com/acme/app/issues/7".to_string()),
@@ -15536,7 +15880,8 @@ mod tests {
             &OpenAiPromptThreadInput {
                 ai_prompt_id: prompt.id,
                 task_id: task.id.clone(),
-                path: directory.path,
+                path: resource.path,
+                branch_mode: "current".to_string(),
             },
         )
         .expect("prepare thread");
@@ -15559,7 +15904,248 @@ mod tests {
             "preparing an AI thread must keep the original task"
         );
 
-        fs::remove_dir_all(directory_path).expect("remove workspace");
+        fs::remove_dir_all(repository_path).expect("remove repository");
+    }
+
+    #[test]
+    fn slugifies_ai_prompt_branch_names_deterministically() {
+        assert_eq!(
+            ai_prompt_branch_slug("  Fix: Über-cool___thing!!!  "),
+            "agent/fix-über-cool-thing"
+        );
+        assert_eq!(ai_prompt_branch_slug("🚀✨"), "agent/task");
+        assert_eq!(ai_prompt_branch_slug("One   Two"), "agent/one-two");
+    }
+
+    #[test]
+    fn inspects_ai_prompt_branches_and_enforces_current_and_new_branch_safety() {
+        let db = memory_db();
+        let repository_path = review_diff_repo_with_origin("git@github.com:acme/app.git");
+        run_git_test(&repository_path, &["checkout", "main"]);
+        let project =
+            create_project_in_db(&db, "App".to_string(), None, None).expect("create project");
+        let resource = save_local_resource_in_db(
+            &db,
+            LocalResourceInput {
+                project_id: project.id.clone(),
+                path: repository_path.to_string_lossy().to_string(),
+                expected_provider: None,
+                expected_repo_url: None,
+                name: None,
+            },
+        )
+        .expect("save repository");
+        let task = create_task_in_db(
+            &db,
+            Some(project.id),
+            "Implement branch picker".to_string(),
+            String::new(),
+            None,
+        )
+        .expect("create task");
+        let input = InspectAiPromptBranchesInput {
+            task_id: task.id.clone(),
+            path: resource.path.clone(),
+        };
+
+        let options = inspect_ai_prompt_branches_in_db(&db, &input).expect("inspect branches");
+        assert_eq!(options.current_branch, "main");
+        assert_eq!(options.new_branch, "agent/implement-branch-picker");
+        assert_eq!(options.checkout_branch, None);
+        assert!(options.is_clean);
+
+        fs::write(repository_path.join("dirty.txt"), "dirty").expect("write dirty file");
+        let dirty = inspect_ai_prompt_branches_in_db(&db, &input).expect("inspect dirty repo");
+        assert!(!dirty.is_clean);
+        assert!(prepare_ai_prompt_branch_in_db(&db, &task.id, &resource.path, "current").is_ok());
+        assert!(
+            prepare_ai_prompt_branch_in_db(&db, &task.id, &resource.path, "new")
+                .unwrap_err()
+                .contains("uncommitted")
+        );
+        fs::remove_file(repository_path.join("dirty.txt")).expect("remove dirty file");
+
+        let head_before = run_git(&repository_path, &["rev-parse", "HEAD"]).expect("head");
+        prepare_ai_prompt_branch_in_db(&db, &task.id, &resource.path, "new")
+            .expect("create new branch");
+        assert_eq!(
+            current_git_branch(&repository_path).expect("current branch"),
+            "agent/implement-branch-picker"
+        );
+        assert_eq!(
+            run_git(&repository_path, &["rev-parse", "HEAD"]).expect("new head"),
+            head_before
+        );
+        assert!(
+            prepare_ai_prompt_branch_in_db(&db, &task.id, &resource.path, "new")
+                .unwrap_err()
+                .contains("already exists")
+        );
+
+        run_git_test(&repository_path, &["checkout", "--detach"]);
+        assert!(inspect_ai_prompt_branches_in_db(&db, &input)
+            .unwrap_err()
+            .contains("not on a branch"));
+
+        fs::remove_dir_all(repository_path).expect("remove repository");
+    }
+
+    #[test]
+    fn offers_and_safely_updates_confirmed_pull_request_source_branches() {
+        let db = memory_db();
+        let (root, repository_path) = ai_prompt_pull_request_repo();
+        let project =
+            create_project_in_db(&db, "App".to_string(), None, None).expect("create project");
+        let resource = save_local_resource_in_db(
+            &db,
+            LocalResourceInput {
+                project_id: project.id.clone(),
+                path: repository_path.to_string_lossy().to_string(),
+                expected_provider: None,
+                expected_repo_url: None,
+                name: None,
+            },
+        )
+        .expect("save repository");
+        let remote_path = root.join("remote.git").to_string_lossy().to_string();
+        let pull_request_url = format!("{remote_path}/pull/42");
+        let task = create_task_in_db(
+            &db,
+            Some(project.id),
+            "Continue feature".to_string(),
+            String::new(),
+            Some(pull_request_url.clone()),
+        )
+        .expect("create task");
+        let metadata = ProviderMetadata {
+            state: Some("open".to_string()),
+            source_branch: Some("feature/asdf".to_string()),
+            target_branch: Some("main".to_string()),
+            ..ProviderMetadata::empty()
+        };
+        link_task_resource_in_db(
+            &db,
+            task.id.clone(),
+            "github".to_string(),
+            "pull_request".to_string(),
+            "acme/app#42".to_string(),
+            pull_request_url,
+            &metadata,
+        )
+        .expect("link pull request");
+
+        let options = inspect_ai_prompt_branches_in_db(
+            &db,
+            &InspectAiPromptBranchesInput {
+                task_id: task.id.clone(),
+                path: resource.path.clone(),
+            },
+        )
+        .expect("inspect branches");
+        assert_eq!(options.checkout_branch.as_deref(), Some("feature/asdf"));
+        assert_eq!(
+            list_task_links_in_db(&db, &task.id).expect("links")[0]
+                .source_branch
+                .as_deref(),
+            Some("feature/asdf")
+        );
+        db.execute(
+            "UPDATE task_links SET external_state = 'closed' WHERE task_id = ?1",
+            params![&task.id],
+        )
+        .expect("close pull request");
+        assert_eq!(
+            inspect_ai_prompt_branches_in_db(
+                &db,
+                &InspectAiPromptBranchesInput {
+                    task_id: task.id.clone(),
+                    path: resource.path.clone(),
+                },
+            )
+            .expect("inspect closed pull request")
+            .checkout_branch,
+            None
+        );
+        db.execute(
+            "UPDATE task_links SET external_state = 'open', source_branch = NULL WHERE task_id = ?1",
+            params![&task.id],
+        )
+        .expect("clear source branch");
+        assert_eq!(
+            inspect_ai_prompt_branches_in_db(
+                &db,
+                &InspectAiPromptBranchesInput {
+                    task_id: task.id.clone(),
+                    path: resource.path.clone(),
+                },
+            )
+            .expect("inspect unsynced pull request")
+            .checkout_branch,
+            None
+        );
+        db.execute(
+            "UPDATE task_links SET source_branch = 'feature/asdf' WHERE task_id = ?1",
+            params![&task.id],
+        )
+        .expect("restore source branch");
+
+        prepare_ai_prompt_branch_in_db(&db, &task.id, &resource.path, "checkout")
+            .expect("checkout pull request");
+        assert_eq!(
+            current_git_branch(&repository_path).expect("current branch"),
+            "feature/asdf"
+        );
+        assert_eq!(
+            fs::read_to_string(repository_path.join("app.txt")).expect("feature content"),
+            "feature\n"
+        );
+
+        let updater = root.join("updater");
+        fs::create_dir_all(&updater).expect("create updater");
+        run_git_test(&updater, &["init"]);
+        run_git_test(&updater, &["config", "user.email", "test@example.org"]);
+        run_git_test(&updater, &["config", "user.name", "Test User"]);
+        run_git_test(&updater, &["remote", "add", "origin", &remote_path]);
+        run_git_test(&updater, &["fetch", "origin", "refs/pull/42/head"]);
+        run_git_test(&updater, &["checkout", "-b", "remote-update", "FETCH_HEAD"]);
+        fs::write(updater.join("remote.txt"), "remote one\n").expect("write remote commit");
+        run_git_test(&updater, &["add", "remote.txt"]);
+        run_git_test(&updater, &["commit", "-m", "remote update one"]);
+        run_git_test(&updater, &["push", "origin", "HEAD:refs/pull/42/head"]);
+        let remote_sha = run_git(&updater, &["rev-parse", "HEAD"]).expect("remote sha");
+
+        prepare_ai_prompt_branch_in_db(&db, &task.id, &resource.path, "checkout")
+            .expect("fast-forward pull request branch");
+        assert_eq!(
+            run_git(&repository_path, &["rev-parse", "HEAD"]).expect("fast-forwarded sha"),
+            remote_sha
+        );
+
+        fs::write(repository_path.join("local.txt"), "ahead\n").expect("write local commit");
+        run_git_test(&repository_path, &["add", "local.txt"]);
+        run_git_test(&repository_path, &["commit", "-m", "local ahead"]);
+        let ahead_sha = run_git(&repository_path, &["rev-parse", "HEAD"]).expect("ahead sha");
+        prepare_ai_prompt_branch_in_db(&db, &task.id, &resource.path, "checkout")
+            .expect("retain ahead branch");
+        assert_eq!(
+            run_git(&repository_path, &["rev-parse", "HEAD"]).expect("retained sha"),
+            ahead_sha
+        );
+
+        fs::write(updater.join("remote.txt"), "remote two\n").expect("write second remote commit");
+        run_git_test(&updater, &["add", "remote.txt"]);
+        run_git_test(&updater, &["commit", "-m", "remote update two"]);
+        run_git_test(&updater, &["push", "origin", "HEAD:refs/pull/42/head"]);
+
+        let divergence =
+            prepare_ai_prompt_branch_in_db(&db, &task.id, &resource.path, "checkout").unwrap_err();
+        assert!(divergence.contains("diverged"));
+        assert_eq!(
+            run_git(&repository_path, &["rev-parse", "HEAD"]).expect("unchanged sha"),
+            ahead_sha
+        );
+
+        fs::remove_dir_all(root).expect("remove pull request repositories");
     }
 
     #[test]
@@ -15895,16 +16481,30 @@ mod tests {
         assert!(!review_request_is_closed(Some("opened")));
         assert!(!review_request_is_closed(None));
 
-        let github_pr = serde_json::json!({ "base": { "ref": "2.x" } });
+        let github_pr = serde_json::json!({
+            "base": { "ref": "2.x" },
+            "head": { "ref": "feature/github" }
+        });
         assert_eq!(
             github_pull_request_target_branch(&github_pr).as_deref(),
             Some("2.x")
         );
+        assert_eq!(
+            github_pull_request_source_branch(&github_pr).as_deref(),
+            Some("feature/github")
+        );
 
-        let gitlab_mr = serde_json::json!({ "target_branch": "2.6" });
+        let gitlab_mr = serde_json::json!({
+            "target_branch": "2.6",
+            "source_branch": "feature/gitlab"
+        });
         assert_eq!(
             json_string(&gitlab_mr, "target_branch").as_deref(),
             Some("2.6")
+        );
+        assert_eq!(
+            json_string(&gitlab_mr, "source_branch").as_deref(),
+            Some("feature/gitlab")
         );
     }
 

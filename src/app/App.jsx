@@ -733,6 +733,7 @@ function App() {
           commandSettings={commandSettings}
           localResources={localResources}
           homeDirectory={terminalSettings.profileDirectory}
+          onInspectAiPromptBranches={(payload) => api.inspectAiPromptBranches(payload)}
           onOpenAiPromptThread={async (payload) => {
             const taskToKeep = selectedTask;
             try {
