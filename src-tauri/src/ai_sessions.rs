@@ -481,16 +481,85 @@ fn codex_custom_exec_requires_approval(payload: &Value) -> bool {
     input
         .split("tools.exec_command(")
         .skip(1)
-        .filter_map(|arguments| {
-            serde_json::Deserializer::from_str(arguments.trim_start())
-                .into_iter::<Value>()
-                .next()
-        })
-        .filter_map(Result::ok)
-        .any(|arguments| {
+        .any(codex_exec_command_arguments_require_approval)
+}
+
+fn codex_exec_command_arguments_require_approval(arguments: &str) -> bool {
+    if serde_json::Deserializer::from_str(arguments.trim_start())
+        .into_iter::<Value>()
+        .next()
+        .and_then(Result::ok)
+        .is_some_and(|arguments| {
             arguments.get("sandbox_permissions").and_then(Value::as_str)
                 == Some("require_escalated")
         })
+    {
+        return true;
+    }
+
+    // Custom exec scripts are JavaScript, and the generated object literals can
+    // use identifier keys instead of strict JSON (`sandbox_permissions:"..."`).
+    // Only inspect code outside string literals so command text mentioning the
+    // option does not look like an approval request.
+    let bytes = arguments.as_bytes();
+    let key = b"sandbox_permissions";
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' | b'"' | b'`' => {
+                let quote = bytes[index];
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == b'\\' {
+                        index += 2;
+                    } else if bytes[index] == quote {
+                        index += 1;
+                        break;
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            _ if bytes[index..].starts_with(key)
+                && (index == 0
+                    || !(bytes[index - 1].is_ascii_alphanumeric()
+                        || matches!(bytes[index - 1], b'_' | b'$')))
+                && bytes.get(index + key.len()).is_none_or(|value| {
+                    !value.is_ascii_alphanumeric() && !matches!(*value, b'_' | b'$')
+                }) =>
+            {
+                index += key.len();
+                while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+                    index += 1;
+                }
+                if bytes.get(index) != Some(&b':') {
+                    continue;
+                }
+                index += 1;
+                while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+                    index += 1;
+                }
+                let Some(quote @ (b'\'' | b'"')) = bytes.get(index).copied() else {
+                    continue;
+                };
+                index += 1;
+                let value_start = index;
+                while bytes
+                    .get(index)
+                    .is_some_and(|value| *value != quote && *value != b'\\')
+                {
+                    index += 1;
+                }
+                if bytes.get(index) == Some(&quote)
+                    && &bytes[value_start..index] == b"require_escalated"
+                {
+                    return true;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    false
 }
 
 fn update_codex_session_state(value: &Value, state: &mut CodexSessionState) {
@@ -1598,6 +1667,117 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_javascript_exec_approval_arguments_without_matching_command_text() {
+        assert!(codex_exec_command_arguments_require_approval(
+            r#"{cmd:"php bin/phpunit",yield_time_ms:30000,sandbox_permissions:"require_escalated",justification:"Allow the test database?"})"#
+        ));
+        assert!(codex_exec_command_arguments_require_approval(
+            r#"{cmd:'npm test', sandbox_permissions: 'require_escalated'})"#
+        ));
+        assert!(!codex_exec_command_arguments_require_approval(
+            r#"{cmd:"rg -n 'sandbox_permissions:\"require_escalated\"' .",sandbox_permissions:"use_default"})"#
+        ));
+        assert!(!codex_exec_command_arguments_require_approval(
+            r#"{cmd:"npm test",sandbox_permissions:"use_default"})"#
+        ));
+    }
+
+    #[test]
+    fn keeps_codex_waiting_until_every_pending_reason_is_resolved() {
+        let mut state = CodexSessionState::default();
+        let events = [
+            serde_json::json!({
+                "type": "event_msg",
+                "payload": {"type": "task_started"}
+            }),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "request_user_input",
+                    "call_id": "input-call"
+                }
+            }),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "call_id": "direct-approval-call",
+                    "arguments": r#"{"cmd":"npm test","sandbox_permissions":"require_escalated"}"#
+                }
+            }),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "exec",
+                    "call_id": "wrapped-approval-call",
+                    "input": r#"const r = await tools.exec_command({cmd:"php bin/phpunit",sandbox_permissions:"require_escalated"}); text(r.output);"#
+                }
+            }),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "<proposed_plan>\nRun the tests\n</proposed_plan>"
+                    }]
+                }
+            }),
+            serde_json::json!({
+                "type": "event_msg",
+                "timestamp": "2026-07-27T08:00:00Z",
+                "payload": {"type": "task_complete"}
+            }),
+        ];
+        for event in &events {
+            update_codex_session_state(event, &mut state);
+        }
+
+        assert!(!state.running);
+        assert!(state.waiting_for_input());
+
+        for (call_id, output_type) in [
+            ("input-call", "function_call_output"),
+            ("direct-approval-call", "function_call_output"),
+            ("wrapped-approval-call", "custom_tool_call_output"),
+        ] {
+            update_codex_session_state(
+                &serde_json::json!({
+                    "type": "response_item",
+                    "payload": {
+                        "type": output_type,
+                        "call_id": call_id,
+                        "output": "resolved"
+                    }
+                }),
+                &mut state,
+            );
+            assert!(
+                state.waiting_for_input(),
+                "resolving {call_id} must not clear the other waiting reasons"
+            );
+        }
+
+        update_codex_session_state(
+            &serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Implement it"}]
+                }
+            }),
+            &mut state,
+        );
+        assert!(!state.waiting_for_input());
+    }
+
+    #[test]
     fn detects_only_unanswered_codex_input_requests() {
         let directory = fixture_dir("codex-waiting");
         let path = directory.join("rollout.jsonl");
@@ -1697,6 +1877,15 @@ mod tests {
                 "type": "response_item",
                 "payload": {
                     "type": "custom_tool_call",
+                    "name": "exec",
+                    "call_id": "javascript-search-call",
+                    "input": r#"const r = await tools.exec_command({cmd:"rg -n 'sandbox_permissions:\"require_escalated\"' .",sandbox_permissions:"use_default"}); text(r.output);"#
+                }
+            }),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
                     "name": "other",
                     "call_id": "unrelated-call",
                     "input": r#"const r = await tools.exec_command({"cmd":"npm run dev","sandbox_permissions":"require_escalated"}); text(r.output);"#
@@ -1711,6 +1900,40 @@ mod tests {
 
         assert!(!codex_session_state(&path).waiting_for_input());
         assert!(!read_codex_transcript(&path).unwrap().waiting_for_input);
+
+        let javascript_approval = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": "javascript-approval-call",
+                "input": r#"const checks = await Promise.all([
+                    tools.exec_command({cmd:"npm test",sandbox_permissions:"use_default"}),
+                    tools.exec_command({cmd:"php bin/phpunit",yield_time_ms:30000,sandbox_permissions:"require_escalated",justification:"Allow the test database?"})
+                ]);"#
+            }
+        })
+        .to_string();
+        fs::write(&path, format!("{prefix}\n{javascript_approval}\n")).unwrap();
+
+        assert!(codex_session_state(&path).waiting_for_input());
+        assert!(read_codex_transcript(&path).unwrap().waiting_for_input);
+
+        let javascript_answer = serde_json::json!({
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "javascript-approval-call",
+                "output": "permission denied"
+            }
+        })
+        .to_string();
+        fs::write(
+            &path,
+            format!("{prefix}\n{javascript_approval}\n{javascript_answer}\n"),
+        )
+        .unwrap();
+        assert!(!codex_session_state(&path).waiting_for_input());
 
         let approval = serde_json::json!({
             "type": "response_item",
@@ -2095,6 +2318,42 @@ mod tests {
         );
 
         fs::write(&path, prefix).unwrap();
+        assert!(
+            !read_claude_transcript(&path, &directory.join("projects"))
+                .unwrap()
+                .waiting_for_input
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn keeps_claude_waiting_until_every_question_is_answered() {
+        let directory = fixture_dir("claude-multiple-waiting");
+        let projects = directory.join("projects/project-a");
+        fs::create_dir_all(&projects).unwrap();
+        let path = projects.join("waiting-session.jsonl");
+        let prompt = "{\"type\":\"user\",\"sessionId\":\"waiting-session\",\"cwd\":\"/work/app\",\"timestamp\":\"2026-07-22T10:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"Start\"}}\n";
+        let first_question = "{\"type\":\"assistant\",\"sessionId\":\"waiting-session\",\"timestamp\":\"2026-07-22T10:01:00Z\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"name\":\"AskUserQuestion\",\"id\":\"first-question\"}]}}\n";
+        let second_question = "{\"type\":\"assistant\",\"sessionId\":\"waiting-session\",\"timestamp\":\"2026-07-22T10:02:00Z\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"tool_use\",\"content\":[{\"type\":\"tool_use\",\"name\":\"AskUserQuestion\",\"id\":\"second-question\"}]}}\n";
+        let first_answer = "{\"type\":\"user\",\"sessionId\":\"waiting-session\",\"timestamp\":\"2026-07-22T10:03:00Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"first-question\",\"content\":\"Answered\"}]}}\n";
+        let second_answer = "{\"type\":\"user\",\"sessionId\":\"waiting-session\",\"timestamp\":\"2026-07-22T10:04:00Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"second-question\",\"content\":\"Answered\"}]}}\n";
+
+        fs::write(
+            &path,
+            format!("{prompt}{first_question}{second_question}{first_answer}"),
+        )
+        .unwrap();
+        assert!(
+            read_claude_transcript(&path, &directory.join("projects"))
+                .unwrap()
+                .waiting_for_input
+        );
+
+        fs::write(
+            &path,
+            format!("{prompt}{first_question}{second_question}{first_answer}{second_answer}"),
+        )
+        .unwrap();
         assert!(
             !read_claude_transcript(&path, &directory.join("projects"))
                 .unwrap()

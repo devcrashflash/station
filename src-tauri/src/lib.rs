@@ -4863,26 +4863,41 @@ fn delete_ai_prompt_in_db(db: &SqliteConnection, id: &str) -> Result<(), String>
     Ok(())
 }
 
-fn ai_prompt_with_task_context(prompt_text: &str, task: &Task) -> String {
+fn ai_prompt_with_task_context(prompt_name: &str, prompt_text: &str, task: &Task) -> String {
     let title = task.title.trim();
     let body = task.body.trim();
     let body_duplicates_title = title.split_whitespace().eq(body.split_whitespace());
-
-    let mut context = vec![
-        prompt_text,
-        task.source_url.as_deref().unwrap_or_default(),
+    let mut composed = format!(
+        "# {} · {}\n\n<!-- station-task-id: {} -->",
+        prompt_name.trim(),
         title,
-    ];
-    if !body_duplicates_title {
-        context.push(body);
+        task.id
+    );
+
+    let prompt_text = prompt_text.trim();
+    if !prompt_text.is_empty() {
+        composed.push_str("\n\n");
+        composed.push_str(prompt_text);
     }
 
-    context
-        .into_iter()
+    composed.push_str("\n\n---\n\n# ");
+    composed.push_str(title);
+
+    if let Some(source_url) = task
+        .source_url
+        .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n")
+        .filter(|url| !url.is_empty())
+    {
+        composed.push_str("\n\n");
+        composed.push_str(source_url);
+    }
+    if !body_duplicates_title && !body.is_empty() {
+        composed.push_str("\n\n");
+        composed.push_str(body);
+    }
+
+    composed
 }
 
 fn ai_prompt_deep_link(agent_type: &str, prompt: &str, path: &str) -> Result<String, String> {
@@ -4947,7 +4962,7 @@ fn prepare_ai_prompt_thread_in_db(
 
     ai_prompt_deep_link(
         &prompt.agent_type,
-        &ai_prompt_with_task_context(&prompt.prompt_text, &task),
+        &ai_prompt_with_task_context(&prompt.name, &prompt.prompt_text, &task),
         &canonical_path,
     )
 }
@@ -15228,10 +15243,11 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         };
-        let prompt = ai_prompt_with_task_context("Implement this ticket.", &task);
+        let prompt =
+            ai_prompt_with_task_context("Implement ticket", "Implement this ticket.", &task);
         assert_eq!(
             prompt,
-            "Implement this ticket.\n\nhttps://trello.com/c/card123/fix-login\n\nFix login redirect\n\nPreserve the requested destination."
+            "# Implement ticket · Fix login redirect\n\n<!-- station-task-id: task_1 -->\n\nImplement this ticket.\n\n---\n\n# Fix login redirect\n\nhttps://trello.com/c/card123/fix-login\n\nPreserve the requested destination."
         );
 
         let codex = reqwest::Url::parse(
@@ -15284,7 +15300,10 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         };
-        assert_eq!(ai_prompt_with_task_context("  ", &task), "Task title");
+        assert_eq!(
+            ai_prompt_with_task_context("General task", "  ", &task),
+            "# General task · Task title\n\n<!-- station-task-id: task_1 -->\n\n---\n\n# Task title"
+        );
     }
 
     #[test]
@@ -15304,8 +15323,12 @@ mod tests {
         };
 
         assert_eq!(
-            ai_prompt_with_task_context("Implement this task.", &task),
-            "Implement this task.\n\nReview onboarding"
+            ai_prompt_with_task_context(
+                "Implement task",
+                "Implement this task.",
+                &task
+            ),
+            "# Implement task · Review onboarding\n\n<!-- station-task-id: task_1 -->\n\nImplement this task.\n\n---\n\n# Review onboarding"
         );
     }
 
@@ -15353,9 +15376,13 @@ mod tests {
         assert!(deep_link.starts_with("codex://threads/new?"));
         let deep_link = reqwest::Url::parse(&deep_link).expect("parse deep link");
         let query = deep_link.query_pairs().collect::<HashMap<_, _>>();
+        let expected_prompt = format!(
+            "# Implement ticket · Task title\n\n<!-- station-task-id: {} -->\n\nUse the project conventions.\n\n---\n\n# Task title\n\nhttps://github.com/acme/app/issues/7\n\nTask content",
+            task.id
+        );
         assert_eq!(
             query.get("prompt").map(|value| value.as_ref()),
-            Some("Use the project conventions.\n\nhttps://github.com/acme/app/issues/7\n\nTask title\n\nTask content")
+            Some(expected_prompt.as_str())
         );
         assert!(
             get_task(&db, &task.id)
