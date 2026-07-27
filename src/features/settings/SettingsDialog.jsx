@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AtSign, Bot, CalendarDays, ChevronDown, FolderOpen, GitMerge, GitPullRequest, Keyboard, LoaderCircle, Monitor, Palette, Pencil, PlugZap, RefreshCw, RotateCcw, SquareKanban, SquareTerminal, Trash2, UserRound } from "lucide-react";
+import { AtSign, Bot, CalendarDays, ChevronDown, FolderOpen, GitMerge, GitPullRequest, Keyboard, LoaderCircle, Monitor, Palette, Pencil, PlugZap, RefreshCw, RotateCcw, Signpost, SquareKanban, SquareTerminal, Trash2, UserRound } from "lucide-react";
 
 import { EmptyState } from "@/components/common/EmptyState";
 import { Modal } from "@/components/common/Modal";
@@ -58,8 +58,8 @@ const calendarTypeLabels = {
 };
 
 const aiAgentTypeOptions = [
-  { value: "codex", label: "Codex" },
-  { value: "claude", label: "Claude" },
+  { value: "codex", label: "Codex", icon: SquareTerminal },
+  { value: "claude", label: "Claude", icon: Bot },
 ];
 
 const themeOptions = [
@@ -77,7 +77,7 @@ const permissionHints = {
 const TRELLO_BASE_URL = "https://api.trello.com";
 const settingsSections = [
   { id: "accounts", label: "Accounts", description: "Connected services", icon: UserRound },
-  { id: "ai-prompts", label: "AI Prompts", description: "Reusable AI instructions", icon: Bot },
+  { id: "commands", label: "Commands", description: "AI Prompts & CLI Commands", icon: Signpost },
   { id: "ai-sessions", label: "AI Sessions", description: "Runners and refresh rate", icon: Bot },
   { id: "directories", label: "Directories", description: "Local source folders", icon: FolderOpen },
   { id: "quick-capture", label: "Quick Capture", description: "Global capture overlay", icon: Keyboard },
@@ -121,6 +121,7 @@ export function SettingsDialog({
   aiPrompts,
   directories,
   browserSettings,
+  commandSettings,
   aiSessionSettings,
   terminalSettings,
   terminalFonts = [],
@@ -139,6 +140,7 @@ export function SettingsDialog({
   onSaveDirectory,
   onDeleteDirectory,
   onSaveBrowserSettings,
+  onSaveCommandSettings,
   onSaveAiSessionSettings,
   onSaveTerminalSettings,
   onSaveQuickCaptureSettings,
@@ -159,10 +161,12 @@ export function SettingsDialog({
   const [aiPromptIcon, setAiPromptIcon] = useState("sparkles");
   const [aiPromptText, setAiPromptText] = useState("");
   const [editingAiPromptId, setEditingAiPromptId] = useState(null);
+  const [aiPromptEditorMode, setAiPromptEditorMode] = useState(null);
   const [isChoosingDirectory, setIsChoosingDirectory] = useState(false);
   const [directoryNotice, setDirectoryNotice] = useState("");
   const [browserBundleId, setBrowserBundleId] = useState(browserSettings?.browserBundleId || "");
   const [browserNotice, setBrowserNotice] = useState("");
+  const activeSectionLabel = settingsSections.find((section) => section.id === activeTab)?.label || settingsSections[0].label;
 
   useEffect(() => {
     setBrowserBundleId(browserSettings?.browserBundleId || "");
@@ -174,6 +178,16 @@ export function SettingsDialog({
     setAiPromptIcon("sparkles");
     setAiPromptText("");
     setEditingAiPromptId(null);
+    setAiPromptEditorMode(null);
+  }
+
+  function createAiPrompt(agentType) {
+    setAiPromptAgentType(agentType);
+    setAiPromptName("");
+    setAiPromptIcon("sparkles");
+    setAiPromptText("");
+    setEditingAiPromptId(null);
+    setAiPromptEditorMode("create");
   }
 
   function editAiPrompt(prompt) {
@@ -182,6 +196,7 @@ export function SettingsDialog({
     setAiPromptIcon(prompt.icon || "sparkles");
     setAiPromptText(prompt.promptText || "");
     setEditingAiPromptId(prompt.id);
+    setAiPromptEditorMode("edit");
   }
 
   async function submitAiPrompt(event) {
@@ -202,7 +217,7 @@ export function SettingsDialog({
 
   return (
     <Modal
-      title="Settings"
+      title={`Settings - ${activeSectionLabel}`}
       onClose={onClose}
       contentClassName="grid-rows-[auto_minmax(0,1fr)] h-[calc(100vh-3rem)] max-h-[calc(100vh-3rem)] w-[calc(100vw-3rem)] max-w-[calc(100vw-3rem)] gap-0 overflow-hidden p-0 sm:max-w-[calc(100vw-3rem)]"
       headerClassName="border-b px-6 py-4 pr-14"
@@ -243,96 +258,142 @@ export function SettingsDialog({
               />
             )}
 
-            {activeTab === "ai-prompts" && (
+            {activeTab === "commands" && (
               <div className="grid gap-6">
-                <form className="grid gap-3" onSubmit={submitAiPrompt}>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <Field>
-                      <FieldLabel>AI Agent</FieldLabel>
-                      <SelectControl
-                        value={aiPromptAgentType}
-                        onValueChange={setAiPromptAgentType}
-                        options={aiAgentTypeOptions}
-                      />
-                    </Field>
-                    <Field>
-                      <FieldLabel>Workflow icon</FieldLabel>
-                      <SelectControl
-                        value={aiPromptIcon}
-                        onValueChange={setAiPromptIcon}
-                        options={aiPromptIconOptions}
-                      />
-                    </Field>
-                  </div>
-                  <Field>
-                    <FieldLabel>Name</FieldLabel>
-                    <Input
-                      value={aiPromptName}
-                      onChange={(event) => setAiPromptName(event.target.value)}
-                      placeholder="e.g. Implement ticket"
-                      required
-                    />
-                  </Field>
-                  <Field>
-                    <FieldLabel>Prompt text</FieldLabel>
-                    <Textarea
-                      value={aiPromptText}
-                      onChange={(event) => setAiPromptText(event.target.value)}
-                      placeholder="Optional instructions added before the ticket details"
-                      rows={8}
-                    />
-                  </Field>
-                  <div className="flex flex-wrap gap-2">
-                    <Button type="submit">{editingAiPromptId ? "Update AI Prompt" : "Save AI Prompt"}</Button>
-                    {editingAiPromptId && (
-                      <Button type="button" variant="outline" onClick={resetAiPromptForm}>
-                        Cancel edit
-                      </Button>
+                <FieldSet className="gap-4 rounded-lg border p-4">
+                  <FieldLegend className="mb-0 px-1">AI Prompts</FieldLegend>
+
+                  <div className="grid gap-4 rounded-md border bg-muted/20 p-4">
+                    <div>
+                      <p className="font-medium">Add AI Prompt</p>
+                      <p className="mt-1 text-sm text-muted-foreground">Choose a provider to configure a new prompt.</p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {aiAgentTypeOptions.map((option) => {
+                        const Icon = option.icon;
+                        return (
+                          <Button
+                            key={option.value}
+                            type="button"
+                            variant={aiPromptEditorMode === "create" && aiPromptAgentType === option.value ? "secondary" : "outline"}
+                            onClick={() => createAiPrompt(option.value)}
+                          >
+                            <Icon />
+                            {option.label}
+                          </Button>
+                        );
+                      })}
+                    </div>
+
+                    {aiPromptEditorMode && (
+                      <form className="grid gap-3 border-t pt-4" onSubmit={submitAiPrompt}>
+                        <div>
+                          <p className="font-medium">
+                            {aiPromptEditorMode === "edit"
+                              ? "Edit AI Prompt"
+                              : `Add ${aiAgentTypeOptions.find((option) => option.value === aiPromptAgentType)?.label} AI Prompt`}
+                          </p>
+                          <p className="mt-1 text-sm text-muted-foreground">
+                            {aiPromptEditorMode === "edit"
+                              ? "Update this saved prompt."
+                              : "Configure reusable instructions for this provider."}
+                          </p>
+                        </div>
+                        <div className={cn("grid gap-3", aiPromptEditorMode === "edit" && "sm:grid-cols-2")}>
+                          {aiPromptEditorMode === "edit" && (
+                            <Field>
+                              <FieldLabel>AI Agent</FieldLabel>
+                              <SelectControl
+                                value={aiPromptAgentType}
+                                onValueChange={setAiPromptAgentType}
+                                options={aiAgentTypeOptions}
+                              />
+                            </Field>
+                          )}
+                          <Field>
+                            <FieldLabel>Workflow icon</FieldLabel>
+                            <SelectControl
+                              value={aiPromptIcon}
+                              onValueChange={setAiPromptIcon}
+                              options={aiPromptIconOptions}
+                            />
+                          </Field>
+                        </div>
+                        <Field>
+                          <FieldLabel>Name</FieldLabel>
+                          <Input
+                            value={aiPromptName}
+                            onChange={(event) => setAiPromptName(event.target.value)}
+                            placeholder="e.g. Implement ticket"
+                            required
+                          />
+                        </Field>
+                        <Field>
+                          <FieldLabel>Prompt text</FieldLabel>
+                          <Textarea
+                            value={aiPromptText}
+                            onChange={(event) => setAiPromptText(event.target.value)}
+                            placeholder="Optional instructions added before the ticket details"
+                            rows={8}
+                          />
+                        </Field>
+                        <div className="flex flex-wrap gap-2">
+                          <Button type="submit">{aiPromptEditorMode === "edit" ? "Update AI Prompt" : "Save AI Prompt"}</Button>
+                          <Button type="button" variant="outline" onClick={resetAiPromptForm}>
+                            {aiPromptEditorMode === "edit" ? "Cancel edit" : "Cancel"}
+                          </Button>
+                        </div>
+                      </form>
                     )}
                   </div>
-                </form>
 
-                <div className="grid gap-2">
-                  {aiPrompts.length === 0 ? (
-                    <EmptyState text="No AI Prompts configured yet." />
-                  ) : (
-                    aiPrompts.map((prompt) => (
-                      <div key={prompt.id} className="flex items-center gap-2 rounded-md border p-3">
-                        <AiPromptIcon name={prompt.icon} />
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate font-medium">{prompt.name}</p>
-                          <p className="text-xs text-muted-foreground">
-                            {aiAgentTypeOptions.find((option) => option.value === prompt.agentType)?.label || prompt.agentType}
-                          </p>
-                          {prompt.promptText && (
-                            <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{prompt.promptText}</p>
-                          )}
+                  <div className="grid gap-2">
+                    {aiPrompts.length === 0 ? (
+                      <EmptyState text="No AI Prompts configured yet." />
+                    ) : (
+                      aiPrompts.map((prompt) => (
+                        <div key={prompt.id} className="flex items-center gap-2 rounded-md border p-3">
+                          <AiPromptIcon name={prompt.icon} />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate font-medium">{prompt.name}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {aiAgentTypeOptions.find((option) => option.value === prompt.agentType)?.label || prompt.agentType}
+                            </p>
+                            {prompt.promptText && (
+                              <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{prompt.promptText}</p>
+                            )}
+                          </div>
+                          <Button
+                            size="icon-sm"
+                            variant="ghost"
+                            type="button"
+                            title="Edit AI Prompt"
+                            onClick={() => editAiPrompt(prompt)}
+                          >
+                            <Pencil />
+                          </Button>
+                          <Button
+                            size="icon-sm"
+                            variant="ghost"
+                            type="button"
+                            title="Delete AI Prompt"
+                            onClick={() => {
+                              if (editingAiPromptId === prompt.id) resetAiPromptForm();
+                              onDeleteAiPrompt(prompt.id).catch(() => {});
+                            }}
+                          >
+                            <Trash2 />
+                          </Button>
                         </div>
-                        <Button
-                          size="icon-sm"
-                          variant="ghost"
-                          type="button"
-                          title="Edit AI Prompt"
-                          onClick={() => editAiPrompt(prompt)}
-                        >
-                          <Pencil />
-                        </Button>
-                        <Button
-                          size="icon-sm"
-                          variant="ghost"
-                          type="button"
-                          title="Delete AI Prompt"
-                          onClick={() => {
-                            if (editingAiPromptId === prompt.id) resetAiPromptForm();
-                            onDeleteAiPrompt(prompt.id).catch(() => {});
-                          }}
-                        >
-                          <Trash2 />
-                        </Button>
-                      </div>
-                    ))
-                  )}
-                </div>
+                      ))
+                    )}
+                  </div>
+                </FieldSet>
+
+                <CommandInternalsSettings
+                  settings={commandSettings}
+                  onSave={onSaveCommandSettings}
+                />
               </div>
             )}
 
@@ -428,6 +489,69 @@ export function SettingsDialog({
         </main>
       </div>
     </Modal>
+  );
+}
+
+function CommandInternalsSettings({ settings, onSave }) {
+  const [reviewEnabled, setReviewEnabled] = useState(settings?.reviewEnabled !== false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [noticeIsError, setNoticeIsError] = useState(false);
+
+  useEffect(() => {
+    setReviewEnabled(settings?.reviewEnabled !== false);
+  }, [settings?.reviewEnabled]);
+
+  async function toggleReviewEnabled(enabled) {
+    const previous = reviewEnabled;
+    setReviewEnabled(enabled);
+    setNotice("");
+    setNoticeIsError(false);
+    setIsSaving(true);
+    try {
+      const next = await onSave({ reviewEnabled: enabled });
+      setReviewEnabled(next?.reviewEnabled !== false);
+      setNotice(enabled ? "Review command enabled." : "Review command disabled.");
+    } catch (error) {
+      setReviewEnabled(previous);
+      setNotice(error?.message || String(error));
+      setNoticeIsError(true);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <FieldSet className="gap-4 rounded-lg border p-4">
+      <FieldLegend className="mb-0 px-1">Internals</FieldLegend>
+      <p className="text-xs text-muted-foreground">
+        Control built-in commands provided by Station.
+      </p>
+
+      <label className={cn(
+        "flex items-start gap-3 rounded-md border bg-muted/20 p-3",
+        isSaving ? "cursor-not-allowed opacity-60" : "cursor-pointer",
+      )}>
+        <Checkbox
+          checked={reviewEnabled}
+          disabled={isSaving}
+          aria-label="Enable Review command"
+          onCheckedChange={(checked) => toggleReviewEnabled(checked === true)}
+        />
+        <span className="grid gap-1">
+          <span className="text-sm font-medium">Enable Review command</span>
+          <span className="text-xs text-muted-foreground">
+            Show Review for tasks linked to GitHub pull requests or GitLab merge requests.
+          </span>
+        </span>
+      </label>
+
+      {notice && (
+        <p className={cn("text-xs", noticeIsError ? "text-destructive" : "text-muted-foreground")}>
+          {notice}
+        </p>
+      )}
+    </FieldSet>
   );
 }
 
@@ -900,11 +1024,6 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
 
   return (
     <div className="grid gap-6">
-      <div>
-        <h2 className="text-xl font-semibold">Accounts</h2>
-        <p className="mt-1 text-sm text-muted-foreground">Connect the services and calendars you use. You can add more than one account for each provider.</p>
-      </div>
-
       <div className="grid gap-4 rounded-md border bg-muted/20 p-4">
         <div>
           <p className="font-medium">Add account</p>

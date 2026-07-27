@@ -143,6 +143,9 @@ function App() {
     detectedBrowserBundleId: null,
     browserBundleId: null,
   });
+  const [commandSettings, setCommandSettings] = useState({
+    reviewEnabled: true,
+  });
   const [aiSessionSettings, setAiSessionSettings] = useState({
     ...DEFAULT_AI_SESSION_SETTINGS,
   });
@@ -356,13 +359,14 @@ function App() {
   }, [selectedProjectId]);
 
   async function refreshShell() {
-    const [projectList, connectionList, calendarAccountList, aiPromptList, directoryList, browserSettingsResult, aiSessionSettingsResult, terminalSettingsResult, terminalFontList, quickCaptureSettingsResult, recentFileList, todoList] = await Promise.all([
+    const [projectList, connectionList, calendarAccountList, aiPromptList, directoryList, browserSettingsResult, commandSettingsResult, aiSessionSettingsResult, terminalSettingsResult, terminalFontList, quickCaptureSettingsResult, recentFileList, todoList] = await Promise.all([
       api.listProjects(),
       api.listConnections(),
       api.listCalendarAccounts(),
       api.listAiPrompts(),
       api.listDirectories(),
       api.listBrowserSettings(),
+      api.listCommandSettings(),
       api.listAiSessionSettings(),
       api.listTerminalSettings(),
       api.listTerminalFonts(),
@@ -376,6 +380,7 @@ function App() {
     setAiPrompts(aiPromptList);
     setDirectories(directoryList);
     setBrowserSettings(browserSettingsResult);
+    setCommandSettings(commandSettingsResult);
     setAiSessionSettings(aiSessionSettingsResult);
     setAiSessionSettingsReady(true);
     setTerminalSettings(terminalSettingsResult);
@@ -725,6 +730,7 @@ function App() {
           task={selectedTask}
           project={selectedTaskProject}
           aiPrompts={aiPrompts}
+          commandSettings={commandSettings}
           localResources={localResources}
           onOpenAiPromptThread={async (payload) => {
             const taskToKeep = selectedTask;
@@ -1041,6 +1047,7 @@ function App() {
           aiPrompts={aiPrompts}
           directories={directories}
           browserSettings={browserSettings}
+          commandSettings={commandSettings}
           aiSessionSettings={aiSessionSettings}
           terminalSettings={terminalSettings}
           terminalFonts={terminalFonts}
@@ -1117,6 +1124,17 @@ function App() {
             const nextBrowserSettings = await api.saveBrowserSettings(payload);
             setBrowserSettings(nextBrowserSettings);
             showNotice("Browser settings saved.");
+          }}
+          onSaveCommandSettings={async (payload) => {
+            try {
+              const nextCommandSettings = await api.saveCommandSettings(payload);
+              setCommandSettings(nextCommandSettings);
+              showNotice("Command settings saved.");
+              return nextCommandSettings;
+            } catch (error) {
+              reportError(error);
+              throw error;
+            }
           }}
           onSaveAiSessionSettings={async (payload) => {
             const nextAiSessionSettings = await api.saveAiSessionSettings(payload);

@@ -41,6 +41,7 @@ const APP_DATABASE_MIGRATION_FILENAME: &str = "default.sqlite.migrating";
 const LEGACY_APP_IDENTIFIER: &str = "com.devcrashflash.aistudio";
 const LEGACY_DATABASE_FILENAME: &str = "studio.sqlite";
 const BROWSER_BUNDLE_ID_SETTING_KEY: &str = "browser_bundle_id";
+const COMMAND_SETTINGS_KEY: &str = "command_settings";
 const AI_SESSION_SETTINGS_KEY: &str = "ai_session_settings";
 const DEFAULT_QUICK_CAPTURE_SHORTCUT: &str = "CommandOrControl+Shift+Space";
 const QUICK_CAPTURE_ENABLED_SETTING_KEY: &str = "quick_capture_enabled";
@@ -1077,6 +1078,25 @@ struct BrowserSettingsInput {
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+struct CommandSettings {
+    #[serde(default = "default_review_enabled")]
+    review_enabled: bool,
+}
+
+fn default_review_enabled() -> bool {
+    true
+}
+
+impl Default for CommandSettings {
+    fn default() -> Self {
+        Self {
+            review_enabled: default_review_enabled(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 struct AiSessionSettings {
     codex_cli: bool,
     codex_desktop: bool,
@@ -1472,6 +1492,8 @@ pub fn run() {
             save_ai_prompt,
             delete_ai_prompt,
             open_ai_prompt_thread,
+            list_command_settings,
+            save_command_settings,
             list_ai_session_settings,
             save_ai_session_settings,
             list_browser_settings,
@@ -2109,6 +2131,36 @@ fn set_app_setting(db: &SqliteConnection, key: &str, value: Option<&str>) -> rus
         db.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
     }
     Ok(())
+}
+
+fn load_command_settings(db: &SqliteConnection) -> Result<CommandSettings, String> {
+    let Some(value) = get_app_setting(db, COMMAND_SETTINGS_KEY).map_err(db_error)? else {
+        return Ok(CommandSettings::default());
+    };
+    match serde_json::from_str::<CommandSettings>(&value) {
+        Ok(settings) => Ok(settings),
+        Err(_) => {
+            set_app_setting(db, COMMAND_SETTINGS_KEY, None).map_err(db_error)?;
+            Ok(CommandSettings::default())
+        }
+    }
+}
+
+#[tauri::command]
+fn list_command_settings(state: tauri::State<'_, AppState>) -> Result<CommandSettings, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    load_command_settings(&db)
+}
+
+#[tauri::command]
+fn save_command_settings(
+    state: tauri::State<'_, AppState>,
+    input: CommandSettings,
+) -> Result<CommandSettings, String> {
+    let value = serde_json::to_string(&input).map_err(db_error)?;
+    let db = state.db.lock().map_err(db_error)?;
+    set_app_setting(&db, COMMAND_SETTINGS_KEY, Some(&value)).map_err(db_error)?;
+    Ok(input)
 }
 
 fn load_ai_session_settings(db: &SqliteConnection) -> Result<AiSessionSettings, String> {
@@ -14865,6 +14917,35 @@ mod tests {
 
         assert_eq!(connection.provider, "gitlab");
         assert_eq!(connection.token, "secret");
+    }
+
+    #[test]
+    fn command_settings_default_persist_and_recover_from_malformed_values() {
+        let db = memory_db();
+        assert_eq!(
+            load_command_settings(&db).expect("load defaults"),
+            CommandSettings::default()
+        );
+
+        let settings = CommandSettings {
+            review_enabled: false,
+        };
+        let value = serde_json::to_string(&settings).unwrap();
+        set_app_setting(&db, COMMAND_SETTINGS_KEY, Some(&value)).unwrap();
+        assert_eq!(
+            load_command_settings(&db).expect("load stored settings"),
+            settings
+        );
+
+        set_app_setting(&db, COMMAND_SETTINGS_KEY, Some("{broken")).unwrap();
+        assert_eq!(
+            load_command_settings(&db).expect("recover defaults"),
+            CommandSettings::default()
+        );
+        assert_eq!(
+            get_app_setting(&db, COMMAND_SETTINGS_KEY).expect("read recovered setting"),
+            None
+        );
     }
 
     #[test]

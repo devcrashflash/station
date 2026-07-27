@@ -46,6 +46,9 @@ const defaultState = {
     detectedBrowserBundleId: null,
     browserBundleId: null,
   },
+  commandSettings: {
+    reviewEnabled: true,
+  },
   aiSessionSettings: { ...DEFAULT_AI_SESSION_SETTINGS },
   aiSessionArchives: [],
   terminalSettings: {
@@ -89,6 +92,9 @@ export const api = {
   listBrowserSettings: () => call("list_browser_settings", {}, local.listBrowserSettings),
   saveBrowserSettings: (payload) =>
     call("save_browser_settings", { input: payload }, () => local.saveBrowserSettings(payload)),
+  listCommandSettings: () => call("list_command_settings", {}, local.listCommandSettings),
+  saveCommandSettings: (payload) =>
+    call("save_command_settings", { input: payload }, () => local.saveCommandSettings(payload)),
   listTerminalSettings: () => call("list_terminal_settings", {}, local.listTerminalSettings),
   listTerminalFonts: () => call("list_terminal_fonts", {}, local.listTerminalFonts),
   saveTerminalSettings: (payload) =>
@@ -304,6 +310,7 @@ function freshDefaultState() {
     calendarEvents: [],
     calendarSyncRuns: [],
     browserSettings: { ...defaultState.browserSettings },
+    commandSettings: { ...defaultState.commandSettings },
     aiSessionSettings: { ...defaultState.aiSessionSettings },
     aiSessionArchives: [],
     terminalSettings: { ...defaultState.terminalSettings },
@@ -909,6 +916,21 @@ const local = {
     };
     writeState(state);
     return state.browserSettings;
+  },
+
+  listCommandSettings() {
+    return {
+      reviewEnabled: readState().commandSettings?.reviewEnabled !== false,
+    };
+  },
+
+  saveCommandSettings(input) {
+    const state = readState();
+    state.commandSettings = {
+      reviewEnabled: input?.reviewEnabled !== false,
+    };
+    writeState(state);
+    return state.commandSettings;
   },
 
   listProjects() {

@@ -278,6 +278,32 @@ test("local fallback stores terminal settings and restores defaults", async () =
   assert.deepEqual(await api.listTerminalFonts(), []);
 });
 
+test("local fallback stores command settings and defaults Review to enabled", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => { stored = value; },
+  };
+
+  assert.deepEqual(await api.listCommandSettings(), {
+    reviewEnabled: true,
+  });
+  assert.deepEqual(await api.saveCommandSettings({ reviewEnabled: false }), {
+    reviewEnabled: false,
+  });
+  assert.deepEqual(await api.listCommandSettings(), {
+    reviewEnabled: false,
+  });
+  assert.deepEqual(await api.saveCommandSettings({ reviewEnabled: true }), {
+    reviewEnabled: true,
+  });
+
+  stored = JSON.stringify({ commandSettings: "malformed" });
+  assert.deepEqual(await api.listCommandSettings(), {
+    reviewEnabled: true,
+  });
+});
+
 test("local fallback stores AI session source settings and fills missing defaults", async () => {
   let stored = "";
   global.localStorage = {

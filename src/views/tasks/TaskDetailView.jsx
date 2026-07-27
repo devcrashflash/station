@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
-  Bot,
   Check,
   CheckCircle2,
   ChevronLeft,
@@ -16,6 +15,7 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Signpost,
   SquareKanban,
   Trash2,
   X,
@@ -179,6 +179,7 @@ export function TaskDetailView({
   task,
   project,
   aiPrompts = [],
+  commandSettings = { reviewEnabled: true },
   localResources = [],
   onOpenAiPromptThread,
   onRefreshExternalDetails,
@@ -515,6 +516,7 @@ export function TaskDetailView({
   const isProviderBacked = isProviderBackedTask(task);
   const isDone = isTaskDone(task);
   const canReviewResource = Boolean(
+    commandSettings.reviewEnabled !== false &&
     task.projectId &&
     !isReviewRequestClosed &&
     reviewParsed?.repoUrl &&
@@ -679,18 +681,6 @@ export function TaskDetailView({
                       {isExternalRefreshing ? "Syncing..." : "Sync external"}
                     </Button>
                   )}
-                  {canReviewResource && (
-                    <Button
-                      className="w-full"
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setShowReview(true)}
-                    >
-                      <GitPullRequest className="size-4" />
-                      Review
-                    </Button>
-                  )}
                   {lastSyncedLabel && (
                     <p className="text-xs text-muted-foreground">{lastSyncedLabel}</p>
                   )}
@@ -702,29 +692,40 @@ export function TaskDetailView({
             </div>
           </Panel>
 
-          <Panel title="AI Prompts" icon={Bot}>
+          <Panel title="Commands" icon={Signpost}>
             <div className="grid gap-2">
-              {aiPrompts.length === 0 ? (
-                <EmptyState text="No AI Prompts configured." />
-              ) : (
-                aiPrompts.map((prompt) => {
-                  const PromptIcon = aiPromptIconFor(prompt.icon);
-                  return (
-                    <Button
-                      key={prompt.id}
-                      className="w-full justify-start"
-                      type="button"
-                      variant="outline"
-                      onClick={() => setActiveAiPromptId(prompt.id)}
-                    >
-                      <PromptIcon className="size-4" />
-                      <span className="min-w-0 flex-1 truncate text-left">{prompt.name}</span>
-                      <span className="text-xs text-muted-foreground">
-                        {aiAgentLabels[prompt.agentType] || prompt.agentType}
-                      </span>
-                    </Button>
-                  );
-                })
+              {canReviewResource && (
+                <Button
+                  className="w-full justify-start"
+                  type="button"
+                  variant="outline"
+                  onClick={() => setShowReview(true)}
+                >
+                  <GitPullRequest className="size-4" />
+                  <span className="min-w-0 flex-1 truncate text-left">Review</span>
+                  <span className="text-xs text-muted-foreground">Station</span>
+                </Button>
+              )}
+              {aiPrompts.map((prompt) => {
+                const PromptIcon = aiPromptIconFor(prompt.icon);
+                return (
+                  <Button
+                    key={prompt.id}
+                    className="w-full justify-start"
+                    type="button"
+                    variant="outline"
+                    onClick={() => setActiveAiPromptId(prompt.id)}
+                  >
+                    <PromptIcon className="size-4" />
+                    <span className="min-w-0 flex-1 truncate text-left">{prompt.name}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {aiAgentLabels[prompt.agentType] || prompt.agentType}
+                    </span>
+                  </Button>
+                );
+              })}
+              {!canReviewResource && aiPrompts.length === 0 && (
+                <EmptyState text="No commands available." />
               )}
             </div>
           </Panel>
