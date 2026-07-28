@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { dmgFilename } from "./release-utils.mjs";
 
 const SEMVER_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const PACKAGE_JSON_PATH = new URL("../package.json", import.meta.url);
@@ -102,9 +103,8 @@ try {
 
 const appName = `${tauriConfig.productName}.app`;
 const appPath = join(BUNDLE_PATH, "macos", appName);
-const architecture = process.arch === "arm64" ? "aarch64" : process.arch;
 const dmgDirectory = join(BUNDLE_PATH, "dmg");
-const dmgPath = join(dmgDirectory, `${tauriConfig.productName}_${nextVersion}_${architecture}.dmg`);
+const dmgPath = join(dmgDirectory, dmgFilename(nextVersion));
 const stagingDirectory = await mkdtemp(join(tmpdir(), "station-release-"));
 let dmgError = null;
 

@@ -20,6 +20,7 @@ pub const MAIN_TAB_ID: &str = "main";
 const MAIN_WEBVIEW_LABEL: &str = "main-content";
 const TAB_BAR_WEBVIEW_LABEL: &str = "tab-bar";
 const TERMINAL_WEBVIEW_LABEL: &str = "terminal-workspace";
+const APP_TITLE: &str = "Station by DevCrashFlash";
 const TAB_BAR_HEIGHT: f64 = 25.0;
 const DEFAULT_TERMINAL_TITLE: &str = "~";
 const NEW_TAB_DIRECTORY_SETTING_KEY: &str = "terminal_new_tab_directory";
@@ -57,6 +58,10 @@ const PREFERRED_FONT_FAMILIES: [&str; 5] = [
 ];
 
 static TERMINAL_FONT_CATALOG: OnceLock<Vec<TerminalFontFamily>> = OnceLock::new();
+
+fn app_window_title() -> String {
+    format!("{APP_TITLE} ({})", env!("CARGO_PKG_VERSION"))
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -761,7 +766,7 @@ fn layout_webviews(window: &Window) -> Result<(), String> {
 
 pub fn setup_workspace_window(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let window = tauri::window::WindowBuilder::new(app, "main")
-        .title("Station by DevCrashFlash")
+        .title(app_window_title())
         .inner_size(1400.0, 900.0)
         .visible(false)
         .build()?;
@@ -2869,6 +2874,14 @@ mod tests {
         assert_eq!(
             active_content_webview_label("terminal-tab-42"),
             "terminal-workspace"
+        );
+    }
+
+    #[test]
+    fn window_title_includes_the_cargo_package_version() {
+        assert_eq!(
+            app_window_title(),
+            format!("Station by DevCrashFlash ({})", env!("CARGO_PKG_VERSION"))
         );
     }
 

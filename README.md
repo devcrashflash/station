@@ -24,7 +24,9 @@ database; anyone with access to that database may be able to read them.
 
 - Run `pnpm release` to increase the patch version and build an installable macOS DMG.
 - Run `pnpm release 0.1.1` (or `pnpm release -- 0.1.1`) to set an explicit version.
-- Find the finished installer in `src-tauri/target/release/bundle/dmg/`.
+- Find the finished `Station_<version>.dmg` installer in
+  `src-tauri/target/release/bundle/dmg/`. Version dots are replaced with
+  underscores, so version `0.6.0` produces `Station_0_6_0.dmg`.
 
 The release command synchronizes the versions in `package.json`, the Tauri config,
 and the Rust package files before building. DMG releases must be built on macOS.
