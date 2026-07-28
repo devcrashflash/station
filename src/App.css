@@ -151,6 +151,92 @@ body.terminal-window #root {
   overflow: hidden;
 }
 
+@keyframes burning-tree-flame-flicker {
+  0%,
+  100% {
+    opacity: 0.9;
+    transform: translateY(0) scale(1);
+  }
+
+  50% {
+    opacity: 1;
+    transform: translateY(-0.6px) scale(0.94, 1.06);
+  }
+}
+
+@keyframes running-session-robot-phase {
+  0%,
+  47.5% {
+    opacity: 1;
+  }
+
+  50%,
+  97.5% {
+    opacity: 0;
+  }
+
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes running-session-tree-phase {
+  0%,
+  47.5% {
+    opacity: 0;
+  }
+
+  50%,
+  97.5% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+  }
+}
+
+.running-session-icon__robot,
+.running-session-icon__tree {
+  animation-duration: 10s;
+  animation-iteration-count: infinite;
+  animation-timing-function: linear;
+}
+
+.running-session-icon__robot {
+  animation-name: running-session-robot-phase;
+}
+
+.running-session-icon__tree {
+  animation-name: running-session-tree-phase;
+}
+
+.burning-tree-icon__flame {
+  animation: burning-tree-flame-flicker 900ms ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center bottom;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .running-session-icon__robot {
+    animation: none;
+    opacity: 1;
+  }
+
+  .running-session-icon__robot > svg {
+    animation: none;
+  }
+
+  .running-session-icon__tree {
+    animation: none;
+    opacity: 0;
+  }
+
+  .burning-tree-icon__flame {
+    animation: none;
+  }
+}
+
 .tab-bar {
   display: flex;
   width: 100%;

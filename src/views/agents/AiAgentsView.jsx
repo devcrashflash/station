@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 
 import { CheckboxFilterCard } from "@/components/common/CheckboxFilterCard";
+import { BurningTreeIcon } from "@/components/common/BurningTreeIcon";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Panel } from "@/components/common/Panel";
 import { SegmentedTabs } from "@/components/common/SegmentedTabs";
@@ -529,11 +530,11 @@ function SessionRow({
 }
 
 function SessionStateRobot({ state, className }) {
+  if (state === "running") {
+    return <RunningSessionIcon className={className} />;
+  }
+
   const statePresentation = {
-    running: {
-      label: "Running",
-      className: "animate-spin text-blue-600 motion-reduce:animate-none dark:text-blue-400",
-    },
     waiting: {
       label: "Waiting for you",
       className: "text-amber-600 dark:text-amber-400",
@@ -554,6 +555,29 @@ function SessionStateRobot({ state, className }) {
       aria-label={statePresentation.label}
       className={cn("shrink-0", className, statePresentation.className)}
     />
+  );
+}
+
+function RunningSessionIcon({ className }) {
+  return (
+    <span
+      role="img"
+      aria-label="Running"
+      className={cn("relative inline-block shrink-0", className)}
+    >
+      <span
+        aria-hidden="true"
+        className="running-session-icon__robot absolute inset-0"
+      >
+        <Bot className="size-full animate-spin text-blue-600 dark:text-blue-400" />
+      </span>
+      <span
+        aria-hidden="true"
+        className="running-session-icon__tree absolute inset-0"
+      >
+        <BurningTreeIcon className="size-full" />
+      </span>
+    </span>
   );
 }
 
