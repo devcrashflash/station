@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatShortcut, shortcutFromKeyboardEvent } from "./keyboardShortcut.js";
+import {
+  formatShortcut,
+  isPrimarySearchShortcut,
+  shortcutFromKeyboardEvent,
+} from "./keyboardShortcut.js";
 
 function keyEvent(overrides = {}) {
   return {
@@ -46,4 +50,29 @@ test("formats default and normalized shortcuts for each platform", () => {
   assert.equal(formatShortcut("CommandOrControl+Shift+Space", "MacIntel"), "⌘⇧Space");
   assert.equal(formatShortcut("shift+super+KeyK", "MacIntel"), "⌘⇧K");
   assert.equal(formatShortcut("shift+control+Space", "Win32"), "Ctrl+Shift+Space");
+});
+
+const commandF = {
+  type: "keydown",
+  key: "f",
+  metaKey: true,
+  ctrlKey: false,
+  altKey: false,
+  shiftKey: false,
+};
+
+test("matches the platform-primary search shortcut", () => {
+  assert.equal(isPrimarySearchShortcut(commandF, "MacIntel"), true);
+  assert.equal(isPrimarySearchShortcut({ ...commandF, metaKey: false, ctrlKey: true }, "Win32"), true);
+  assert.equal(isPrimarySearchShortcut({ ...commandF, metaKey: false, ctrlKey: true }, "Linux x86_64"), true);
+});
+
+test("rejects search shortcuts with missing or extra modifiers", () => {
+  assert.equal(isPrimarySearchShortcut({ ...commandF, metaKey: false }, "MacIntel"), false);
+  assert.equal(isPrimarySearchShortcut({ ...commandF, metaKey: false, ctrlKey: true }, "MacIntel"), false);
+  assert.equal(isPrimarySearchShortcut({ ...commandF, ctrlKey: true }, "MacIntel"), false);
+  assert.equal(isPrimarySearchShortcut({ ...commandF, altKey: true }, "MacIntel"), false);
+  assert.equal(isPrimarySearchShortcut({ ...commandF, shiftKey: true }, "MacIntel"), false);
+  assert.equal(isPrimarySearchShortcut({ ...commandF, key: "g" }, "MacIntel"), false);
+  assert.equal(isPrimarySearchShortcut({ ...commandF, type: "keyup" }, "MacIntel"), false);
 });

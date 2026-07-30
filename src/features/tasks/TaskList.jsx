@@ -11,9 +11,15 @@ import {
 } from "@/lib/taskStatus";
 import { cn } from "@/lib/utils";
 
-export function TaskList({ tasks, onOpenTask, onUpdateTask, readonly = false }) {
+export function TaskList({
+  tasks,
+  onOpenTask,
+  onUpdateTask,
+  readonly = false,
+  emptyText = "No tasks yet.",
+}) {
   if (!tasks.length) {
-    return <EmptyState text="No tasks yet." />;
+    return <EmptyState text={emptyText} />;
   }
 
   return (

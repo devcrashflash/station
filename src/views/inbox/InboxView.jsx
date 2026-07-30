@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { CalendarDays, ClipboardList, ExternalLink, Eye, Files, FileText, GitPullRequest, Inbox, LoaderCircle, MapPin, Pencil, Plus, RefreshCw, Settings, SquareKanban, Trash2, Video } from "lucide-react";
+import { CalendarDays, ClipboardList, ExternalLink, Eye, Files, FileText, GitPullRequest, Inbox, LoaderCircle, MapPin, Pencil, Plus, RefreshCw, Search, Settings, SquareKanban, Trash2, Video } from "lucide-react";
 
 import { EmptyState } from "@/components/common/EmptyState";
 import { Modal } from "@/components/common/Modal";
@@ -11,11 +11,15 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { DialogFooter } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Kbd } from "@/components/ui/kbd";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SmartInput } from "@/features/smart-input/SmartInput";
 import { dashboardTaskCreatedAt, dashboardTaskProjectName, latestDashboardTasks } from "@/lib/dashboardTasks";
+import { isPrimarySearchShortcut, shortcutModifier } from "@/lib/keyboardShortcut";
 import { isSupportedOcrFile } from "@/lib/ocr";
 import { reviewRequestInput, reviewRequestSubtitle } from "@/lib/smartInboxReviewRequests";
+import { filterSmartInboxItems } from "@/lib/smartInboxSearch";
 import { cn } from "@/lib/utils";
 import { calendarEventOpenUrl, calendarEventTimeLabel, calendarWarnings, sortCalendarEvents } from "@/lib/calendar";
 
@@ -231,6 +235,9 @@ function InboxCaptureTabs({
 }) {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [settingsProvider, setSettingsProvider] = useState(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const searchInputRef = useRef(null);
+  const shortcutKey = shortcutModifier();
   const [providerItems, setProviderItems] = useState({
     github: { items: [], warnings: [], loaded: false, syncing: false },
     gitlab: { items: [], warnings: [], loaded: false, syncing: false },
@@ -246,6 +253,36 @@ function InboxCaptureTabs({
     { id: "trello", label: "Trello", count: providerItems.trello.items.length, icon: SquareKanban },
   ];
   const isProviderTab = ["github", "gitlab", "trello"].includes(activeTab);
+  const activeItems = activeTab === "todos"
+    ? todos
+    : activeTab === "tasks"
+      ? tasks
+      : activeTab === "latest-files"
+        ? files
+        : providerItems[activeTab]?.items || [];
+  const visibleItems = useMemo(
+    () => filterSmartInboxItems(activeTab, activeItems, searchQuery, projects),
+    [activeItems, activeTab, projects, searchQuery],
+  );
+  const filteredEmptyText = activeItems.length > 0 && visibleItems.length === 0
+    ? "No items match your search."
+    : undefined;
+
+  useEffect(() => {
+    setSearchQuery("");
+  }, [activeTab]);
+
+  useEffect(() => {
+    function handleKeyDown(event) {
+      if (!isPrimarySearchShortcut(event)) return;
+      if (document.querySelector("[role='dialog']")) return;
+      event.preventDefault();
+      searchInputRef.current?.focus();
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   useEffect(() => {
     if (!onLoadProviderItems) return;
@@ -408,27 +445,49 @@ function InboxCaptureTabs({
         )}
       </div>
 
+      <div className="relative">
+        <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          ref={searchInputRef}
+          className="pl-9 pr-16"
+          type="search"
+          value={searchQuery}
+          placeholder={`Search ${tabLabel(tabs, activeTab).toLocaleLowerCase()}`}
+          aria-label="Search smart inbox"
+          onChange={(event) => setSearchQuery(event.target.value)}
+        />
+        <Kbd className="absolute right-3 top-1/2 -translate-y-1/2">{shortcutKey} F</Kbd>
+      </div>
+
       <div role="tabpanel" aria-label={tabLabel(tabs, activeTab)}>
         {activeTab === "todos" ? (
           <SmartInboxTodoList
-            todos={todos}
+            todos={visibleItems}
             onEditTodo={onEditTodo}
             onOpenTodo={onOpenTodo}
             onDeleteTodo={onDeleteTodo}
+            emptyText={filteredEmptyText}
           />
         ) : activeTab === "tasks" ? (
-          <DashboardTaskList tasks={tasks} projects={projects} onOpenTask={onOpenTask} />
+          <DashboardTaskList
+            tasks={visibleItems}
+            projects={projects}
+            onOpenTask={onOpenTask}
+            emptyText={filteredEmptyText}
+          />
         ) : activeTab === "latest-files" ? (
           <RecentDirectoryFilesList
-            files={files}
+            files={visibleItems}
             onOpenFile={onOpenFile}
+            emptyText={filteredEmptyText}
           />
         ) : (
           <ReviewRequestList
             provider={activeTab}
-            result={providerItems[activeTab]}
+            result={{ ...providerItems[activeTab], items: visibleItems }}
             onOpenReviewRequest={onOpenReviewRequest}
             onOpenTask={onOpenTask}
+            emptyText={filteredEmptyText}
           />
         )}
       </div>
@@ -541,8 +600,13 @@ function sourceKey(source) {
   return `${source.connectionId}:${source.sourceId}`;
 }
 
-export function DashboardTaskList({ tasks = [], projects = [], onOpenTask }) {
-  if (tasks.length === 0) return <EmptyState text="No tasks yet." />;
+export function DashboardTaskList({
+  tasks = [],
+  projects = [],
+  onOpenTask,
+  emptyText = "No tasks yet.",
+}) {
+  if (tasks.length === 0) return <EmptyState text={emptyText} />;
 
   return (
     <div className="flex flex-col gap-2">
@@ -577,7 +641,13 @@ function tabLabel(tabs, activeTab) {
   return tabs.find((tab) => tab.id === activeTab)?.label || activeTab;
 }
 
-function ReviewRequestList({ provider, result, onOpenReviewRequest, onOpenTask }) {
+function ReviewRequestList({
+  provider,
+  result,
+  onOpenReviewRequest,
+  onOpenTask,
+  emptyText,
+}) {
   const displayName = providerName(provider);
   const items = result?.items || [];
   const warnings = result?.warnings || [];
@@ -593,7 +663,7 @@ function ReviewRequestList({ provider, result, onOpenReviewRequest, onOpenTask }
         </div>
       ))}
       {items.length === 0 ? (
-        <EmptyState text={provider === "trello" ? "No assigned Trello cards." : `No ${displayName} review requests.`} />
+        <EmptyState text={emptyText || (provider === "trello" ? "No assigned Trello cards." : `No ${displayName} review requests.`)} />
       ) : (
         <div className="flex flex-col gap-2">
           {items.map((item) => {
@@ -703,8 +773,14 @@ async function openReviewRequestLink(url) {
   window.open(url, "_blank", "noreferrer");
 }
 
-export function SmartInboxTodoList({ todos = [], onEditTodo, onOpenTodo, onDeleteTodo }) {
-  if (todos.length === 0) return <EmptyState text="No todos yet." />;
+export function SmartInboxTodoList({
+  todos = [],
+  onEditTodo,
+  onOpenTodo,
+  onDeleteTodo,
+  emptyText = "No todos yet.",
+}) {
+  if (todos.length === 0) return <EmptyState text={emptyText} />;
 
   return (
     <div className="flex flex-col gap-2">
@@ -810,11 +886,16 @@ function todoSubtitle(todo) {
   return todo.rawText || "Plain text";
 }
 
-export function RecentDirectoryFilesList({ files = [], onOpenFile, onRefresh }) {
+export function RecentDirectoryFilesList({
+  files = [],
+  onOpenFile,
+  onRefresh,
+  emptyText = "No latest files.",
+}) {
   return (
     <div className="grid gap-2">
       {files.length === 0 ? (
-        <EmptyState text="No latest files." />
+        <EmptyState text={emptyText} />
       ) : (
         <div className="flex flex-col gap-2">
           {files.slice(0, 5).map((file) => (

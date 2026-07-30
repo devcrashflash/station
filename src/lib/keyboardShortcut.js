@@ -5,6 +5,20 @@ export function shortcutModifier() {
   return /mac/i.test(platform) ? "⌘" : "Ctrl";
 }
 
+export function isPrimarySearchShortcut(
+  event,
+  platform = globalThis.navigator?.userAgentData?.platform
+    || globalThis.navigator?.platform
+    || "",
+) {
+  if (event.type && event.type !== "keydown") return false;
+  if (event.altKey || event.shiftKey || event.key?.toLowerCase() !== "f") return false;
+
+  return platform.toLowerCase().startsWith("mac")
+    ? Boolean(event.metaKey && !event.ctrlKey)
+    : Boolean(event.ctrlKey && !event.metaKey);
+}
+
 function platformIsMac(platform) {
   const detected = platform ?? (
     typeof navigator === "undefined"

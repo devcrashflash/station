@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   Archive,
@@ -14,6 +14,7 @@ import {
   ListFilter,
   LoaderCircle,
   RefreshCw,
+  Search,
   SquareTerminal,
   TriangleAlert,
 } from "lucide-react";
@@ -31,6 +32,8 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { Kbd } from "@/components/ui/kbd";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
 import {
@@ -55,12 +58,14 @@ import {
   archivedAiSessionWindowCounts,
   filterAiSessions,
   filterArchivedAiSessionsByWindow,
+  filterAiSessionsBySearch,
   filterAiSessionsByWindow,
   formatAiSessionLastRefreshed,
   normalizeAiSessionSettings,
   sortArchivedAiSessions,
   sortAiSessions,
 } from "@/lib/aiSessions";
+import { isPrimarySearchShortcut, shortcutModifier } from "@/lib/keyboardShortcut";
 import { workspaceTabsApi } from "@/lib/workspaceTabs";
 import { cn } from "@/lib/utils";
 
@@ -98,6 +103,9 @@ export function AiAgentsView({
   const [displayNow, setDisplayNow] = useState(() => Date.now());
   const [expanded, setExpanded] = useState(() => new Set());
   const [busySessionKey, setBusySessionKey] = useState(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const searchInputRef = useRef(null);
+  const shortcutKey = shortcutModifier();
   const normalizedSettings = useMemo(() => normalizeAiSessionSettings(settings), [settings]);
 
   useEffect(() => {
@@ -107,6 +115,22 @@ export function AiAgentsView({
   useEffect(() => {
     if (activeViewRequestKey > 0) setSessionView("active");
   }, [activeViewRequestKey]);
+
+  useEffect(() => {
+    setSearchQuery("");
+  }, [sessionView]);
+
+  useEffect(() => {
+    function handleKeyDown(event) {
+      if (!isPrimarySearchShortcut(event)) return;
+      if (document.querySelector("[role='dialog']")) return;
+      event.preventDefault();
+      searchInputRef.current?.focus();
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   useEffect(() => {
     const interval = window.setInterval(() => setDisplayNow(Date.now()), 60_000);
@@ -169,6 +193,10 @@ export function AiAgentsView({
   const timeWindowLabel = AI_SESSION_WINDOWS.find((option) => option.value === hours)?.label || "selected period";
   const lastRefreshedText = formatAiSessionLastRefreshed(result.lastRefreshedAt);
   const visibleSessions = sessionView === "archived" ? archivedSessions : sessions;
+  const displayedSessions = useMemo(
+    () => filterAiSessionsBySearch(visibleSessions, searchQuery),
+    [searchQuery, visibleSessions],
+  );
   const sessionViewTabs = [
     { id: "active", label: "Active", count: sourceFilteredSessions.length, icon: Bot },
     { id: "archived", label: "Archived", count: sourceFilteredArchivedSessions.length, icon: Archive },
@@ -266,6 +294,20 @@ export function AiAgentsView({
               </div>
             </div>
 
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                ref={searchInputRef}
+                className="pl-9 pr-16"
+                type="search"
+                value={searchQuery}
+                placeholder={`Search ${sessionView} sessions`}
+                aria-label="Search AI sessions"
+                onChange={(event) => setSearchQuery(event.target.value)}
+              />
+              <Kbd className="absolute right-3 top-1/2 -translate-y-1/2">{shortcutKey} F</Kbd>
+            </div>
+
             {aiSessionSourcesDisabled(settings) ? (
               <EmptyState text="All AI session sources are disabled. Enable a source in AI Sessions settings to display sessions." />
             ) : aiSessionViewFiltersDisabled(sourceFilters) ? (
@@ -282,9 +324,11 @@ export function AiAgentsView({
                     ? "No archived AI sessions match the selected sources."
                     : `No AI sessions were archived in the last ${timeWindowLabel}.`
                 : `No AI sessions match the selected sources in the last ${timeWindowLabel}.`} />
+            ) : displayedSessions.length === 0 ? (
+              <EmptyState text="No AI sessions match your search." />
             ) : (
               <div className="overflow-hidden rounded-md border">
-                {visibleSessions.map((session) => (
+                {displayedSessions.map((session) => (
                   <SessionRow
                     key={`${session.provider}:${session.id}`}
                     session={session}

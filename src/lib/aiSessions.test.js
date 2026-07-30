@@ -24,6 +24,7 @@ import {
   archivedAiSessionWindowCounts,
   filterAiSessions,
   filterArchivedAiSessionsByWindow,
+  filterAiSessionsBySearch,
   filterAiSessionsByWindow,
   formatAiSessionLastRefreshed,
   normalizeAiSessionBackgroundRefreshInterval,
@@ -307,6 +308,76 @@ test("filters session trees by temporary source selections", () => {
   assert.equal(aiSessionProviderFilterEnabled("codex", filters), true);
   assert.equal(aiSessionProviderFilterEnabled("claude", filters), true);
   assert.equal(aiSessionViewFiltersDisabled(filters), false);
+});
+
+test("returns the original session trees for blank searches", () => {
+  const sessions = [{ id: "one", title: "First", children: [] }];
+  assert.equal(filterAiSessionsBySearch(sessions, ""), sessions);
+  assert.equal(filterAiSessionsBySearch(sessions, "   "), sessions);
+});
+
+test("searches session titles, directories, and displayed source labels", () => {
+  const sessions = [
+    {
+      id: "one",
+      title: "Fix authentication",
+      cwd: "/work/station",
+      provider: "codex",
+      origin: "cli",
+      children: [],
+    },
+    {
+      id: "two",
+      title: "Update documentation",
+      cwd: "/work/website",
+      provider: "claude",
+      origin: "desktop",
+      children: [],
+    },
+  ];
+
+  assert.deepEqual(filterAiSessionsBySearch(sessions, "AUTH").map(({ id }) => id), ["one"]);
+  assert.deepEqual(filterAiSessionsBySearch(sessions, "website").map(({ id }) => id), ["two"]);
+  assert.deepEqual(filterAiSessionsBySearch(sessions, "codex cli").map(({ id }) => id), ["one"]);
+  assert.deepEqual(filterAiSessionsBySearch(sessions, "missing"), []);
+});
+
+test("keeps all children when the parent session matches", () => {
+  const sessions = [{
+    id: "parent",
+    title: "Station release",
+    children: [
+      { id: "one", title: "Update tests" },
+      { id: "two", title: "Write notes" },
+    ],
+  }];
+
+  const filtered = filterAiSessionsBySearch(sessions, "station");
+  assert.equal(filtered[0], sessions[0]);
+  assert.deepEqual(filtered[0].children.map(({ id }) => id), ["one", "two"]);
+});
+
+test("keeps parent context and only matching children for child-only matches", () => {
+  const sessions = [
+    {
+      id: "first-parent",
+      title: "Release work",
+      children: [
+        { id: "matching-child", title: "Investigate LOGIN timeout" },
+        { id: "other-child", title: "Update documentation" },
+      ],
+    },
+    {
+      id: "second-parent",
+      title: "Other work",
+      children: [{ id: "second-match", title: "Fix login form" }],
+    },
+  ];
+
+  const filtered = filterAiSessionsBySearch(sessions, "login");
+  assert.deepEqual(filtered.map(({ id }) => id), ["first-parent", "second-parent"]);
+  assert.deepEqual(filtered[0].children.map(({ id }) => id), ["matching-child"]);
+  assert.deepEqual(filtered[1].children.map(({ id }) => id), ["second-match"]);
 });
 
 test("initializes temporary filters from globally enabled sources", () => {

@@ -175,6 +175,31 @@ export function filterAiSessions(sessions, filters) {
   });
 }
 
+function aiSessionSearchText(session) {
+  return [
+    session?.title,
+    session?.cwd,
+    session?.provider ? aiSessionSourceLabel(session) : null,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLocaleLowerCase();
+}
+
+export function filterAiSessionsBySearch(sessions, query = "") {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  if (!normalizedQuery) return sessions;
+
+  return (sessions || []).flatMap((session) => {
+    if (aiSessionSearchText(session).includes(normalizedQuery)) return [session];
+
+    const children = (session.children || []).filter((child) => (
+      aiSessionSearchText(child).includes(normalizedQuery)
+    ));
+    return children.length > 0 ? [{ ...session, children }] : [];
+  });
+}
+
 export function filterAiSessionsByWindow(sessions, hours, now = Date.now()) {
   const cutoff = now - Number(hours) * 3_600_000;
   return (sessions || []).flatMap((session) => {
