@@ -503,8 +503,8 @@ function SessionRow({
               disabled={busy}
               onClick={() => onResume(preferredOpenTarget)}
             >
-              {busy ? <LoaderCircle className="animate-spin" /> : null}
-              Resume
+              {busy ? <LoaderCircle className="animate-spin" /> : <ExternalLink />}
+              Open
             </Button>
           )}
         </div>
