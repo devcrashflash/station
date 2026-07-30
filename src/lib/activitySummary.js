@@ -203,6 +203,53 @@ export function buildDaySummaryModel({
   };
 }
 
+export function filterDaySummaryModelBySearch(summary, query = "") {
+  const normalizedQuery = String(query).trim().toLocaleLowerCase();
+  if (!normalizedQuery || !summary) return summary;
+
+  const sections = summary.sections.flatMap((section) => {
+    if (summaryValuesMatch(normalizedQuery, [section.name])) return [section];
+
+    const tickets = section.tickets.flatMap((ticket) => {
+      if (summaryValuesMatch(normalizedQuery, [ticket.title, ...ticket.ticketActions])) return [ticket];
+
+      const providers = filterSummaryProviders(ticket.providers, normalizedQuery);
+      return providers.length > 0 ? [{ ...ticket, providers }] : [];
+    });
+    const unknownProviders = filterSummaryProviders(section.unknownProviders, normalizedQuery);
+
+    return tickets.length > 0 || unknownProviders.length > 0
+      ? [{ ...section, tickets, unknownProviders }]
+      : [];
+  });
+  const meetings = summaryValuesMatch(normalizedQuery, ["Meetings"])
+    ? summary.meetings
+    : summary.meetings.filter((meeting) => summaryValuesMatch(normalizedQuery, [
+        meeting.title,
+        meeting.calendarName,
+        meeting.timeLabel,
+      ]));
+
+  return { ...summary, sections, meetings };
+}
+
+function filterSummaryProviders(providers, query) {
+  return providers.flatMap((provider) => {
+    if (summaryValuesMatch(query, [provider.label])) return [provider];
+
+    const items = provider.items.filter((item) => summaryValuesMatch(query, [
+      item.title,
+      item.author,
+      ...item.actions,
+    ]));
+    return items.length > 0 ? [{ ...provider, items }] : [];
+  });
+}
+
+function summaryValuesMatch(query, values) {
+  return values.some((value) => String(value || "").toLocaleLowerCase().includes(query));
+}
+
 function filterMergeGeneratedGitlabPushes(activities) {
   const mergedTargets = new Set();
 

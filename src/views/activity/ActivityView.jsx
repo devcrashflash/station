@@ -13,6 +13,7 @@ import {
   LoaderCircle,
   MapPin,
   RefreshCw,
+  Search,
   Video,
 } from "lucide-react";
 
@@ -22,6 +23,7 @@ import { Panel } from "@/components/common/Panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Kbd } from "@/components/ui/kbd";
 import { DaySummaryPreview } from "@/features/activity/DaySummaryPreview";
 import { api } from "@/lib/api";
 import {
@@ -45,11 +47,14 @@ import {
 import {
   buildDaySummaryModel,
   daySummaryModelToMarkdown,
+  filterDaySummaryModelBySearch,
   filterChangedOnlyTrelloTicketActivities,
   filterMoveOnlyTrelloTicketActivities,
   trelloTicketUrlsForActivities,
 } from "@/lib/activitySummary";
+import { filterTimelineItemsBySearch } from "@/lib/activitySearch";
 import { openExternalUrl } from "@/lib/externalLinks";
+import { isPrimarySearchShortcut, shortcutModifier } from "@/lib/keyboardShortcut";
 import { cn } from "@/lib/utils";
 import { calendarEventOpenUrl, calendarEventTimeLabel, calendarWarningMessages } from "@/lib/calendar";
 
@@ -85,6 +90,9 @@ export function ActivityView({
   const [copyState, setCopyState] = useState("idle");
   const [summaryCopyState, setSummaryCopyState] = useState("idle");
   const [activeTimelineTab, setActiveTimelineTab] = useState("details");
+  const [searchQuery, setSearchQuery] = useState("");
+  const searchInputRef = useRef(null);
+  const shortcutKey = shortcutModifier();
   const [summaryContext, setSummaryContext] = useState({
     date: null,
     loading: false,
@@ -118,6 +126,7 @@ export function ActivityView({
     ...filteredActivities.map((activity) => ({ type: "activity", value: activity, time: activity.occurredAt || 0, allDay: false })),
     ...filteredCalendarEvents.map((event) => ({ type: "calendar", value: event, time: event.startAt || 0, allDay: Boolean(event.allDay) })),
   ].sort((left, right) => Number(right.allDay) - Number(left.allDay) || left.time - right.time || String(left.value.id).localeCompare(String(right.value.id)));
+  const searchedTimelineItems = filterTimelineItemsBySearch(timelineItems, searchQuery);
   const selectedWeekdayLabel = useMemo(
     () => new Intl.DateTimeFormat("en", {
       weekday: "long",
@@ -140,12 +149,35 @@ export function ActivityView({
       resolvedTickets: summaryContext.resolvedTickets,
     });
   }, [date, filteredActivities, filteredCalendarEvents, projects, summaryContext]);
+  const searchedSummary = useMemo(
+    () => filterDaySummaryModelBySearch(summary, searchQuery),
+    [searchQuery, summary],
+  );
   const summaryMarkdown = useMemo(
-    () => summary ? daySummaryModelToMarkdown(summary) : "",
-    [summary],
+    () => searchedSummary ? daySummaryModelToMarkdown(searchedSummary) : "",
+    [searchedSummary],
   );
   const hasSummary = Boolean(summary && (summary.sections.length > 0 || summary.meetings.length > 0));
+  const hasSearchedSummary = Boolean(
+    searchedSummary && (searchedSummary.sections.length > 0 || searchedSummary.meetings.length > 0),
+  );
   const summaryPreparing = summaryContext.date !== date || summaryContext.loading;
+
+  useEffect(() => {
+    setSearchQuery("");
+  }, [date]);
+
+  useEffect(() => {
+    function handleKeyDown(event) {
+      if (!isPrimarySearchShortcut(event)) return;
+      if (document.querySelector("[role='dialog']")) return;
+      event.preventDefault();
+      searchInputRef.current?.focus();
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   useEffect(() => {
     if (copyState === "idle") return undefined;
@@ -229,14 +261,14 @@ export function ActivityView({
 
   const copyTimelineAsCsv = useCallback(async () => {
     try {
-      await copyTextToClipboard(timelineItemsToCsv(timelineItems));
+      await copyTextToClipboard(timelineItemsToCsv(searchedTimelineItems));
       setCopyState("copied");
       onNotice?.("Timeline copied as CSV.");
     } catch (error) {
       setCopyState("error");
       onNotice?.(error?.message || "Could not copy the timeline as CSV.");
     }
-  }, [onNotice, timelineItems]);
+  }, [onNotice, searchedTimelineItems]);
 
   const copySummary = useCallback(async () => {
     try {
@@ -345,7 +377,7 @@ export function ActivityView({
                     type="button"
                     size="sm"
                     variant="outline"
-                    disabled={timelineItems.length === 0}
+                    disabled={searchedTimelineItems.length === 0}
                     onClick={copyTimelineAsCsv}
                   >
                     {copyState === "copied" ? <Check /> : <ClipboardCopy />}
@@ -366,6 +398,20 @@ export function ActivityView({
               </div>
             </div>
 
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                ref={searchInputRef}
+                className="pl-9 pr-16"
+                type="search"
+                value={searchQuery}
+                placeholder={`Search timeline ${activeTimelineTab}`}
+                aria-label="Search activity timeline"
+                onChange={(event) => setSearchQuery(event.target.value)}
+              />
+              <Kbd className="absolute right-3 top-1/2 -translate-y-1/2">{shortcutKey} F</Kbd>
+            </div>
+
             {activeTimelineTab === "details" ? (
               <div id="timeline-details-panel" role="tabpanel" aria-labelledby="timeline-details-tab" className="grid gap-4">
                 <p className="text-sm font-medium">{activityCountText}</p>
@@ -381,9 +427,11 @@ export function ActivityView({
                           : "No timeline items cached for this day."
                     }
                   />
+                ) : searchedTimelineItems.length === 0 ? (
+                  <EmptyState text="No timeline items match your search." />
                 ) : (
                   <div className="flex flex-col gap-2">
-                    {timelineItems.map((item) => item.type === "calendar" ? (
+                    {searchedTimelineItems.map((item) => item.type === "calendar" ? (
                       <CalendarEventItem key={`calendar:${item.value.id}`} event={item.value} />
                     ) : (
                       <ActivityItem key={`activity:${item.value.id}`} activity={item.value} />
@@ -403,7 +451,9 @@ export function ActivityView({
                     <LoaderCircle className="size-4 animate-spin" />
                     Building summary...
                   </div>
-                ) : hasSummary ? (
+                ) : hasSummary && !hasSearchedSummary ? (
+                  <EmptyState text="No summary items match your search." />
+                ) : hasSearchedSummary ? (
                   <div className="grid gap-3">
                     {summaryContext.loading && (
                       <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -411,7 +461,7 @@ export function ActivityView({
                         Updating summary...
                       </div>
                     )}
-                    <DaySummaryPreview summary={summary} />
+                    <DaySummaryPreview summary={searchedSummary} />
                   </div>
                 ) : (
                   <EmptyState text="No visible timeline items to summarize." />

@@ -4,12 +4,149 @@ import assert from "node:assert/strict";
 import { api } from "./api.js";
 import {
   buildDaySummaryMarkdown,
+  daySummaryModelToMarkdown,
   extractTrelloCardUrls,
+  filterDaySummaryModelBySearch,
   filterChangedOnlyTrelloTicketActivities,
   filterMoveOnlyTrelloTicketActivities,
   trelloTicketReferencesForActivity,
   trelloTicketUrlsForActivities,
 } from "./activitySummary.js";
+
+const searchableSummary = {
+  sections: [
+    {
+      id: "project-alpha",
+      name: "Project Alpha",
+      tickets: [
+        {
+          externalId: "ticket-one",
+          title: "First ticket",
+          ticketActions: ["moved to Review"],
+          providers: [
+            {
+              provider: "github",
+              label: "GitHub",
+              items: [
+                { key: "one", title: "First pull request", author: "Ada", actions: ["commented"] },
+                { key: "two", title: "Second pull request", author: "Grace", actions: ["approved"] },
+              ],
+            },
+            {
+              provider: "gitlab",
+              label: "GitLab",
+              items: [{ key: "three", title: "Deploy pipeline", author: "Linus", actions: ["pushed"] }],
+            },
+          ],
+        },
+        {
+          externalId: "ticket-two",
+          title: "Second ticket",
+          ticketActions: ["created"],
+          providers: [],
+        },
+      ],
+      unknownProviders: [
+        {
+          provider: "trello",
+          label: "Trello",
+          items: [{ key: "four", title: "Loose card", author: "Margaret", actions: ["changed"] }],
+        },
+      ],
+    },
+    {
+      id: "project-beta",
+      name: "Project Beta",
+      tickets: [],
+      unknownProviders: [
+        {
+          provider: "github",
+          label: "GitHub",
+          items: [{ key: "five", title: "Beta issue", author: "Donald", actions: ["opened"] }],
+        },
+      ],
+    },
+  ],
+  meetings: [
+    { id: "meeting-one", title: "Morning sync", timeLabel: "09:00–09:30", calendarName: "Team Calendar" },
+    { id: "meeting-two", title: "Design review", timeLabel: "14:00–15:00", calendarName: "Product" },
+  ],
+};
+
+test("summary search returns the source model for blank queries", () => {
+  assert.equal(filterDaySummaryModelBySearch(searchableSummary, ""), searchableSummary);
+  assert.equal(filterDaySummaryModelBySearch(searchableSummary, "  "), searchableSummary);
+});
+
+test("summary project and ticket matches retain their full subtrees", () => {
+  const projectMatch = filterDaySummaryModelBySearch(searchableSummary, "PROJECT alpha");
+  assert.equal(projectMatch.sections.length, 1);
+  assert.equal(projectMatch.sections[0], searchableSummary.sections[0]);
+
+  const ticketMatch = filterDaySummaryModelBySearch(searchableSummary, "moved to review");
+  assert.equal(ticketMatch.sections.length, 1);
+  assert.equal(ticketMatch.sections[0].tickets.length, 1);
+  assert.equal(ticketMatch.sections[0].tickets[0], searchableSummary.sections[0].tickets[0]);
+});
+
+test("summary child matches retain parents and prune unrelated siblings", () => {
+  const snapshot = structuredClone(searchableSummary);
+  const result = filterDaySummaryModelBySearch(searchableSummary, "grace");
+
+  assert.deepEqual(result.sections.map((section) => section.name), ["Project Alpha"]);
+  assert.deepEqual(result.sections[0].tickets.map((ticket) => ticket.title), ["First ticket"]);
+  assert.deepEqual(result.sections[0].tickets[0].providers.map((provider) => provider.label), ["GitHub"]);
+  assert.deepEqual(result.sections[0].tickets[0].providers[0].items.map((item) => item.title), ["Second pull request"]);
+  assert.deepEqual(searchableSummary, snapshot);
+});
+
+test("summary search matches provider, activity action, author, and unknown activity", () => {
+  const providerMatch = filterDaySummaryModelBySearch(searchableSummary, "gitlab");
+  assert.deepEqual(providerMatch.sections[0].tickets[0].providers[0].items.map((item) => item.key), ["three"]);
+
+  const actionMatch = filterDaySummaryModelBySearch(searchableSummary, "approved");
+  assert.deepEqual(actionMatch.sections[0].tickets[0].providers[0].items.map((item) => item.key), ["two"]);
+
+  const unknownMatch = filterDaySummaryModelBySearch(searchableSummary, "margaret");
+  assert.deepEqual(unknownMatch.sections[0].unknownProviders[0].items.map((item) => item.key), ["four"]);
+});
+
+test("summary search matches meetings by heading, title, calendar, and time", () => {
+  assert.equal(filterDaySummaryModelBySearch(searchableSummary, "meetings").meetings, searchableSummary.meetings);
+  assert.deepEqual(
+    filterDaySummaryModelBySearch(searchableSummary, "DESIGN").meetings.map((meeting) => meeting.id),
+    ["meeting-two"],
+  );
+  assert.deepEqual(
+    filterDaySummaryModelBySearch(searchableSummary, "team cal").meetings.map((meeting) => meeting.id),
+    ["meeting-one"],
+  );
+  assert.deepEqual(
+    filterDaySummaryModelBySearch(searchableSummary, "14:00").meetings.map((meeting) => meeting.id),
+    ["meeting-two"],
+  );
+});
+
+test("summary search preserves ordering and returns an empty model when unmatched", () => {
+  const ordered = filterDaySummaryModelBySearch(searchableSummary, "project");
+  assert.deepEqual(ordered.sections.map((section) => section.name), ["Project Alpha", "Project Beta"]);
+
+  assert.deepEqual(filterDaySummaryModelBySearch(searchableSummary, "not present"), {
+    sections: [],
+    meetings: [],
+  });
+});
+
+test("summary Markdown can be generated from only the searched tree", () => {
+  const markdown = daySummaryModelToMarkdown(
+    filterDaySummaryModelBySearch(searchableSummary, "grace"),
+  );
+
+  assert.match(markdown, /Second pull request/);
+  assert.doesNotMatch(markdown, /First pull request/);
+  assert.doesNotMatch(markdown, /Project Beta/);
+  assert.doesNotMatch(markdown, /Meetings/);
+});
 
 test("extracts canonical Trello card URLs from descriptions", () => {
   assert.deepEqual(
