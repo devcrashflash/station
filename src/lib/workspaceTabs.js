@@ -60,7 +60,10 @@ export function reorderTerminalIds(tabs, draggedId, targetId) {
 }
 
 export function isWorkspaceShortcut(event, key) {
-  return !event.altKey && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === key;
+  return !event.altKey
+    && !event.shiftKey
+    && (event.metaKey || event.ctrlKey)
+    && event.key.toLowerCase() === key;
 }
 
 export function workspaceSplitShortcut(event, platform = globalThis.navigator?.platform || "") {
@@ -73,7 +76,8 @@ export function workspaceSplitShortcut(event, platform = globalThis.navigator?.p
   return event.shiftKey ? "rows" : "columns";
 }
 
-export function workspaceNumberShortcut(event) {
+export function workspaceNumberShortcut(event, projectSwitcherOpen = false) {
+  if (projectSwitcherOpen) return null;
   if (event.altKey || event.shiftKey || (!event.metaKey && !event.ctrlKey)) return null;
   if (!/^[0-9]$/.test(event.key)) return null;
   return Number(event.key);

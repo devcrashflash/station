@@ -25,6 +25,7 @@ export function AppShell({
   noticeKey,
   onClearNotice,
   onSelectProject,
+  onShowProjectSwitcher,
   onShowInbox,
   onShowProject,
   onAddProject,
@@ -62,6 +63,7 @@ export function AppShell({
           isAgentsSelected={isAgentsSelected}
           hasWaitingAiSession={hasWaitingAiSession}
           onSelectProject={onSelectProject}
+          onShowProjectSwitcher={onShowProjectSwitcher}
           onShowInbox={onShowInbox}
           onAddProject={onAddProject}
           onShowActivity={onShowActivity}

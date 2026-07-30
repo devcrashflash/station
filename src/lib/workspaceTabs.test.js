@@ -37,6 +37,10 @@ test("recognizes workspace command shortcuts", () => {
   assert.equal(isWorkspaceShortcut({ metaKey: false, ctrlKey: true, altKey: false, key: "b" }, "b"), true);
   assert.equal(isWorkspaceShortcut({ metaKey: true, ctrlKey: false, altKey: false, key: "I" }, "i"), true);
   assert.equal(isWorkspaceShortcut({ metaKey: false, ctrlKey: true, altKey: false, key: "i" }, "i"), true);
+  assert.equal(isWorkspaceShortcut({ metaKey: true, ctrlKey: false, altKey: false, shiftKey: false, key: "P" }, "p"), true);
+  assert.equal(isWorkspaceShortcut({ metaKey: false, ctrlKey: true, altKey: false, shiftKey: false, key: "p" }, "p"), true);
+  assert.equal(isWorkspaceShortcut({ metaKey: true, ctrlKey: false, altKey: false, shiftKey: true, key: "P" }, "p"), false);
+  assert.equal(isWorkspaceShortcut({ metaKey: true, ctrlKey: false, altKey: true, shiftKey: false, key: "P" }, "p"), false);
   assert.equal(isWorkspaceShortcut({ metaKey: true, ctrlKey: false, altKey: true, key: "t" }, "t"), false);
   assert.equal(isWorkspaceShortcut({ metaKey: true, ctrlKey: false, altKey: true, key: "b" }, "b"), false);
   assert.equal(isWorkspaceShortcut({ metaKey: true, ctrlKey: false, altKey: true, key: "i" }, "i"), false);
@@ -73,6 +77,7 @@ test("recognizes unmodified workspace number shortcuts", () => {
   assert.equal(workspaceNumberShortcut({ metaKey: true, ctrlKey: false, altKey: false, shiftKey: true, key: "1" }), null);
   assert.equal(workspaceNumberShortcut({ metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, key: "1" }), null);
   assert.equal(workspaceNumberShortcut({ metaKey: true, ctrlKey: false, altKey: false, shiftKey: false, key: "t" }), null);
+  assert.equal(workspaceNumberShortcut({ metaKey: true, ctrlKey: false, altKey: false, shiftKey: false, key: "1" }, true), null);
 });
 
 test("maps workspace numbers to Main and terminals in visible order", () => {

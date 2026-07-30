@@ -4,6 +4,7 @@ import { emit, listen } from "@tauri-apps/api/event";
 import {
   AI_SESSIONS_DESTINATION,
   APP_NAVIGATION_REQUEST_EVENT,
+  PROJECT_SWITCHER_DESTINATION,
   SMART_INBOX_DESTINATION,
 } from "@/lib/appNavigation";
 import {
@@ -106,6 +107,16 @@ export function WorkspaceShortcuts() {
         });
         return;
       }
+      if (isWorkspaceShortcut(event, "p")) {
+        consume(event);
+        const snapshot = await workspaceTabsApi.list();
+        const activeTab = snapshot.tabs?.find((tab) => tab.id === snapshot.activeTabId);
+        await emit(APP_NAVIGATION_REQUEST_EVENT, {
+          destination: PROJECT_SWITCHER_DESTINATION,
+          returnTabId: activeTab?.kind === "terminal" ? activeTab.id : undefined,
+        });
+        return;
+      }
       const splitAxis = matchesTerminalShortcut(event, shortcutsRef.current.splitRows)
         ? "rows"
         : matchesTerminalShortcut(event, shortcutsRef.current.splitColumns) ? "columns" : null;
@@ -114,7 +125,12 @@ export function WorkspaceShortcuts() {
         await workspaceTabsApi.splitActive(splitAxis);
         return;
       }
-      const tabNumber = workspaceNumberShortcut(event);
+      const projectSwitcherOpen = Boolean(document.querySelector("[data-project-switcher]"));
+      const tabNumber = workspaceNumberShortcut(event, projectSwitcherOpen);
+      if (projectSwitcherOpen && /^[0-9]$/.test(event.key) && (event.metaKey || event.ctrlKey)) {
+        consume(event);
+        return;
+      }
       if (tabNumber !== null) {
         consume(event);
         const snapshot = await workspaceTabsApi.list();

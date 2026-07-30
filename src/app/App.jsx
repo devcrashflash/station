@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ProjectDialog } from "@/features/projects/ProjectDialog";
 import { ProjectPickerDialog } from "@/features/projects/ProjectPickerDialog";
+import { ProjectSwitcherDialog } from "@/features/projects/ProjectSwitcherDialog";
 import { SettingsDialog } from "@/features/settings/SettingsDialog";
 import { useCalendarData } from "@/features/calendar/useCalendarData";
 import { useAiSessionMonitor } from "@/features/ai-sessions/useAiSessionMonitor";
@@ -19,8 +20,11 @@ import { api, toParsedPayload } from "@/lib/api";
 import {
   AI_SESSIONS_DESTINATION,
   APP_NAVIGATION_REQUEST_EVENT,
+  PROJECT_SWITCHER_DESTINATION,
   SMART_INBOX_DESTINATION,
   appNavigationDestination,
+  appNavigationReturnTabId,
+  preserveProjectSwitcherReturnTabId,
 } from "@/lib/appNavigation";
 import { formatLocalDate } from "@/lib/activity";
 import { DEFAULT_AI_SESSION_SETTINGS } from "@/lib/aiSessions";
@@ -187,6 +191,9 @@ function App() {
   const [pendingTaskReview, setPendingTaskReview] = useState(null);
   const [isEmailReading, setIsEmailReading] = useState(false);
   const [showProjectForm, setShowProjectForm] = useState(false);
+  const [showProjectSwitcher, setShowProjectSwitcher] = useState(false);
+  const [projectSwitcherCycleRequestKey, setProjectSwitcherCycleRequestKey] = useState(0);
+  const [projectSwitcherReturnTabId, setProjectSwitcherReturnTabId] = useState(null);
   const [smartInboxFocusRequestKey, setSmartInboxFocusRequestKey] = useState(0);
   const [aiSessionsActiveViewRequestKey, setAiSessionsActiveViewRequestKey] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
@@ -210,6 +217,17 @@ function App() {
   const clearNotice = useCallback(() => {
     setNotice("");
   }, []);
+
+  const requestProjectSwitcher = useCallback((returnTabId = null) => {
+    const anotherDialogIsOpen = Boolean(document.querySelector('[data-slot="dialog-content"]'))
+      && !showProjectSwitcher;
+    if (anotherDialogIsOpen) return false;
+    setProjectSwitcherReturnTabId((current) =>
+      preserveProjectSwitcherReturnTabId(current, returnTabId, showProjectSwitcher));
+    setShowProjectSwitcher(true);
+    setProjectSwitcherCycleRequestKey((current) => current + 1);
+    return true;
+  }, [showProjectSwitcher]);
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) || null,
@@ -297,6 +315,14 @@ function App() {
       const destination = appNavigationDestination(payload);
       if (!destination) return;
       try {
+        if (destination === PROJECT_SWITCHER_DESTINATION) {
+          let shouldOpen = false;
+          flushSync(() => {
+            shouldOpen = requestProjectSwitcher(appNavigationReturnTabId(payload));
+          });
+          if (shouldOpen) await workspaceTabsApi.activate("main");
+          return;
+        }
         flushSync(() => {
           setSelectedTask(null);
           setSelectedProjectId(null);
@@ -322,7 +348,7 @@ function App() {
       active = false;
       unlisten?.();
     };
-  }, [showNotice]);
+  }, [requestProjectSwitcher, showNotice]);
 
   useEffect(() => {
     function handleKeyDown(event) {
@@ -338,12 +364,15 @@ function App() {
         setSelectedProjectId(null);
         setUtilityPage("agents");
         setAiSessionsActiveViewRequestKey((current) => current + 1);
+      } else if (isWorkspaceShortcut(event, "p")) {
+        event.preventDefault();
+        requestProjectSwitcher();
       }
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  }, [requestProjectSwitcher]);
 
   useEffect(() => {
     if (selectedProjectId) {
@@ -657,6 +686,22 @@ function App() {
     setSelectedProjectId(projectId);
   }
 
+  function closeProjectSwitcher() {
+    setShowProjectSwitcher(false);
+    setProjectSwitcherReturnTabId(null);
+  }
+
+  async function escapeProjectSwitcher() {
+    const returnTabId = projectSwitcherReturnTabId;
+    closeProjectSwitcher();
+    if (!returnTabId) return;
+    try {
+      await workspaceTabsApi.activate(returnTabId);
+    } catch (error) {
+      reportError(error);
+    }
+  }
+
   function showDashboard() {
     setUtilityPage(null);
     setSelectedTask(null);
@@ -714,6 +759,7 @@ function App() {
       noticeKey={noticeKey}
       onClearNotice={clearNotice}
       onSelectProject={selectProject}
+      onShowProjectSwitcher={() => requestProjectSwitcher()}
       onShowInbox={showDashboard}
       onShowProject={showProjectFromBreadcrumb}
       onAddProject={() => setShowProjectForm(true)}
@@ -935,6 +981,24 @@ function App() {
         <ProjectDialog
           onClose={() => setShowProjectForm(false)}
           onCreate={(name, color) => createProject(name, color).catch(reportError)}
+        />
+      )}
+
+      {showProjectSwitcher && (
+        <ProjectSwitcherDialog
+          projects={projects}
+          selectedProjectId={selectedProjectId}
+          cycleRequestKey={projectSwitcherCycleRequestKey}
+          onClose={closeProjectSwitcher}
+          onEscape={() => escapeProjectSwitcher()}
+          onSelect={(projectId) => {
+            closeProjectSwitcher();
+            selectProject(projectId);
+          }}
+          onAddProject={() => {
+            closeProjectSwitcher();
+            setShowProjectForm(true);
+          }}
         />
       )}
 
