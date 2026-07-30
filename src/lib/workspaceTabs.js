@@ -14,37 +14,6 @@ export const workspaceTabsApi = {
   listTerminalSettings: () => invoke("list_terminal_settings"),
 };
 
-const TERMINAL_KEY_SEQUENCES = {
-  Enter: "\r",
-  Backspace: "\x7f",
-  Tab: "\t",
-  Escape: "\x1b",
-  ArrowUp: "\x1b[A",
-  ArrowDown: "\x1b[B",
-  ArrowRight: "\x1b[C",
-  ArrowLeft: "\x1b[D",
-  Home: "\x1b[H",
-  End: "\x1b[F",
-  Delete: "\x1b[3~",
-  PageUp: "\x1b[5~",
-  PageDown: "\x1b[6~",
-};
-
-export function terminalInputFromKeyEvent(event) {
-  if (event.type && event.type !== "keydown") return null;
-  if (event.metaKey || event.isComposing || event.key === "Dead") return null;
-
-  let data = TERMINAL_KEY_SEQUENCES[event.key] ?? null;
-  if (event.ctrlKey && event.key?.length === 1) {
-    const code = event.key.toUpperCase().charCodeAt(0);
-    if (code >= 64 && code <= 95) data = String.fromCharCode(code - 64);
-  } else if (!event.ctrlKey && event.key?.length === 1) {
-    data = event.key;
-  }
-  if (data === null) return null;
-  return event.altKey ? `\x1b${data}` : data;
-}
-
 export function terminalTabs(snapshot) {
   return (snapshot?.tabs || []).filter((tab) => tab.kind === "terminal");
 }

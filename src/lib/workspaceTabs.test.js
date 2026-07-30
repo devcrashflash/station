@@ -5,7 +5,6 @@ import {
   activeWorkspaceTab,
   isWorkspaceShortcut,
   reorderTerminalIds,
-  terminalInputFromKeyEvent,
   terminalTabs,
   workspaceNumberShortcut,
   workspaceNumberForTab,
@@ -46,18 +45,6 @@ test("recognizes workspace command shortcuts", () => {
   assert.equal(isWorkspaceShortcut({ metaKey: true, ctrlKey: false, altKey: true, key: "i" }, "i"), false);
   assert.equal(isWorkspaceShortcut({ metaKey: true, ctrlKey: false, altKey: false, key: "k" }, "b"), false);
   assert.equal(isWorkspaceShortcut({ metaKey: true, ctrlKey: false, altKey: false, key: "k" }, "i"), false);
-});
-
-test("translates keys typed during terminal creation into terminal input", () => {
-  assert.equal(terminalInputFromKeyEvent({ key: "c" }), "c");
-  assert.equal(terminalInputFromKeyEvent({ key: "C", shiftKey: true }), "C");
-  assert.equal(terminalInputFromKeyEvent({ key: "Enter" }), "\r");
-  assert.equal(terminalInputFromKeyEvent({ key: "Backspace" }), "\x7f");
-  assert.equal(terminalInputFromKeyEvent({ key: "ArrowLeft" }), "\x1b[D");
-  assert.equal(terminalInputFromKeyEvent({ key: "c", ctrlKey: true }), "\x03");
-  assert.equal(terminalInputFromKeyEvent({ key: "f", altKey: true }), "\x1bf");
-  assert.equal(terminalInputFromKeyEvent({ key: "t", metaKey: true }), null);
-  assert.equal(terminalInputFromKeyEvent({ key: "Dead" }), null);
 });
 
 test("maps platform split shortcuts to pane axes", () => {

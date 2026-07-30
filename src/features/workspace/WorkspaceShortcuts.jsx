@@ -9,7 +9,6 @@ import {
 } from "@/lib/appNavigation";
 import {
   isWorkspaceShortcut,
-  terminalInputFromKeyEvent,
   workspaceNumberShortcut,
   workspaceTabForNumber,
   workspaceTabsApi,
@@ -22,7 +21,6 @@ import {
 } from "@/lib/terminalShortcuts";
 
 export function WorkspaceShortcuts() {
-  const pendingTerminalRef = useRef(null);
   const shortcutsRef = useRef(DEFAULT_TERMINAL_SHORTCUTS);
 
   useEffect(() => {
@@ -52,29 +50,7 @@ export function WorkspaceShortcuts() {
     }
 
     async function createTerminal() {
-      if (pendingTerminalRef.current) return;
-      const pending = { data: "" };
-      pendingTerminalRef.current = pending;
-      let unlisten = null;
-      try {
-        let createdTabId = null;
-        const readyTabs = new Set();
-        let markReady;
-        const ready = new Promise((resolve) => { markReady = resolve; });
-        unlisten = await listen("terminal-startup-ready", ({ payload }) => {
-          readyTabs.add(payload.tabId);
-          if (payload.tabId === createdTabId) markReady();
-        });
-        const snapshot = await workspaceTabsApi.createTerminal(true);
-        createdTabId = snapshot.activeTabId;
-        if (readyTabs.has(createdTabId)) markReady();
-        await ready;
-        pendingTerminalRef.current = null;
-        await workspaceTabsApi.completeTerminalStartupInput(createdTabId, pending.data);
-      } finally {
-        unlisten?.();
-        if (pendingTerminalRef.current === pending) pendingTerminalRef.current = null;
-      }
+      await workspaceTabsApi.createTerminal();
     }
 
     function handleCreateTerminalRequest() {
@@ -83,15 +59,6 @@ export function WorkspaceShortcuts() {
 
     async function handleKeyDown(event) {
       if (terminalShortcutRecordingActive()) return;
-      const pendingTerminal = pendingTerminalRef.current;
-      if (pendingTerminal) {
-        const data = terminalInputFromKeyEvent(event);
-        if (data !== null) {
-          consume(event);
-          pendingTerminal.data += data;
-          return;
-        }
-      }
       if (event.repeat) return;
       if (isWorkspaceShortcut(event, "i")) {
         consume(event);
