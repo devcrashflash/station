@@ -18,6 +18,19 @@ import { useAiSessionMonitor } from "@/features/ai-sessions/useAiSessionMonitor"
 import { TodoEditDialog } from "@/features/smart-input/TodoEditDialog";
 import { api, toParsedPayload } from "@/lib/api";
 import {
+  activityLocation,
+  agentsLocation,
+  appHistoryShortcutDirection,
+  createNavigationHistory,
+  inboxLocation,
+  moveNavigationHistory,
+  projectLocation,
+  pushNavigationHistory,
+  replaceNavigationHistory,
+  taskLocation,
+  unavailableTaskFallback,
+} from "@/lib/appHistory";
+import {
   AI_SESSIONS_DESTINATION,
   APP_NAVIGATION_REQUEST_EVENT,
   PROJECT_SWITCHER_DESTINATION,
@@ -205,6 +218,17 @@ function App() {
   const [notice, setNotice] = useState("");
   const [noticeKey, setNoticeKey] = useState(0);
   const activeOcrRunRef = useRef(0);
+  const navigationHistoryRef = useRef(createNavigationHistory());
+  const historyTraversalPendingRef = useRef(false);
+  const navigationRunRef = useRef(0);
+  const navigationContextRef = useRef(null);
+  navigationContextRef.current = {
+    activityDate,
+    projects,
+    selectedProjectId,
+    selectedTask,
+    utilityPage,
+  };
 
   const showNotice = useCallback((message) => {
     const nextNotice = message || "";
@@ -217,6 +241,146 @@ function App() {
   const clearNotice = useCallback(() => {
     setNotice("");
   }, []);
+
+  function currentAppLocation() {
+    const {
+      activityDate: currentActivityDate,
+      selectedProjectId: currentProjectId,
+      selectedTask: currentTask,
+      utilityPage: currentUtilityPage,
+    } = navigationContextRef.current;
+    if (currentTask) return taskLocation(currentTask);
+    if (currentUtilityPage === "activity") return activityLocation(currentActivityDate);
+    if (currentUtilityPage === "agents") return agentsLocation();
+    if (currentProjectId) return projectLocation(currentProjectId);
+    return inboxLocation();
+  }
+
+  function applyAppLocation(location, task = null) {
+    if (location.kind === "task" && task) {
+      navigationContextRef.current = {
+        ...navigationContextRef.current,
+        selectedProjectId: task.projectId || null,
+        selectedTask: task,
+        utilityPage: null,
+      };
+      setUtilityPage(null);
+      setSelectedProjectId(task.projectId || null);
+      setSelectedTask(task);
+      return;
+    }
+
+    navigationContextRef.current = {
+      ...navigationContextRef.current,
+      activityDate: location.kind === "activity"
+        ? location.date || formatLocalDate()
+        : navigationContextRef.current.activityDate,
+      selectedProjectId: location.kind === "project" ? location.projectId : null,
+      selectedTask: null,
+      utilityPage: location.kind === "activity" || location.kind === "agents"
+        ? location.kind
+        : null,
+    };
+    setSelectedTask(null);
+    if (location.kind === "project") {
+      setUtilityPage(null);
+      setSelectedProjectId(location.projectId);
+    } else if (location.kind === "activity") {
+      setSelectedProjectId(null);
+      setActivityDate(location.date || formatLocalDate());
+      setUtilityPage("activity");
+    } else if (location.kind === "agents") {
+      setSelectedProjectId(null);
+      setUtilityPage("agents");
+    } else {
+      setSelectedProjectId(null);
+      setUtilityPage(null);
+    }
+  }
+
+  function navigateToLocation(location, { replace = false, task = null } = {}) {
+    navigationRunRef.current += 1;
+    historyTraversalPendingRef.current = false;
+    navigationHistoryRef.current = replaceNavigationHistory(
+      navigationHistoryRef.current,
+      currentAppLocation(),
+    );
+    navigationHistoryRef.current = replace
+      ? replaceNavigationHistory(navigationHistoryRef.current, location)
+      : pushNavigationHistory(navigationHistoryRef.current, location);
+    applyAppLocation(location, task);
+  }
+
+  async function restoreHistoryLocation(location, runId) {
+    if (location.kind === "task") {
+      const taskList = await api.listTasks({ projectId: null });
+      if (navigationRunRef.current !== runId) return;
+      const task = taskList.find((item) => item.id === location.taskId);
+      if (task) {
+        applyAppLocation(location, task);
+        return;
+      }
+
+      const fallback = unavailableTaskFallback(
+        location,
+        navigationContextRef.current.projects,
+      );
+      navigationHistoryRef.current = replaceNavigationHistory(
+        navigationHistoryRef.current,
+        fallback,
+      );
+      applyAppLocation(fallback);
+      showNotice("That task no longer exists.");
+      return;
+    }
+
+    if (
+      location.kind === "project"
+      && !navigationContextRef.current.projects.some(
+        (project) => project.id === location.projectId,
+      )
+    ) {
+      const fallback = inboxLocation();
+      navigationHistoryRef.current = replaceNavigationHistory(
+        navigationHistoryRef.current,
+        fallback,
+      );
+      applyAppLocation(fallback);
+      showNotice("That project no longer exists.");
+      return;
+    }
+
+    applyAppLocation(location);
+  }
+
+  function traverseAppHistory(direction) {
+    if (historyTraversalPendingRef.current) return false;
+    navigationHistoryRef.current = replaceNavigationHistory(
+      navigationHistoryRef.current,
+      currentAppLocation(),
+    );
+    const movement = moveNavigationHistory(navigationHistoryRef.current, direction);
+    if (!movement.location) return false;
+
+    const previousHistory = navigationHistoryRef.current;
+    navigationHistoryRef.current = movement.history;
+    historyTraversalPendingRef.current = true;
+    const runId = navigationRunRef.current + 1;
+    navigationRunRef.current = runId;
+    restoreHistoryLocation(movement.location, runId)
+      .catch((error) => {
+        if (navigationRunRef.current === runId) {
+          navigationHistoryRef.current = previousHistory;
+          reportError(error);
+        }
+      })
+      .finally(() => {
+        if (navigationRunRef.current === runId) {
+          historyTraversalPendingRef.current = false;
+        }
+      });
+    return true;
+  }
 
   const requestProjectSwitcher = useCallback((returnTabId = null) => {
     const anotherDialogIsOpen = Boolean(document.querySelector('[data-slot="dialog-content"]'))
@@ -324,13 +488,11 @@ function App() {
           return;
         }
         flushSync(() => {
-          setSelectedTask(null);
-          setSelectedProjectId(null);
           if (destination === AI_SESSIONS_DESTINATION) {
-            setUtilityPage("agents");
+            navigateToLocation(agentsLocation());
             setAiSessionsActiveViewRequestKey((current) => current + 1);
           } else if (destination === SMART_INBOX_DESTINATION) {
-            setUtilityPage(null);
+            navigateToLocation(inboxLocation());
             setSmartInboxFocusRequestKey((current) => current + 1);
           }
         });
@@ -352,17 +514,16 @@ function App() {
 
   useEffect(() => {
     function handleKeyDown(event) {
-      if (isWorkspaceShortcut(event, "i")) {
+      const historyDirection = appHistoryShortcutDirection(event);
+      if (historyDirection && traverseAppHistory(historyDirection)) {
         event.preventDefault();
-        setUtilityPage(null);
-        setSelectedTask(null);
-        setSelectedProjectId(null);
+      } else if (isWorkspaceShortcut(event, "i")) {
+        event.preventDefault();
+        navigateToLocation(inboxLocation());
         setSmartInboxFocusRequestKey((current) => current + 1);
       } else if (isWorkspaceShortcut(event, "b")) {
         event.preventDefault();
-        setSelectedTask(null);
-        setSelectedProjectId(null);
-        setUtilityPage("agents");
+        navigateToLocation(agentsLocation());
         setAiSessionsActiveViewRequestKey((current) => current + 1);
       } else if (isWorkspaceShortcut(event, "p")) {
         event.preventDefault();
@@ -446,7 +607,7 @@ function App() {
   async function createProject(name, color = DEFAULT_PROJECT_COLOR) {
     const project = await api.createProject({ name, color });
     setProjects((current) => upsertProject(current, project));
-    setSelectedProjectId(project.id);
+    navigateToLocation(projectLocation(project.id));
     setShowProjectForm(false);
     return project;
   }
@@ -473,7 +634,7 @@ function App() {
     }
     if (resultProjectId) {
       if (!result.task) {
-        setSelectedProjectId(resultProjectId);
+        navigateToLocation(projectLocation(resultProjectId));
       }
       await refreshProject(resultProjectId);
     } else {
@@ -673,17 +834,11 @@ function App() {
   }
 
   function openTask(task) {
-    setUtilityPage(null);
-    setSelectedTask(task);
-    if (task.projectId) {
-      setSelectedProjectId(task.projectId);
-    }
+    navigateToLocation(taskLocation(task), { task });
   }
 
   function selectProject(projectId) {
-    setUtilityPage(null);
-    setSelectedTask(null);
-    setSelectedProjectId(projectId);
+    navigateToLocation(projectLocation(projectId));
   }
 
   function closeProjectSwitcher() {
@@ -703,9 +858,7 @@ function App() {
   }
 
   function showDashboard() {
-    setUtilityPage(null);
-    setSelectedTask(null);
-    setSelectedProjectId(null);
+    navigateToLocation(inboxLocation());
   }
 
   function showSmartInbox() {
@@ -714,22 +867,16 @@ function App() {
   }
 
   function showActivityView() {
-    setSelectedTask(null);
-    setSelectedProjectId(null);
-    setActivityDate(formatLocalDate());
-    setUtilityPage("activity");
+    navigateToLocation(activityLocation(formatLocalDate()));
   }
 
   function showAiAgentsView() {
-    setSelectedTask(null);
-    setSelectedProjectId(null);
-    setUtilityPage("agents");
+    navigateToLocation(agentsLocation());
   }
 
   function showProjectFromBreadcrumb() {
-    setSelectedTask(null);
     if (selectedTask?.projectId) {
-      setSelectedProjectId(selectedTask.projectId);
+      navigateToLocation(projectLocation(selectedTask.projectId));
     }
   }
 
@@ -855,7 +1002,10 @@ function App() {
           onDeleteTask={async (task) => {
             try {
               await api.deleteTask({ id: task.id });
-              setSelectedTask(null);
+              navigateToLocation(
+                task.projectId ? projectLocation(task.projectId) : inboxLocation(),
+                { replace: true },
+              );
               if (task.projectId) {
                 await refreshProject(task.projectId);
               } else {
