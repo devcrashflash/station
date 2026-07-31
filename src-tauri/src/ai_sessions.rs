@@ -590,6 +590,14 @@ fn update_codex_session_state(value: &Value, state: &mut CodexSessionState) {
                     value.get("timestamp").and_then(Value::as_str),
                 ));
             }
+            Some("turn_aborted") => {
+                state.running = false;
+                state.completed_at = None;
+                state.pending_inputs.clear();
+                state.pending_approvals.clear();
+                state.proposed_plan = false;
+                state.final_question = false;
+            }
             _ => {}
         }
         return;
@@ -1678,6 +1686,43 @@ mod tests {
         fs::write(&path, format!("{prefix}{timestamped_complete}{restart}")).unwrap();
         let restarted = codex_session_state(&path);
         assert!(restarted.running);
+        assert_eq!(restarted.completed_at, None);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn treats_aborted_codex_turns_as_idle_and_allows_restart() {
+        let directory = fixture_dir("codex-aborted");
+        let path = directory.join("rollout.jsonl");
+        let prefix = concat!(
+            "{\"type\":\"session_meta\",\"timestamp\":\"2026-07-31T15:52:53Z\",\"payload\":{\"id\":\"aborted-session\",\"cwd\":\"/work/app\",\"source\":\"cli\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"request_user_input\",\"call_id\":\"input-call\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"name\":\"exec_command\",\"call_id\":\"approval-call\",\"arguments\":\"{\\\"cmd\\\":\\\"npm test\\\",\\\"sandbox_permissions\\\":\\\"require_escalated\\\"}\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"<proposed_plan>\\nWait?\\n</proposed_plan>\"}]}}\n",
+        );
+        let aborted = "{\"type\":\"event_msg\",\"timestamp\":\"2026-07-31T17:13:54Z\",\"payload\":{\"type\":\"turn_aborted\",\"reason\":\"interrupted\"}}\n";
+        fs::write(&path, format!("{prefix}{aborted}")).unwrap();
+
+        let state = codex_session_state(&path);
+        assert!(!state.running);
+        assert!(!state.waiting_for_input());
+        assert_eq!(state.completed_at, None);
+        assert!(state.pending_inputs.is_empty());
+        assert!(state.pending_approvals.is_empty());
+        assert!(!state.proposed_plan);
+        assert!(!state.final_question);
+
+        let session = read_codex_transcript(&path).unwrap();
+        assert!(!session.running);
+        assert!(!session.waiting_for_input);
+        assert_eq!(session.completed_at, None);
+
+        let restart = "{\"type\":\"event_msg\",\"timestamp\":\"2026-07-31T17:14:00Z\",\"payload\":{\"type\":\"task_started\"}}\n";
+        fs::write(&path, format!("{prefix}{aborted}{restart}")).unwrap();
+        let restarted = codex_session_state(&path);
+        assert!(restarted.running);
+        assert!(!restarted.waiting_for_input());
         assert_eq!(restarted.completed_at, None);
         fs::remove_dir_all(directory).unwrap();
     }
