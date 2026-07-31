@@ -36,6 +36,7 @@ import {
   formatActivityLastSyncText,
   formatLocalDate,
   isTrelloAutomationActivity,
+  isTrelloDelimiterActivity,
   isTrelloPositionOnlyActivity,
   latestActivitySyncAt,
   parseLocalDate,
@@ -103,7 +104,9 @@ export function ActivityView({
   const summaryRunRef = useRef(0);
   const manualActivities = useMemo(
     () => (activities || []).filter((activity) => (
-      !isTrelloAutomationActivity(activity) && !isTrelloPositionOnlyActivity(activity)
+      !isTrelloAutomationActivity(activity)
+      && !isTrelloDelimiterActivity(activity)
+      && !isTrelloPositionOnlyActivity(activity)
     )),
     [activities],
   );

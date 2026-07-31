@@ -9,6 +9,7 @@ import {
   formatActivityLastSyncText,
   formatLocalDate,
   isTrelloAutomationActivity,
+  isTrelloDelimiterActivity,
   isTrelloListMoveActivity,
   isTrelloPositionOnlyActivity,
   isPastLocalDate,
@@ -158,6 +159,46 @@ test("detects trello automation activities from app metadata", () => {
   );
   assert.equal(isTrelloAutomationActivity({ provider: "trello", rawJson: "{bad json" }), false);
   assert.equal(isTrelloAutomationActivity({ provider: "trello" }), false);
+});
+
+test("detects Trello delimiter cards with at least three ASCII hyphens", () => {
+  const trelloCardActivity = (name, overrides = {}) => ({
+    provider: "trello",
+    title: name,
+    targetUrl: "https://trello.com/c/abc123",
+    rawJson: JSON.stringify({ data: { card: { name, shortLink: "abc123" } } }),
+    ...overrides,
+  });
+
+  assert.equal(isTrelloDelimiterActivity(trelloCardActivity("---")), true);
+  assert.equal(isTrelloDelimiterActivity(trelloCardActivity("  ----  ")), true);
+  assert.equal(isTrelloDelimiterActivity(trelloCardActivity("----------")), true);
+
+  for (const title of ["--", "—", "–––", "--- Notes", "Review PR"]) {
+    assert.equal(isTrelloDelimiterActivity(trelloCardActivity(title)), false, title);
+  }
+
+  assert.equal(isTrelloDelimiterActivity({
+    provider: "trello",
+    title: "---",
+    targetUrl: "https://trello.com/c/legacy",
+    rawJson: "{bad json",
+  }), true);
+  assert.equal(isTrelloDelimiterActivity({
+    provider: "trello",
+    title: "---",
+    rawJson: JSON.stringify({ data: { board: { name: "---" } } }),
+  }), false);
+  assert.equal(isTrelloDelimiterActivity({
+    provider: "trello",
+    title: "---",
+    rawJson: JSON.stringify({ data: { list: { name: "---" } } }),
+  }), false);
+  assert.equal(isTrelloDelimiterActivity({
+    provider: "github",
+    title: "---",
+    targetUrl: "https://trello.com/c/abc123",
+  }), false);
 });
 
 test("detects Trello position-only card updates without hiding list moves", () => {

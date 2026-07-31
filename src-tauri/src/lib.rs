@@ -8821,7 +8821,7 @@ fn trello_activity_from_json(
     }
 
     let event_type = json_string(action, "type").unwrap_or_else(|| "action".to_string());
-    if is_trello_position_only_update(action, &event_type) {
+    if is_trello_delimiter_card(action) || is_trello_position_only_update(action, &event_type) {
         return None;
     }
     let title = json_path_string(action, &["data", "card", "name"])
@@ -8849,6 +8849,11 @@ fn trello_activity_from_json(
         raw_json: action.to_string(),
         subject_json: None,
     })
+}
+
+fn is_trello_delimiter_card(action: &Value) -> bool {
+    json_path_string(action, &["data", "card", "name"])
+        .is_some_and(|title| title.len() >= 3 && title.bytes().all(|character| character == b'-'))
 }
 
 fn is_trello_position_only_update(action: &Value, event_type: &str) -> bool {
@@ -13640,6 +13645,40 @@ mod tests {
             .expect("trello attachment activity");
 
         assert_eq!(activity.action_label, "Changed");
+
+        for title in ["---", "  ----  ", "----------"] {
+            let delimiter_action = serde_json::json!({
+                "id": format!("delimiter-{title}"),
+                "type": "updateCard",
+                "date": "2026-07-09T10:30:00.000Z",
+                "data": {
+                    "card": { "name": title, "shortLink": "delimiter" },
+                    "old": { "name": "Previous delimiter" }
+                }
+            });
+            assert!(trello_activity_from_json(&trello, &delimiter_action, start, end).is_none());
+        }
+
+        for title in ["--", "—", "–––", "--- Notes", "Review PR"] {
+            let regular_action = serde_json::json!({
+                "id": format!("regular-{title}"),
+                "type": "updateCard",
+                "date": "2026-07-09T10:30:00.000Z",
+                "data": {
+                    "card": { "name": title, "shortLink": "regular" },
+                    "old": { "name": "Previous title" }
+                }
+            });
+            assert!(trello_activity_from_json(&trello, &regular_action, start, end).is_some());
+        }
+
+        let delimiter_board_action = serde_json::json!({
+            "id": "delimiter-board",
+            "type": "updateBoard",
+            "date": "2026-07-09T10:30:00.000Z",
+            "data": { "board": { "name": "---", "shortLink": "delimiter-board" } }
+        });
+        assert!(trello_activity_from_json(&trello, &delimiter_board_action, start, end).is_some());
 
         let position_action = serde_json::json!({
             "id": "action_3",

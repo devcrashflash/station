@@ -139,6 +139,19 @@ export function isTrelloAutomationActivity(activity) {
   }
 }
 
+export function isTrelloDelimiterActivity(activity) {
+  if (activity?.provider !== "trello") return false;
+
+  const raw = parseActivityJson(activity.rawJson);
+  const rawCard = raw?.data?.card;
+  const hasCardIdentity = Boolean(rawCard)
+    || /https?:\/\/(?:www\.)?trello\.com\/c\//i.test(activity.targetUrl || "");
+  if (!hasCardIdentity) return false;
+
+  const title = rawCard?.name ?? activity.title;
+  return /^-{3,}$/.test(String(title || "").trim());
+}
+
 export function isTrelloPositionOnlyActivity(activity) {
   if (activity?.provider !== "trello" || activity?.eventType !== "updateCard" || !activity?.rawJson) {
     return false;
