@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { emit } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Bot,
@@ -27,6 +27,11 @@ import {
   aiSessionTreeWaitingForInput,
   normalizeAiSessionSettings,
 } from "@/lib/aiSessions";
+import {
+  AI_SESSION_WAITING_STATUS_EVENT,
+  AI_SESSION_WAITING_STATUS_REQUEST_EVENT,
+  aiSessionWaitingStatusFromPayload,
+} from "@/lib/aiSessionEvents";
 import { isWorkspaceShortcut } from "@/lib/workspaceTabs";
 import { shortcutModifier } from "@/lib/keyboardShortcut";
 import { quickCaptureTitle } from "@/lib/quickCapture";
@@ -54,6 +59,7 @@ export function QuickCapture() {
   const [searchQuery, setSearchQuery] = useState("");
   const [highlightedAgentId, setHighlightedAgentId] = useState(null);
   const [busyAgentId, setBusyAgentId] = useState(null);
+  const [hasWaitingAiSession, setHasWaitingAiSession] = useState(false);
   const inputRef = useRef(null);
   const searchInputRef = useRef(null);
   const optionRefs = useRef(new Map());
@@ -116,6 +122,7 @@ export function QuickCapture() {
         window.requestAnimationFrame(focusInput);
         window.setTimeout(focusInput, 50);
       } else {
+        setActiveTab("inbox");
         setError("");
         agentLoadRun.current += 1;
       }
@@ -151,6 +158,27 @@ export function QuickCapture() {
   useEffect(() => {
     optionRefs.current.get(highlightedAgentId)?.scrollIntoView({ block: "nearest" });
   }, [highlightedAgentId]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten = null;
+    listen(AI_SESSION_WAITING_STATUS_EVENT, ({ payload }) => {
+      if (!disposed) {
+        setHasWaitingAiSession(aiSessionWaitingStatusFromPayload(payload));
+      }
+    }).then((cleanup) => {
+      if (disposed) {
+        cleanup();
+        return;
+      }
+      unlisten = cleanup;
+      emit(AI_SESSION_WAITING_STATUS_REQUEST_EVENT).catch(console.error);
+    }).catch(console.error);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     function handleWindowKeyDown(event) {
@@ -284,6 +312,7 @@ export function QuickCapture() {
             icon={Bot}
             label="AI Agents"
             shortcut={`${modifier}B`}
+            waitingForInput={hasWaitingAiSession}
             onClick={() => activateTab("agents")}
           />
         </div>
@@ -356,7 +385,7 @@ export function QuickCapture() {
   );
 }
 
-function OverlayTab({ active, icon: Icon, label, shortcut, onClick }) {
+function OverlayTab({ active, icon: Icon, label, shortcut, waitingForInput = false, onClick }) {
   return (
     <button
       className={cn(
@@ -366,10 +395,17 @@ function OverlayTab({ active, icon: Icon, label, shortcut, onClick }) {
       type="button"
       role="tab"
       aria-selected={active}
+      title={waitingForInput ? `${label} — waiting for you` : undefined}
       onClick={onClick}
     >
       <Icon className="size-4" />
       {label}
+      {waitingForInput && (
+        <>
+          <span className="size-1.5 shrink-0 rounded-full bg-orange-500" aria-hidden="true" />
+          <span className="sr-only">Waiting for you</span>
+        </>
+      )}
       <Kbd>{shortcut}</Kbd>
     </button>
   );
