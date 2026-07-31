@@ -842,6 +842,10 @@ fn management_label_allowed(label: &str) -> bool {
     label == MAIN_WEBVIEW_LABEL || label == TAB_BAR_WEBVIEW_LABEL || label == TERMINAL_WEBVIEW_LABEL
 }
 
+fn quick_capture_label_allowed(label: &str) -> bool {
+    label == "quick-capture"
+}
+
 fn validate_terminal_caller(webview: &Webview, _tab_id: &str) -> Result<(), String> {
     if webview.label() == TERMINAL_WEBVIEW_LABEL {
         Ok(())
@@ -952,6 +956,15 @@ pub async fn create_terminal_tab(
     cwd: Option<String>,
 ) -> Result<WorkspaceTabsSnapshot, String> {
     validate_management_caller(&webview)?;
+    create_terminal_tab_inner(&app, &state, defer_input, cwd)
+}
+
+fn create_terminal_tab_inner(
+    app: &tauri::AppHandle,
+    state: &TerminalTabsState,
+    defer_input: bool,
+    cwd: Option<String>,
+) -> Result<WorkspaceTabsSnapshot, String> {
     let new_tab_directory = if let Some(cwd) = cwd {
         let path = PathBuf::from(&cwd);
         if !path.is_absolute() || !path.is_dir() {
@@ -962,7 +975,7 @@ pub async fn create_terminal_tab(
         }
         Some(cwd)
     } else {
-        configured_terminal_directories(&app)?.0
+        configured_terminal_directories(app)?.0
     };
     let (tab_id, snapshot) = {
         let mut runtime = state.runtime.lock().map_err(db_error)?;
@@ -976,13 +989,55 @@ pub async fn create_terminal_tab(
             runtime.startup_input_gates.insert(tab_id.clone());
         }
         runtime.active_tab_id = tab_id.clone();
-        persist_tabs(&app, &runtime)?;
+        persist_tabs(app, &runtime)?;
         (tab_id, snapshot_from_runtime(&runtime))
     };
     if !defer_input {
-        apply_active_webview(&app, &tab_id)?;
+        apply_active_webview(app, &tab_id)?;
     }
-    emit_snapshot(&app, &snapshot);
+    emit_snapshot(app, &snapshot);
+    Ok(snapshot)
+}
+
+fn ai_session_terminal_command(provider: &str, session_id: &str) -> Result<String, String> {
+    if session_id.is_empty()
+        || session_id.len() > 128
+        || !session_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err("Invalid AI session identifier.".to_string());
+    }
+
+    match provider {
+        "codex" => Ok(format!("codex resume {session_id}\r")),
+        "claude" => Ok(format!("claude --resume {session_id}\r")),
+        _ => Err("Unsupported AI session provider.".to_string()),
+    }
+}
+
+#[tauri::command]
+pub async fn open_ai_session_terminal(
+    app: tauri::AppHandle,
+    webview: Webview,
+    state: tauri::State<'_, TerminalTabsState>,
+    provider: String,
+    session_id: String,
+    cwd: Option<String>,
+) -> Result<WorkspaceTabsSnapshot, String> {
+    if !quick_capture_label_allowed(webview.label()) {
+        return Err("Only quick capture can use this AI session command.".to_string());
+    }
+    let command = ai_session_terminal_command(&provider, &session_id)?;
+    let snapshot = create_terminal_tab_inner(&app, &state, true, cwd)?;
+    complete_terminal_startup_input_inner(&app, &state, &snapshot.active_tab_id, command)?;
+
+    let window = app
+        .get_window("main")
+        .ok_or_else(|| "The main window is unavailable.".to_string())?;
+    window.show().map_err(db_error)?;
+    window.unminimize().map_err(db_error)?;
+    window.set_focus().map_err(db_error)?;
     Ok(snapshot)
 }
 
@@ -2622,6 +2677,15 @@ pub fn complete_terminal_startup_input(
     data: String,
 ) -> Result<(), String> {
     validate_management_caller(&webview)?;
+    complete_terminal_startup_input_inner(&app, &state, &tab_id, data)
+}
+
+fn complete_terminal_startup_input_inner(
+    app: &tauri::AppHandle,
+    state: &TerminalTabsState,
+    tab_id: &str,
+    data: String,
+) -> Result<(), String> {
     {
         let mut runtime = state.runtime.lock().map_err(db_error)?;
         let pane_id = runtime
@@ -2630,7 +2694,7 @@ pub fn complete_terminal_startup_input(
             .find(|tab| tab.id == tab_id)
             .map(|tab| tab.focused_pane_id.clone())
             .ok_or_else(|| "Unknown terminal tab.".to_string())?;
-        if !runtime.startup_input_gates.remove(&tab_id) {
+        if !runtime.startup_input_gates.remove(tab_id) {
             return Err("The terminal tab is not waiting for startup input.".to_string());
         }
 
@@ -2649,7 +2713,7 @@ pub fn complete_terminal_startup_input(
             runtime.pending_input.insert(pane_id, ordered_input);
         }
     }
-    apply_active_webview(&app, &tab_id)
+    apply_active_webview(app, tab_id)
 }
 
 #[tauri::command]
@@ -2805,6 +2869,33 @@ mod tests {
             next_generation: 1,
             next_attachment_id: 1,
         }
+    }
+
+    #[test]
+    fn restricts_ai_session_terminal_commands_to_quick_capture() {
+        assert!(quick_capture_label_allowed("quick-capture"));
+        assert!(!quick_capture_label_allowed(MAIN_WEBVIEW_LABEL));
+        assert!(!quick_capture_label_allowed(TERMINAL_WEBVIEW_LABEL));
+    }
+
+    #[test]
+    fn validates_ai_session_terminal_commands() {
+        assert_eq!(
+            ai_session_terminal_command("codex", "thread-1").unwrap(),
+            "codex resume thread-1\r"
+        );
+        assert_eq!(
+            ai_session_terminal_command("claude", "session_1").unwrap(),
+            "claude --resume session_1\r"
+        );
+        assert_eq!(
+            ai_session_terminal_command("other", "session-1").unwrap_err(),
+            "Unsupported AI session provider."
+        );
+        assert_eq!(
+            ai_session_terminal_command("codex", "bad; command").unwrap_err(),
+            "Invalid AI session identifier."
+        );
     }
 
     #[test]

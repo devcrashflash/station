@@ -335,6 +335,47 @@ fn hide_quick_capture(app: tauri::AppHandle, restore_focus: bool) -> Result<(), 
     hide_quick_capture_window(&app, restore_focus)
 }
 
+fn quick_capture_surface_size(surface: &str) -> Result<(f64, f64), String> {
+    match surface {
+        "inbox" => Ok((640.0, 228.0)),
+        "agents" => Ok((640.0, 480.0)),
+        _ => Err("Unknown quick capture surface.".to_string()),
+    }
+}
+
+#[tauri::command]
+fn resize_quick_capture(app: tauri::AppHandle, surface: String) -> Result<(), String> {
+    let (width, height) = quick_capture_surface_size(&surface)?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let panel = app
+            .get_webview_panel("quick-capture")
+            .map_err(|_| "Quick capture panel is unavailable.".to_string())?;
+        return app
+            .run_on_main_thread(move || {
+                panel
+                    .as_panel()
+                    .setContentSize(objc2_foundation::NSSize::new(width, height));
+                if let Err(error) = center_quick_capture_on_focused_monitor(&panel) {
+                    eprintln!("Could not recenter quick capture panel: {error}");
+                }
+            })
+            .map_err(|error| error.to_string());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let window = app
+            .get_webview_window("quick-capture")
+            .ok_or_else(|| "Quick capture window is unavailable.".to_string())?;
+        window
+            .set_size(tauri::LogicalSize::new(width, height))
+            .map_err(|error| error.to_string())?;
+        center_quick_capture_on_cursor_monitor(&app, &window)
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn toggle_quick_capture(app: &tauri::AppHandle) -> Result<(), String> {
     let panel = app
@@ -345,6 +386,10 @@ fn toggle_quick_capture(app: &tauri::AppHandle) -> Result<(), String> {
         return hide_quick_capture_window(app, true);
     }
 
+    let (width, height) = quick_capture_surface_size("inbox")?;
+    panel
+        .as_panel()
+        .setContentSize(objc2_foundation::NSSize::new(width, height));
     center_quick_capture_on_focused_monitor(&panel)?;
     panel.show_and_make_key();
     app.get_webview("quick-capture")
@@ -364,6 +409,10 @@ fn toggle_quick_capture(app: &tauri::AppHandle) -> Result<(), String> {
         return hide_quick_capture_window(app, true);
     }
 
+    let (width, height) = quick_capture_surface_size("inbox")?;
+    window
+        .set_size(tauri::LogicalSize::new(width, height))
+        .map_err(|error| error.to_string())?;
     center_quick_capture_on_cursor_monitor(app, &window)?;
     window.show().map_err(|error| error.to_string())?;
     window.set_focus().map_err(|error| error.to_string())
@@ -439,7 +488,7 @@ fn create_quick_capture_window(app: &tauri::AppHandle) -> Result<(), String> {
         WebviewUrl::App("index.html?quick-capture=1".into()),
     )
     .title("Quick Capture")
-    .inner_size(640.0, 180.0)
+    .inner_size(640.0, 228.0)
     .visible(false)
     .focused(false)
     .center()
@@ -1451,6 +1500,7 @@ pub fn run() {
             quick_capture_settings,
             save_quick_capture_settings,
             hide_quick_capture,
+            resize_quick_capture,
             ai_sessions::list_ai_sessions,
             set_ai_session_dock_badge,
             ai_sessions::archive_ai_session,
@@ -1462,6 +1512,7 @@ pub fn run() {
             terminal_tabs::save_terminal_settings,
             terminal_tabs::get_terminal_layout,
             terminal_tabs::create_terminal_tab,
+            terminal_tabs::open_ai_session_terminal,
             terminal_tabs::complete_terminal_startup_input,
             terminal_tabs::activate_tab,
             terminal_tabs::reorder_tabs,
@@ -11217,6 +11268,19 @@ async fn resolve_trello_tickets(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quick_capture_sizes_are_limited_to_known_surfaces() {
+        assert_eq!(quick_capture_surface_size("inbox").unwrap(), (640.0, 228.0));
+        assert_eq!(
+            quick_capture_surface_size("agents").unwrap(),
+            (640.0, 480.0)
+        );
+        assert_eq!(
+            quick_capture_surface_size("unknown").unwrap_err(),
+            "Unknown quick capture surface."
+        );
+    }
 
     fn memory_db() -> SqliteConnection {
         let db = SqliteConnection::open_in_memory().expect("open in-memory database");

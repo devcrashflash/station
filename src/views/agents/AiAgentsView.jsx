@@ -20,10 +20,10 @@ import {
 } from "lucide-react";
 
 import { CheckboxFilterCard } from "@/components/common/CheckboxFilterCard";
-import { BurningTreeIcon } from "@/components/common/BurningTreeIcon";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Panel } from "@/components/common/Panel";
 import { SegmentedTabs } from "@/components/common/SegmentedTabs";
+import { AiSessionStateIcon, WaitingForInputBadge } from "@/features/ai-sessions/AiSessionStateIcon";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -453,7 +453,7 @@ function SessionRow({
             {expanded ? <ChevronDown /> : <ChevronRight />}
           </Button>
         )}
-        <SessionStateRobot state={state} className="size-5" />
+        <AiSessionStateIcon state={state} className="size-5" />
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2">
             <p className="truncate font-medium">{session.title}</p>
@@ -557,7 +557,7 @@ function SessionRow({
         <div className="border-t bg-muted/20 py-1 pl-12 pr-4">
           {session.children.map((child) => (
             <div key={child.id} className="flex min-w-0 items-center gap-3 border-b py-3 last:border-b-0">
-              <SessionStateRobot state={aiSessionState(child, now)} className="size-4" />
+              <AiSessionStateIcon state={aiSessionState(child, now)} className="size-4" />
               <div className="min-w-0 flex-1">
                 <div className="flex min-w-0 items-center gap-2">
                   <p className="truncate text-sm font-medium">{child.title}</p>
@@ -570,68 +570,5 @@ function SessionRow({
         </div>
       )}
     </div>
-  );
-}
-
-function SessionStateRobot({ state, className }) {
-  if (state === "running") {
-    return <RunningSessionIcon className={className} />;
-  }
-
-  const statePresentation = {
-    waiting: {
-      label: "Waiting for you",
-      className: "text-amber-600 dark:text-amber-400",
-    },
-    done: {
-      label: "Done",
-      className: "text-green-600 dark:text-green-400",
-    },
-    idle: {
-      label: "Idle",
-      className: "text-muted-foreground",
-    },
-  }[state];
-
-  return (
-    <Bot
-      role="img"
-      aria-label={statePresentation.label}
-      className={cn("shrink-0", className, statePresentation.className)}
-    />
-  );
-}
-
-function RunningSessionIcon({ className }) {
-  return (
-    <span
-      role="img"
-      aria-label="Running"
-      className={cn("relative inline-block shrink-0", className)}
-    >
-      <span
-        aria-hidden="true"
-        className="running-session-icon__robot absolute inset-0"
-      >
-        <Bot className="size-full animate-spin text-blue-600 dark:text-blue-400" />
-      </span>
-      <span
-        aria-hidden="true"
-        className="running-session-icon__tree absolute inset-0"
-      >
-        <BurningTreeIcon className="size-full" />
-      </span>
-    </span>
-  );
-}
-
-function WaitingForInputBadge() {
-  return (
-    <Badge
-      variant="outline"
-      className="shrink-0 border-amber-500/60 bg-amber-500/10 text-amber-700 dark:text-amber-300"
-    >
-      Waiting for you
-    </Badge>
   );
 }

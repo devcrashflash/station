@@ -90,6 +90,8 @@ export const api = {
   })),
   hideQuickCapture: ({ restoreFocus = false } = {}) =>
     call("hide_quick_capture", { restoreFocus }, () => null),
+  resizeQuickCapture: ({ surface }) =>
+    call("resize_quick_capture", { surface }, () => null),
   listBrowserSettings: () => call("list_browser_settings", {}, local.listBrowserSettings),
   saveBrowserSettings: (payload) =>
     call("save_browser_settings", { input: payload }, () => local.saveBrowserSettings(payload)),
@@ -114,6 +116,10 @@ export const api = {
     call("restore_ai_session", { provider, sessionId }, () => local.restoreAiSession(provider, sessionId)),
   openAiSessionDesktop: ({ provider, sessionId }) =>
     call("open_ai_session_desktop", { provider, sessionId }, () => {
+      throw new Error("Opening AI sessions requires the desktop app.");
+    }),
+  openAiSessionTerminal: ({ provider, sessionId, cwd }) =>
+    call("open_ai_session_terminal", { provider, sessionId, cwd }, () => {
       throw new Error("Opening AI sessions requires the desktop app.");
     }),
   listProjects: () => call("list_projects", {}, local.listProjects),
