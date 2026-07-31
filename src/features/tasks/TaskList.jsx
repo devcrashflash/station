@@ -36,7 +36,7 @@ export function TaskList({
               <Button
                 className={cn(
                   "mt-0.5 size-auto rounded-full p-0 text-muted-foreground hover:bg-transparent",
-                  isDone && "text-emerald-600 dark:text-emerald-400",
+                  isDone && "text-emerald-600 hover:text-emerald-700 dark:text-emerald-400 dark:hover:text-emerald-300",
                 )}
                 type="button"
                 variant="ghost"

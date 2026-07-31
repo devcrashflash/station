@@ -13,7 +13,7 @@ import {
 import { ResourcesPanel } from "@/features/resources/ResourcesPanel";
 import { TaskList } from "@/features/tasks/TaskList";
 import { isPrimarySearchShortcut, shortcutModifier } from "@/lib/keyboardShortcut";
-import { filterTasksByTitle } from "@/lib/taskSearch";
+import { filterTasksByTitle, preserveTaskOrder } from "@/lib/taskSearch";
 
 export function ProjectWorkspaceView({
   project,
@@ -34,10 +34,22 @@ export function ProjectWorkspaceView({
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [taskSearchQuery, setTaskSearchQuery] = useState("");
   const taskSearchInputRef = useRef(null);
+  const taskOrderRef = useRef({ projectId: null, taskIds: [] });
   const shortcutKey = shortcutModifier();
+  const orderedTasks = useMemo(() => {
+    const previousTaskIds = taskOrderRef.current.projectId === project.id
+      ? taskOrderRef.current.taskIds
+      : [];
+    const nextTasks = preserveTaskOrder(tasks, previousTaskIds);
+    taskOrderRef.current = {
+      projectId: project.id,
+      taskIds: nextTasks.map((task) => task.id),
+    };
+    return nextTasks;
+  }, [project.id, tasks]);
   const visibleTasks = useMemo(
-    () => filterTasksByTitle(tasks, taskSearchQuery),
-    [taskSearchQuery, tasks],
+    () => filterTasksByTitle(orderedTasks, taskSearchQuery),
+    [orderedTasks, taskSearchQuery],
   );
 
   useEffect(() => {
