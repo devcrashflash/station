@@ -18,14 +18,58 @@ export function terminalTabs(snapshot) {
   return (snapshot?.tabs || []).filter((tab) => tab.kind === "terminal");
 }
 
-export function reorderTerminalIds(tabs, draggedId, targetId) {
+export function reorderTerminalIds(tabs, draggedId, targetId, placement = null) {
   const ids = terminalTabs({ tabs }).map((tab) => tab.id);
   const from = ids.indexOf(draggedId);
   const to = ids.indexOf(targetId);
-  if (from < 0 || to < 0 || from === to) return ids;
+  const resolvedPlacement = placement ?? (from < to ? "after" : "before");
+  if (from < 0 || to < 0 || from === to || !["before", "after"].includes(resolvedPlacement)) return ids;
   const [moved] = ids.splice(from, 1);
-  ids.splice(to, 0, moved);
+  const targetIndex = ids.indexOf(targetId);
+  ids.splice(targetIndex + (resolvedPlacement === "after" ? 1 : 0), 0, moved);
   return ids;
+}
+
+export function withTerminalTabOrder(snapshot, tabIds) {
+  const current = terminalTabs(snapshot);
+  const requestedIds = new Set(tabIds);
+  if (tabIds.length !== current.length
+    || requestedIds.size !== tabIds.length
+    || current.some((tab) => !requestedIds.has(tab.id))) {
+    return snapshot;
+  }
+  const tabsById = new Map(current.map((tab) => [tab.id, tab]));
+  const ordered = tabIds.map((id) => tabsById.get(id));
+  let terminalIndex = 0;
+  return {
+    ...snapshot,
+    tabs: snapshot.tabs.map((tab) => (
+      tab.kind === "terminal" ? ordered[terminalIndex++] : tab
+    )),
+  };
+}
+
+export function terminalTabDropPlacement(
+  bounds,
+  clientX,
+  clientY,
+  sourceIndex,
+  targetIndex,
+  threshold = 0.25,
+) {
+  if (!bounds || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+  const { left, top, width, height } = bounds;
+  if (![left, top, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null;
+  if (clientX < left || clientX > left + width || clientY < top || clientY > top + height) return null;
+  if (!Number.isInteger(sourceIndex) || !Number.isInteger(targetIndex)
+    || sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex
+    || !Number.isFinite(threshold) || threshold <= 0 || threshold > 0.5) {
+    return null;
+  }
+  if (targetIndex > sourceIndex) {
+    return clientX >= left + width * threshold ? "after" : null;
+  }
+  return clientX <= left + width * (1 - threshold) ? "before" : null;
 }
 
 export function isWorkspaceShortcut(event, key) {

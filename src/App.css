@@ -270,6 +270,7 @@ body.terminal-window #root {
 }
 
 .workspace-tab {
+  position: relative;
   display: flex;
   min-width: 0;
   flex: 1 1 180px;
@@ -278,6 +279,33 @@ body.terminal-window #root {
   gap: 2px;
   padding: 0 4px 0 0;
   container-type: inline-size;
+  cursor: grab;
+}
+
+.workspace-tab-dragging {
+  cursor: grabbing;
+  opacity: 0.48;
+}
+
+.workspace-tab-drop-before::before,
+.workspace-tab-drop-after::after {
+  position: absolute;
+  z-index: 1;
+  top: 2px;
+  bottom: 2px;
+  width: 2px;
+  border-radius: 999px;
+  background: var(--primary);
+  content: "";
+  pointer-events: none;
+}
+
+.workspace-tab-drop-before::before {
+  left: -1px;
+}
+
+.workspace-tab-drop-after::after {
+  right: -1px;
 }
 
 .workspace-tab-main {
@@ -287,6 +315,7 @@ body.terminal-window #root {
   max-width: 5rem;
   container-type: normal;
   background: color-mix(in oklch, var(--sidebar-accent) 45%, transparent);
+  cursor: default;
 }
 
 .workspace-tab-main .workspace-tab-title {

@@ -5,11 +5,13 @@ import {
   activeWorkspaceTab,
   isWorkspaceShortcut,
   reorderTerminalIds,
+  terminalTabDropPlacement,
   terminalTabs,
   workspaceNumberShortcut,
   workspaceNumberForTab,
   workspaceSplitShortcut,
   workspaceTabForNumber,
+  withTerminalTabOrder,
 } from "./workspaceTabs.js";
 
 const tabs = [
@@ -24,9 +26,58 @@ test("keeps Main outside the reorderable terminal list", () => {
   assert.deepEqual(reorderTerminalIds(tabs, "three", "one"), ["three", "one", "two"]);
 });
 
+test("inserts dragged terminals on either side of the hovered tab", () => {
+  assert.deepEqual(reorderTerminalIds(tabs, "one", "two"), ["two", "one", "three"]);
+  assert.deepEqual(reorderTerminalIds(tabs, "one", "two", "after"), ["two", "one", "three"]);
+  assert.deepEqual(reorderTerminalIds(tabs, "three", "two", "before"), ["one", "three", "two"]);
+  assert.deepEqual(reorderTerminalIds(tabs, "one", "three", "after"), ["two", "three", "one"]);
+  assert.deepEqual(reorderTerminalIds(tabs, "three", "one", "before"), ["three", "one", "two"]);
+});
+
 test("returns the unchanged order for invalid drag targets", () => {
   assert.deepEqual(reorderTerminalIds(tabs, "main", "two"), ["one", "two", "three"]);
   assert.deepEqual(reorderTerminalIds(tabs, "one", "main"), ["one", "two", "three"]);
+  assert.deepEqual(reorderTerminalIds(tabs, "one", "two", "middle"), ["one", "two", "three"]);
+});
+
+test("applies a preview order without moving Main or changing snapshot state", () => {
+  const snapshot = { tabs, activeTabId: "two" };
+  const reordered = withTerminalTabOrder(snapshot, ["three", "one", "two"]);
+  assert.deepEqual(reordered.tabs.map((tab) => tab.id), ["main", "three", "one", "two"]);
+  assert.equal(reordered.activeTabId, "two");
+  assert.equal(withTerminalTabOrder(snapshot, ["one"]), snapshot);
+  assert.deepEqual(snapshot.tabs.map((tab) => tab.id), ["main", "one", "two", "three"]);
+});
+
+test("triggers rightward terminal tab placement after 25 percent penetration", () => {
+  const bounds = { left: 100, top: 20, width: 80, height: 24 };
+  assert.equal(terminalTabDropPlacement(bounds, 100, 32, 0, 1), null);
+  assert.equal(terminalTabDropPlacement(bounds, 119, 32, 0, 1), null);
+  assert.equal(terminalTabDropPlacement(bounds, 120, 32, 0, 1), "after");
+  assert.equal(terminalTabDropPlacement(bounds, 180, 32, 0, 2), "after");
+});
+
+test("triggers leftward terminal tab placement after 25 percent penetration", () => {
+  const bounds = { left: 100, top: 20, width: 80, height: 24 };
+  assert.equal(terminalTabDropPlacement(bounds, 180, 32, 2, 1), null);
+  assert.equal(terminalTabDropPlacement(bounds, 161, 32, 2, 1), null);
+  assert.equal(terminalTabDropPlacement(bounds, 160, 32, 2, 1), "before");
+  assert.equal(terminalTabDropPlacement(bounds, 100, 32, 2, 0), "before");
+});
+
+test("rejects terminal tab placements outside valid bounds", () => {
+  const bounds = { left: 100, top: 20, width: 80, height: 24 };
+  assert.equal(terminalTabDropPlacement(bounds, 99, 32, 0, 1), null);
+  assert.equal(terminalTabDropPlacement(bounds, 181, 32, 0, 1), null);
+  assert.equal(terminalTabDropPlacement(bounds, 120, 19, 0, 1), null);
+  assert.equal(terminalTabDropPlacement(bounds, 120, 45, 0, 1), null);
+  assert.equal(terminalTabDropPlacement({ ...bounds, width: 0 }, 120, 32, 0, 1), null);
+  assert.equal(terminalTabDropPlacement(null, 120, 32, 0, 1), null);
+  assert.equal(terminalTabDropPlacement(bounds, Number.NaN, 32, 0, 1), null);
+  assert.equal(terminalTabDropPlacement(bounds, 120, 32, 1, 1), null);
+  assert.equal(terminalTabDropPlacement(bounds, 120, 32, -1, 1), null);
+  assert.equal(terminalTabDropPlacement(bounds, 120, 32, 0, 1, 0), null);
+  assert.equal(terminalTabDropPlacement(bounds, 120, 32, 0, 1, 0.75), null);
 });
 
 test("recognizes workspace command shortcuts", () => {
