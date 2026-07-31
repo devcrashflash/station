@@ -796,6 +796,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-vision",
  "ocrs",
+ "plist",
  "portable-pty",
  "rand 0.8.7",
  "reqwest 0.12.28",

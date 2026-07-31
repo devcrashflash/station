@@ -92,6 +92,11 @@ export const api = {
     call("hide_quick_capture", { restoreFocus }, () => null),
   resizeQuickCapture: ({ surface }) =>
     call("resize_quick_capture", { surface }, () => null),
+  listPrograms: () => call("list_programs", {}, () => []),
+  programIcon: ({ id }) => call("program_icon", { id }, () => null),
+  launchProgram: ({ id }) => call("launch_program", { id }, () => {
+    throw new Error("Launching programs requires the desktop app.");
+  }),
   listBrowserSettings: () => call("list_browser_settings", {}, local.listBrowserSettings),
   saveBrowserSettings: (payload) =>
     call("save_browser_settings", { input: payload }, () => local.saveBrowserSettings(payload)),

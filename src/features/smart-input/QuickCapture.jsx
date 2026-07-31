@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
+  AppWindow,
   Bot,
   CheckCircle2,
   LoaderCircle,
@@ -36,6 +37,12 @@ import { isWorkspaceShortcut } from "@/lib/workspaceTabs";
 import { shortcutModifier } from "@/lib/keyboardShortcut";
 import { quickCaptureTitle } from "@/lib/quickCapture";
 import {
+  filterPrograms,
+  highlightedProgramId as resolvedHighlightedProgramId,
+  movedProgramId,
+  numberedProgram,
+} from "@/lib/programs";
+import {
   SMART_OVERLAY_AGENT_WINDOW_HOURS,
   smartOverlayAgentSessions,
   smartOverlayHighlightedId,
@@ -56,23 +63,35 @@ export function QuickCapture() {
   const [agentSettings, setAgentSettings] = useState(null);
   const [agentResult, setAgentResult] = useState(EMPTY_AGENT_RESULT);
   const [agentsLoading, setAgentsLoading] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [agentSearchQuery, setAgentSearchQuery] = useState("");
   const [highlightedAgentId, setHighlightedAgentId] = useState(null);
   const [busyAgentId, setBusyAgentId] = useState(null);
+  const [programs, setPrograms] = useState([]);
+  const [programsLoading, setProgramsLoading] = useState(false);
+  const [programSearchQuery, setProgramSearchQuery] = useState("");
+  const [highlightedProgramId, setHighlightedProgramId] = useState(null);
+  const [busyProgramId, setBusyProgramId] = useState(null);
   const [hasWaitingAiSession, setHasWaitingAiSession] = useState(false);
   const inputRef = useRef(null);
-  const searchInputRef = useRef(null);
+  const agentSearchInputRef = useRef(null);
+  const programSearchInputRef = useRef(null);
   const optionRefs = useRef(new Map());
+  const programOptionRefs = useRef(new Map());
   const agentLoadRun = useRef(0);
+  const programLoadRun = useRef(0);
   const canSubmit = value.trim().length > 0 && !isSaving;
   const modifier = shortcutModifier();
 
   const visibleAgents = useMemo(() => smartOverlayAgentSessions(
     agentResult.sessions,
     agentSettings,
-    searchQuery,
+    agentSearchQuery,
     agentResult.loadedAt,
-  ), [agentResult, agentSettings, searchQuery]);
+  ), [agentResult, agentSettings, agentSearchQuery]);
+  const visiblePrograms = useMemo(
+    () => filterPrograms(programs, programSearchQuery),
+    [programSearchQuery, programs],
+  );
 
   const loadAgents = useCallback(async () => {
     const run = agentLoadRun.current + 1;
@@ -95,20 +114,40 @@ export function QuickCapture() {
     }
   }, []);
 
+  const loadPrograms = useCallback(async () => {
+    const run = programLoadRun.current + 1;
+    programLoadRun.current = run;
+    setProgramsLoading(true);
+    try {
+      const result = await api.listPrograms();
+      if (programLoadRun.current === run) setPrograms(result);
+    } catch (loadError) {
+      if (programLoadRun.current === run) setError(loadError?.message || String(loadError));
+    } finally {
+      if (programLoadRun.current === run) setProgramsLoading(false);
+    }
+  }, []);
+
   const activateTab = useCallback((tab, { refresh = true } = {}) => {
     setActiveTab(tab);
     setError("");
     if (tab === "agents") {
-      setSearchQuery("");
+      setAgentSearchQuery("");
       if (refresh) loadAgents();
+    } else if (tab === "programs") {
+      setProgramSearchQuery("");
+      if (refresh) loadPrograms();
     }
     api.resizeQuickCapture({ surface: tab }).catch((resizeError) => {
       setError(resizeError?.message || String(resizeError));
     });
     window.requestAnimationFrame(() => {
-      (tab === "inbox" ? inputRef : searchInputRef).current?.focus({ preventScroll: true });
+      const target = tab === "inbox"
+        ? inputRef
+        : tab === "agents" ? agentSearchInputRef : programSearchInputRef;
+      target.current?.focus({ preventScroll: true });
     });
-  }, [loadAgents]);
+  }, [loadAgents, loadPrograms]);
 
   useEffect(() => {
     const currentWindow = getCurrentWindow();
@@ -125,6 +164,7 @@ export function QuickCapture() {
         setActiveTab("inbox");
         setError("");
         agentLoadRun.current += 1;
+        programLoadRun.current += 1;
       }
     }
 
@@ -160,6 +200,14 @@ export function QuickCapture() {
   }, [highlightedAgentId]);
 
   useEffect(() => {
+    setHighlightedProgramId((currentId) => resolvedHighlightedProgramId(visiblePrograms, currentId));
+  }, [visiblePrograms]);
+
+  useEffect(() => {
+    programOptionRefs.current.get(highlightedProgramId)?.scrollIntoView({ block: "nearest" });
+  }, [highlightedProgramId]);
+
+  useEffect(() => {
     let disposed = false;
     let unlisten = null;
     listen(AI_SESSION_WAITING_STATUS_EVENT, ({ payload }) => {
@@ -193,6 +241,9 @@ export function QuickCapture() {
       } else if (isWorkspaceShortcut(event, "b")) {
         event.preventDefault();
         activateTab("agents");
+      } else if (isWorkspaceShortcut(event, "s")) {
+        event.preventDefault();
+        activateTab("programs");
       }
     }
 
@@ -289,10 +340,50 @@ export function QuickCapture() {
       selectHighlightedAgent();
       return;
     }
-    const numberedSession = smartOverlayNumberSession(visibleAgents, event.key, searchQuery);
+    const numberedSession = smartOverlayNumberSession(visibleAgents, event.key, agentSearchQuery);
     if (numberedSession && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
       event.preventDefault();
       resumeAgent(numberedSession);
+    }
+  }
+
+  async function openProgram(program) {
+    setError("");
+    setBusyProgramId(program.id);
+    try {
+      await api.launchProgram({ id: program.id });
+      await hide(false);
+    } catch (launchError) {
+      setError(launchError?.message || String(launchError));
+    } finally {
+      setBusyProgramId(null);
+    }
+  }
+
+  function selectHighlightedProgram() {
+    const program = visiblePrograms.find(({ id }) => id === highlightedProgramId);
+    if (program) openProgram(program);
+  }
+
+  function handleProgramKeyDown(event) {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      setHighlightedProgramId((currentId) => movedProgramId(
+        visiblePrograms,
+        currentId,
+        event.key === "ArrowUp" ? -1 : 1,
+      ));
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      selectHighlightedProgram();
+      return;
+    }
+    const selected = numberedProgram(visiblePrograms, event.key, programSearchQuery);
+    if (selected && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+      event.preventDefault();
+      openProgram(selected);
     }
   }
 
@@ -314,6 +405,13 @@ export function QuickCapture() {
             shortcut={`${modifier}B`}
             waitingForInput={hasWaitingAiSession}
             onClick={() => activateTab("agents")}
+          />
+          <OverlayTab
+            active={activeTab === "programs"}
+            icon={AppWindow}
+            label="Programs"
+            shortcut={`${modifier}S`}
+            onClick={() => activateTab("programs")}
           />
         </div>
 
@@ -346,20 +444,20 @@ export function QuickCapture() {
             </div>
             <OverlayFooter error={error} hint="Shift+Enter for a new line" />
           </form>
-        ) : (
+        ) : activeTab === "agents" ? (
           <div className="flex min-h-0 flex-1 flex-col" role="tabpanel" aria-label="AI Agents">
             <div className="relative shrink-0 px-3 py-3">
               <Search className="pointer-events-none absolute left-6 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
               <Input
-                ref={searchInputRef}
+                ref={agentSearchInputRef}
                 className="h-10 pl-9"
                 type="search"
-                value={searchQuery}
+                value={agentSearchQuery}
                 placeholder="Search AI agents"
                 aria-label="Search AI agents"
                 aria-controls="smart-overlay-agent-list"
                 aria-activedescendant={highlightedAgentId ? `smart-overlay-agent-${highlightedAgentId}` : undefined}
-                onChange={(event) => setSearchQuery(event.target.value)}
+                onChange={(event) => setAgentSearchQuery(event.target.value)}
                 onKeyDown={handleAgentKeyDown}
               />
             </div>
@@ -369,12 +467,44 @@ export function QuickCapture() {
                 allSessionCount={agentResult.sessions.length}
                 settings={agentSettings}
                 loading={agentsLoading}
-                query={searchQuery}
+                query={agentSearchQuery}
                 highlightedId={highlightedAgentId}
                 busyId={busyAgentId}
                 optionRefs={optionRefs}
                 onHighlight={setHighlightedAgentId}
                 onSelect={resumeAgent}
+              />
+            </div>
+            <OverlayFooter error={error} hint="↑ ↓ navigate · Enter open · 1–9 select" />
+          </div>
+        ) : (
+          <div className="flex min-h-0 flex-1 flex-col" role="tabpanel" aria-label="Programs">
+            <div className="relative shrink-0 px-3 py-3">
+              <Search className="pointer-events-none absolute left-6 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                ref={programSearchInputRef}
+                className="h-10 pl-9"
+                type="search"
+                value={programSearchQuery}
+                placeholder="Search programs"
+                aria-label="Search programs"
+                aria-controls="quick-overlay-program-list"
+                aria-activedescendant={highlightedProgramId ? `quick-overlay-program-${highlightedProgramId}` : undefined}
+                onChange={(event) => setProgramSearchQuery(event.target.value)}
+                onKeyDown={handleProgramKeyDown}
+              />
+            </div>
+            <div id="quick-overlay-program-list" className="min-h-0 flex-1 overflow-y-auto px-3 pb-3" role="listbox" aria-label="Installed programs">
+              <ProgramList
+                programs={visiblePrograms}
+                allProgramCount={programs.length}
+                loading={programsLoading}
+                query={programSearchQuery}
+                highlightedId={highlightedProgramId}
+                busyId={busyProgramId}
+                optionRefs={programOptionRefs}
+                onHighlight={setHighlightedProgramId}
+                onSelect={openProgram}
               />
             </div>
             <OverlayFooter error={error} hint="↑ ↓ navigate · Enter open · 1–9 select" />
@@ -484,6 +614,108 @@ function AgentList({
 
 function AgentEmpty({ children }) {
   return <div className="flex min-h-48 items-center justify-center gap-2 px-6 text-center text-sm text-muted-foreground">{children}</div>;
+}
+
+function ProgramList({
+  programs,
+  allProgramCount,
+  loading,
+  query,
+  highlightedId,
+  busyId,
+  optionRefs,
+  onHighlight,
+  onSelect,
+}) {
+  if (loading && allProgramCount === 0) {
+    return <AgentEmpty><LoaderCircle className="size-5 animate-spin" /> Loading programs…</AgentEmpty>;
+  }
+  if (programs.length === 0) {
+    return <AgentEmpty>{query ? "No programs match your search." : "No installed programs were found."}</AgentEmpty>;
+  }
+  return (
+    <div className="overflow-hidden rounded-md border">
+      {programs.map((program, index) => {
+        const highlighted = program.id === highlightedId;
+        return (
+          <button
+            id={`quick-overlay-program-${program.id}`}
+            key={program.id}
+            ref={(element) => {
+              if (element) optionRefs.current.set(program.id, element);
+              else optionRefs.current.delete(program.id);
+            }}
+            className={cn(
+              "flex w-full items-center gap-3 border-b px-3 py-2.5 text-left outline-none last:border-b-0",
+              highlighted ? "bg-accent text-accent-foreground" : "hover:bg-accent/60",
+            )}
+            type="button"
+            role="option"
+            aria-selected={highlighted}
+            disabled={busyId === program.id}
+            onClick={() => onSelect(program)}
+            onMouseMove={() => onHighlight(program.id)}
+          >
+            {busyId === program.id
+              ? <LoaderCircle className="size-8 shrink-0 animate-spin p-1.5" />
+              : <ProgramIcon program={program} />}
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-sm font-medium">{program.name}</span>
+              {program.description && (
+                <span className="mt-0.5 block truncate text-xs text-muted-foreground" title={program.description}>
+                  {program.description}
+                </span>
+              )}
+            </span>
+            {index < 9 && <Kbd>{index + 1}</Kbd>}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function ProgramIcon({ program }) {
+  const containerRef = useRef(null);
+  const [icon, setIcon] = useState(program.icon || null);
+
+  useEffect(() => {
+    setIcon(program.icon || null);
+    if (program.icon) return undefined;
+    const element = containerRef.current;
+    if (!element) return undefined;
+    let disposed = false;
+    const load = () => {
+      api.programIcon({ id: program.id })
+        .then((result) => {
+          if (!disposed && result) setIcon(result);
+        })
+        .catch(() => {});
+    };
+    if (typeof IntersectionObserver === "undefined") {
+      load();
+      return () => { disposed = true; };
+    }
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        observer.disconnect();
+        load();
+      }
+    }, { rootMargin: "80px" });
+    observer.observe(element);
+    return () => {
+      disposed = true;
+      observer.disconnect();
+    };
+  }, [program.icon, program.id]);
+
+  return (
+    <span ref={containerRef} className="grid size-8 shrink-0 place-items-center overflow-hidden rounded-md bg-muted">
+      {icon
+        ? <img className="size-8 object-contain" src={icon} alt="" />
+        : <AppWindow className="size-5 text-muted-foreground" aria-hidden="true" />}
+    </span>
+  );
 }
 
 function OverlayFooter({ error, hint }) {

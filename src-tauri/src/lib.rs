@@ -30,6 +30,7 @@ use tauri_nspanel::{tauri_panel, ManagerExt as PanelManagerExt, StyleMask, Webvi
 
 mod ai_sessions;
 mod calendar;
+mod programs;
 mod terminal_tabs;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -339,6 +340,7 @@ fn quick_capture_surface_size(surface: &str) -> Result<(f64, f64), String> {
     match surface {
         "inbox" => Ok((640.0, 228.0)),
         "agents" => Ok((640.0, 480.0)),
+        "programs" => Ok((640.0, 480.0)),
         _ => Err("Unknown quick capture surface.".to_string()),
     }
 }
@@ -1480,6 +1482,7 @@ pub fn run() {
                 ocr_engine: Mutex::new(None),
                 quick_capture_settings: Mutex::new(quick_capture_settings),
             });
+            app.manage(programs::ProgramCatalog::default());
             app.manage(terminal_tabs_state);
             #[cfg(target_os = "macos")]
             install_workspace_menu(app)?;
@@ -1501,6 +1504,9 @@ pub fn run() {
             save_quick_capture_settings,
             hide_quick_capture,
             resize_quick_capture,
+            programs::list_programs,
+            programs::program_icon,
+            programs::launch_program,
             ai_sessions::list_ai_sessions,
             set_ai_session_dock_badge,
             ai_sessions::archive_ai_session,
@@ -11279,6 +11285,10 @@ mod tests {
         assert_eq!(quick_capture_surface_size("inbox").unwrap(), (640.0, 228.0));
         assert_eq!(
             quick_capture_surface_size("agents").unwrap(),
+            (640.0, 480.0)
+        );
+        assert_eq!(
+            quick_capture_surface_size("programs").unwrap(),
             (640.0, 480.0)
         );
         assert_eq!(
