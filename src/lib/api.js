@@ -12,7 +12,7 @@ import {
 } from "./aiSessions.js";
 import { normalizeExternalLabelColor } from "./externalLabels.js";
 import { normalizeProjectColor } from "./projectAvatar.js";
-import { parseSmartInput } from "./smartInputParser.js";
+import { parseSmartInput, plainTextTaskBody } from "./smartInputParser.js";
 import {
   DEFAULT_TERMINAL_SHORTCUTS,
   normalizeTerminalShortcuts,
@@ -1438,7 +1438,7 @@ const local = {
       id: id("task"),
       projectId: targetProjectId,
       title: parsed.title,
-      body: input.trim(),
+      body: parsed.kind === "text" ? plainTextTaskBody(input, parsed.title) : input.trim(),
       status: "open",
       sourceUrl: parsed.url,
       createdAt: timestamp,

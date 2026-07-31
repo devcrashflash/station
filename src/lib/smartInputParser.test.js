@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseSmartInput } from "./smartInputParser.js";
+import { parseSmartInput, plainTextTaskBody } from "./smartInputParser.js";
 
 test("parses plain text as a task", () => {
   assert.deepEqual(parseSmartInput("Review the onboarding PR"), {
@@ -82,4 +82,39 @@ test("parses generic urls as external task links", () => {
   assert.equal(parsed.provider, null);
   assert.equal(parsed.externalId, "https://example.com/docs/auth-flow");
   assert.equal(parsed.title, "auth flow");
+});
+
+test("removes a matching opening title from a plain-text task body", () => {
+  assert.equal(
+    plainTextTaskBody("Review onboarding\n\nAdd tests", "Review onboarding"),
+    "Add tests",
+  );
+});
+
+test("removes a Tasks-prefixed opening title from a plain-text task body", () => {
+  assert.equal(
+    plainTextTaskBody(
+      "Tasks: Create Task should not add title as description\n\nMy task",
+      "Create Task should not add title as description",
+    ),
+    "My task",
+  );
+});
+
+test("returns an empty body when plain-text input contains only its title", () => {
+  assert.equal(plainTextTaskBody("Review onboarding", "Review onboarding"), "");
+});
+
+test("normalizes leading whitespace and CRLF when removing a plain-text title", () => {
+  assert.equal(
+    plainTextTaskBody("\r\n  Review   onboarding  \r\n\r\n  Add tests  \r\n", "Review onboarding"),
+    "Add tests",
+  );
+});
+
+test("preserves a nonmatching opening line in a plain-text task body", () => {
+  assert.equal(
+    plainTextTaskBody("Background context\n\nAdd tests", "Review onboarding"),
+    "Background context\n\nAdd tests",
+  );
 });

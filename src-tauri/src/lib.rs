@@ -6724,7 +6724,7 @@ fn create_smart_task_in_db(
             db,
             Some(target_project_id),
             response.title.clone(),
-            input.trim().to_string(),
+            plain_text_task_body(&input, &response.title),
             None,
         )
         .map_err(db_error)?;
@@ -6863,6 +6863,36 @@ fn create_smart_task_in_db(
         created: true,
         notice: metadata.notice,
     })
+}
+
+fn plain_text_task_body(input: &str, title: &str) -> String {
+    let trimmed_input = input.trim();
+    if trimmed_input.is_empty() {
+        return String::new();
+    }
+
+    let lines = trimmed_input.lines().collect::<Vec<_>>();
+    let Some(first_content_index) = lines.iter().position(|line| !line.trim().is_empty()) else {
+        return String::new();
+    };
+    let opening_line = normalize_inline_whitespace(lines[first_content_index]);
+    let normalized_title = normalize_inline_whitespace(title);
+    let matches_title = !normalized_title.is_empty()
+        && (opening_line == normalized_title
+            || opening_line == format!("Tasks: {normalized_title}"));
+
+    if !matches_title {
+        return trimmed_input.to_string();
+    }
+
+    lines[first_content_index + 1..]
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+fn normalize_inline_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn parsed_response(parsed: &ParsedInputPayload) -> ParsedInputResponse {
@@ -15308,6 +15338,49 @@ mod tests {
         let task = result.task.expect("created task");
         assert!(!result.project_required);
         assert_eq!(task.project_id.as_deref(), Some(project.id.as_str()));
+    }
+
+    #[test]
+    fn smart_text_task_removes_matching_title_from_body() {
+        let db = memory_db();
+        let project = create_project_in_db(&db, "Access".to_string(), None, None).expect("project");
+        let result = create_smart_task_in_db(
+            &db,
+            "Tasks: Create Task should not add title as description\n\nMy task".to_string(),
+            parsed_text("Create Task should not add title as description"),
+            Some(project.id),
+        )
+        .expect("smart task result");
+
+        let task = result.task.expect("created task");
+        assert_eq!(
+            task.title,
+            "Create Task should not add title as description"
+        );
+        assert_eq!(task.body, "My task");
+    }
+
+    #[test]
+    fn plain_text_task_body_handles_title_variants() {
+        assert_eq!(
+            plain_text_task_body("Review onboarding\n\nAdd tests", "Review onboarding"),
+            "Add tests"
+        );
+        assert_eq!(
+            plain_text_task_body("Review onboarding", "Review onboarding"),
+            ""
+        );
+        assert_eq!(
+            plain_text_task_body(
+                "\r\n  Review   onboarding  \r\n\r\n  Add tests  \r\n",
+                "Review onboarding"
+            ),
+            "Add tests"
+        );
+        assert_eq!(
+            plain_text_task_body("Background context\n\nAdd tests", "Review onboarding"),
+            "Background context\n\nAdd tests"
+        );
     }
 
     #[test]

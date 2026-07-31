@@ -106,6 +106,24 @@ export function parseSmartInput(value) {
   };
 }
 
+export function plainTextTaskBody(input, title) {
+  const trimmedInput = String(input || "").trim();
+  if (!trimmedInput) return "";
+
+  const lines = trimmedInput.split(/\r?\n/);
+  const firstContentIndex = lines.findIndex((line) => line.trim());
+  if (firstContentIndex < 0) return "";
+
+  const openingLine = normalizeWhitespace(lines[firstContentIndex]);
+  const normalizedTitle = normalizeWhitespace(title);
+  const matchesTitle = normalizedTitle && (
+    openingLine === normalizedTitle || openingLine === `Tasks: ${normalizedTitle}`
+  );
+
+  if (!matchesTitle) return trimmedInput;
+  return lines.slice(firstContentIndex + 1).join("\n").trim();
+}
+
 function extractUrl(input) {
   return input
     .split(/\s+/)
@@ -122,6 +140,10 @@ function safeUrl(value) {
 
 function firstLine(input) {
   return input.split(/\r?\n/).find(Boolean)?.trim() || "";
+}
+
+function normalizeWhitespace(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
 }
 
 function titleFromPath(parsedUrl, fallback) {

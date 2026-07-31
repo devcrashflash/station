@@ -883,7 +883,7 @@ function todoSubtitle(todo) {
   if (todo.kind === "file") {
     return [todo.fileName, todo.filePath, todo.mimeType].filter(Boolean).join(" · ") || "File";
   }
-  return todo.rawText || "Plain text";
+  return todo.rawText.substring(todo.title.length) || todo.title;
 }
 
 export function RecentDirectoryFilesList({

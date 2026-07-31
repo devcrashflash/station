@@ -696,7 +696,12 @@ function App() {
 
   async function promoteSmartInboxTodo(todo) {
     if (todo.kind !== "file") {
-      await submitSmartInput(todo.rawText || todo.title, null, null, todo.id);
+      await submitSmartInput(
+        todo.rawText || todo.title,
+        null,
+        textParsedPayload(todo.title),
+        todo.id,
+      );
       return;
     }
 

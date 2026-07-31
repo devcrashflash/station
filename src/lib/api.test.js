@@ -1102,6 +1102,33 @@ test("local fallback promotion sequence can create a task then remove the todo",
   assert.equal((await api.listTasks({ projectId: project.id })).length, 1);
 });
 
+test("local fallback promotion does not duplicate the Inbox title in the task body", async () => {
+  let stored = "";
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => {
+      stored = value;
+    },
+  };
+
+  const project = await api.createProject({ name: "Access" });
+  const result = await api.createTaskFromInput({
+    input: "Tasks: Create Task should not add title as description\n\nMy task",
+    parsed: {
+      kind: "text",
+      provider: null,
+      externalId: null,
+      url: null,
+      title: "Create Task should not add title as description",
+      repoUrl: null,
+    },
+    projectId: project.id,
+  });
+
+  assert.equal(result.task.title, "Create Task should not add title as description");
+  assert.equal(result.task.body, "My task");
+});
+
 test("normalizes project avatar display values", () => {
   assert.equal(normalizeProjectColor("#7C3AED"), "#7c3aed");
   assert.equal(normalizeProjectColor("invalid"), DEFAULT_PROJECT_COLOR);
@@ -1142,7 +1169,7 @@ test("local fallback flags missing project trello connection on refresh", async 
   const refreshed = await api.refreshTaskExternalDetails({ taskId: result.task.id });
 
   assert.equal(refreshed.connectionRequired, true);
-  assert.equal(refreshed.task.body, "Review auth");
+  assert.equal(refreshed.task.body, "");
   assert.equal(refreshed.notice, "Please add a Trello connection to this project.");
 });
 
@@ -1179,7 +1206,7 @@ test("local fallback leaves unsupported refresh links unchanged", async () => {
   const refreshed = await api.refreshTaskExternalDetails({ taskId: result.task.id });
 
   assert.equal(refreshed.connectionRequired, false);
-  assert.equal(refreshed.task.body, "Review issue");
+  assert.equal(refreshed.task.body, "");
   assert.equal(refreshed.links[0].kind, "external_url");
 });
 
