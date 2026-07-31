@@ -429,8 +429,7 @@ struct CodexSessionState {
     pending_inputs: HashSet<String>,
     pending_approvals: HashSet<String>,
     proposed_plan: bool,
-    current_turn_plan: bool,
-    completed_plan_turn: bool,
+    final_question: bool,
     running: bool,
     completed_at: Option<i64>,
 }
@@ -438,7 +437,7 @@ struct CodexSessionState {
 impl CodexSessionState {
     fn waiting_for_input(&self) -> bool {
         self.proposed_plan
-            || self.completed_plan_turn
+            || self.final_question
             || !self.pending_inputs.is_empty()
             || !self.pending_approvals.is_empty()
     }
@@ -454,6 +453,17 @@ fn contains_proposed_plan_block(text: &str) -> bool {
         }
     }
     false
+}
+
+fn ends_with_question(text: &str) -> bool {
+    text.trim_end_matches(|character: char| {
+        character.is_whitespace()
+            || matches!(
+                character,
+                '*' | '_' | '`' | '~' | '"' | '\'' | '’' | '”' | ')' | ']'
+            )
+    })
+    .ends_with('?')
 }
 
 fn codex_function_call_requires_approval(payload: &Value) -> bool {
@@ -571,17 +581,10 @@ fn update_codex_session_state(value: &Value, state: &mut CodexSessionState) {
     if value.get("type").and_then(Value::as_str) == Some("event_msg") {
         match value.pointer("/payload/type").and_then(Value::as_str) {
             Some("task_started") => {
-                state.current_turn_plan = value
-                    .pointer("/payload/collaboration_mode_kind")
-                    .and_then(Value::as_str)
-                    == Some("plan");
-                state.completed_plan_turn = false;
                 state.running = true;
                 state.completed_at = None;
             }
             Some("task_complete") => {
-                state.completed_plan_turn = state.current_turn_plan;
-                state.current_turn_plan = false;
                 state.running = false;
                 state.completed_at = Some(timestamp_millis(
                     value.get("timestamp").and_then(Value::as_str),
@@ -600,16 +603,15 @@ fn update_codex_session_state(value: &Value, state: &mut CodexSessionState) {
     match payload.get("type").and_then(Value::as_str) {
         Some("message") if payload.get("role").and_then(Value::as_str) == Some("user") => {
             state.proposed_plan = false;
-            state.completed_plan_turn = false;
+            state.final_question = false;
         }
         Some("message")
             if payload.get("role").and_then(Value::as_str) == Some("assistant")
                 && payload.get("phase").and_then(Value::as_str) == Some("final_answer") =>
         {
-            state.proposed_plan = payload
-                .get("content")
-                .and_then(content_text)
-                .is_some_and(|text| contains_proposed_plan_block(&text));
+            let text = payload.get("content").and_then(content_text);
+            state.proposed_plan = text.as_deref().is_some_and(contains_proposed_plan_block);
+            state.final_question = text.as_deref().is_some_and(ends_with_question);
         }
         Some("function_call")
             if payload.get("name").and_then(Value::as_str) == Some("request_user_input") =>
@@ -1681,7 +1683,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_completed_plan_mode_turns_until_user_input_or_another_task() {
+    fn does_not_treat_completed_plan_mode_turns_as_waiting_without_a_plan() {
         let directory = fixture_dir("codex-plan-mode");
         let path = directory.join("rollout.jsonl");
         let prefix = concat!(
@@ -1699,44 +1701,60 @@ mod tests {
 
         let state = codex_session_state(&path);
         assert!(!state.running);
-        assert!(state.waiting_for_input());
-        assert!(read_codex_transcript(&path).unwrap().waiting_for_input);
-
-        let next_user = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Use the verified Codex mode.\"}]}}\n";
-        fs::write(&path, format!("{completed_plan}{next_user}")).unwrap();
-        assert!(!codex_session_state(&path).waiting_for_input());
+        assert!(!state.waiting_for_input());
         assert!(!read_codex_transcript(&path).unwrap().waiting_for_input);
-
-        let default_start = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"collaboration_mode_kind\":\"default\"}}\n";
-        fs::write(&path, format!("{completed_plan}{default_start}")).unwrap();
-        let default_running = codex_session_state(&path);
-        assert!(default_running.running);
-        assert!(!default_running.waiting_for_input());
-
-        let default_complete =
-            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n";
-        fs::write(
-            &path,
-            format!("{completed_plan}{default_start}{default_complete}"),
-        )
-        .unwrap();
-        let default_completed = codex_session_state(&path);
-        assert!(!default_completed.running);
-        assert!(!default_completed.waiting_for_input());
-
-        let legacy_start = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n";
-        fs::write(
-            &path,
-            format!("{completed_plan}{legacy_start}{default_complete}"),
-        )
-        .unwrap();
-        assert!(!codex_session_state(&path).waiting_for_input());
 
         fs::write(&path, prefix).unwrap();
         let plan_running = codex_session_state(&path);
         assert!(plan_running.running);
         assert!(!plan_running.waiting_for_input());
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn detects_codex_final_questions_until_the_next_user_or_final_answer() {
+        let directory = fixture_dir("codex-final-question");
+        let path = directory.join("rollout.jsonl");
+        let prefix = concat!(
+            "{\"type\":\"session_meta\",\"timestamp\":\"2026-07-27T16:49:55Z\",\"payload\":{\"id\":\"question-session\",\"cwd\":\"/work/app\",\"source\":\"vscode\",\"originator\":\"Codex Desktop\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"collaboration_mode_kind\":\"plan\"}}\n",
+        );
+        let complete =
+            "{\"type\":\"event_msg\",\"timestamp\":\"2026-07-27T16:57:40Z\",\"payload\":{\"type\":\"task_complete\"}}\n";
+        let commentary_question = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"Should I inspect the fixtures?\"}]}}\n";
+        fs::write(&path, format!("{prefix}{commentary_question}{complete}")).unwrap();
+        assert!(!codex_session_state(&path).waiting_for_input());
+
+        let final_question = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"**Which branch should I use?**\"}]}}\n";
+        let completed_question = format!("{prefix}{final_question}{complete}");
+        fs::write(&path, &completed_question).unwrap();
+        assert!(codex_session_state(&path).waiting_for_input());
+        assert!(read_codex_transcript(&path).unwrap().waiting_for_input);
+
+        let next_user = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Use the current branch.\"}]}}\n";
+        fs::write(&path, format!("{completed_question}{next_user}")).unwrap();
+        assert!(!codex_session_state(&path).waiting_for_input());
+
+        let ordinary_final = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"The earlier question was \\\"Which branch?\\\", and the task is complete.\"}]}}\n";
+        fs::write(
+            &path,
+            format!("{completed_question}{ordinary_final}{complete}"),
+        )
+        .unwrap();
+        assert!(!codex_session_state(&path).waiting_for_input());
+        assert!(!read_codex_transcript(&path).unwrap().waiting_for_input);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recognizes_only_questions_at_the_end_of_final_text() {
+        assert!(ends_with_question("Which branch should I use?"));
+        assert!(ends_with_question("**Which branch should I use?**"));
+        assert!(ends_with_question("Choose the current branch (okay?)"));
+        assert!(ends_with_question("Use the current branch?”"));
+        assert!(!ends_with_question("Why? The task is complete."));
+        assert!(!ends_with_question("The task needs a decision."));
+        assert!(!ends_with_question(""));
     }
 
     #[test]
