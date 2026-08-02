@@ -15,12 +15,14 @@ import {
   workspaceNumberForTab,
   workspaceTabsApi,
 } from "@/lib/workspaceTabs";
+import { formatShortcut } from "@/lib/keyboardShortcut";
 import { useSynchronizedTheme } from "@/lib/theme";
 
 const EMPTY_SNAPSHOT = { tabs: [{ id: "main", kind: "main", title: "Inbox", closable: false }], activeTabId: "main" };
 
 export function TabBar() {
   useSynchronizedTheme();
+  const newTerminalShortcut = formatShortcut("CommandOrControl+KeyT");
   const [snapshot, setSnapshot] = useState(EMPTY_SNAPSHOT);
   const [tabDrag, setTabDrag] = useState(null);
   const [hasWaitingAiSession, setHasWaitingAiSession] = useState(false);
@@ -262,11 +264,12 @@ export function TabBar() {
         <button
           type="button"
           className="workspace-tab-add"
-          title="New terminal (Cmd/Ctrl+T)"
-          aria-label="New terminal"
+          title={`New terminal (${newTerminalShortcut})`}
+          aria-label={`New terminal (${newTerminalShortcut})`}
           onClick={() => window.dispatchEvent(new Event("workspace-create-terminal"))}
         >
-          +
+          <span className="workspace-tab-add-symbol" aria-hidden="true">+</span>
+          <span className="workspace-tab-shortcut" aria-hidden="true">{newTerminalShortcut}</span>
         </button>
       </div>
     </main>

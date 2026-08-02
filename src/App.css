@@ -406,7 +406,17 @@ body.terminal-window #root {
 }
 
 .workspace-tab-add {
-  width: 28px;
+  display: inline-flex;
+  width: auto;
+  min-width: 48px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 7px;
+}
+
+.workspace-tab-add-symbol {
+  line-height: 1;
   font-size: 17px;
 }
 

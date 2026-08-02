@@ -50,6 +50,9 @@ test("formats default and normalized shortcuts for each platform", () => {
   assert.equal(formatShortcut("CommandOrControl+Shift+Space", "MacIntel"), "⌘⇧Space");
   assert.equal(formatShortcut("shift+super+KeyK", "MacIntel"), "⌘⇧K");
   assert.equal(formatShortcut("shift+control+Space", "Win32"), "Ctrl+Shift+Space");
+  assert.equal(formatShortcut("CommandOrControl+KeyT", "MacIntel"), "⌘T");
+  assert.equal(formatShortcut("CommandOrControl+KeyT", "Win32"), "Ctrl+T");
+  assert.equal(formatShortcut("CommandOrControl+KeyT", "Linux x86_64"), "Ctrl+T");
 });
 
 const commandF = {
