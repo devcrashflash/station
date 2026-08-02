@@ -36,6 +36,7 @@ import {
 import { isWorkspaceShortcut } from "@/lib/workspaceTabs";
 import { shortcutModifier } from "@/lib/keyboardShortcut";
 import { quickCaptureTitle } from "@/lib/quickCapture";
+import { resetQuickCaptureTab } from "@/lib/quickCaptureLifecycle";
 import {
   filterPrograms,
   highlightedProgramId as resolvedHighlightedProgramId,
@@ -161,7 +162,7 @@ export function QuickCapture() {
         window.requestAnimationFrame(focusInput);
         window.setTimeout(focusInput, 50);
       } else {
-        setActiveTab("inbox");
+        resetQuickCaptureTab(setActiveTab);
         setError("");
         agentLoadRun.current += 1;
         programLoadRun.current += 1;
