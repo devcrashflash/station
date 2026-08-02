@@ -15,7 +15,6 @@ import { EmptyState } from "@/components/common/EmptyState";
 import { Modal } from "@/components/common/Modal";
 import { Button } from "@/components/ui/button";
 import { aiPromptIconFor } from "@/lib/aiPromptIcons";
-import { aiPromptModeLabel } from "@/lib/aiPromptMode";
 import { aiPromptWorkspaceOptions, compactWorkspacePath } from "@/lib/aiPromptThread";
 import { cn } from "@/lib/utils";
 
@@ -142,7 +141,7 @@ export function AiPromptWizard({
                     selected={selectedPromptId === prompt.id}
                     icon={aiPromptIconFor(prompt.icon)}
                     title={prompt.name}
-                    detail={`${agentTypeLabels[prompt.agentType] || prompt.agentType} · ${aiPromptModeLabel(prompt.mode)}`}
+                    detail={agentTypeLabels[prompt.agentType] || prompt.agentType}
                     onClick={() => setSelectedPromptId(prompt.id)}
                   />
                 ))}

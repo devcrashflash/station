@@ -3,7 +3,6 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { formatLocalDate, localDayBounds, sortActivities } from "./activity.js";
 import { EMAIL_DESKTOP_REQUIRED_MESSAGE, OCR_DESKTOP_REQUIRED_MESSAGE } from "./ocr.js";
 import { AI_PROMPT_ICON_IDS } from "./aiPromptIcons.js";
-import { AI_PROMPT_MODES, normalizeAiPromptMode } from "./aiPromptMode.js";
 import {
   aiSessionCanArchive,
   DEFAULT_AI_SESSION_SETTINGS,
@@ -278,11 +277,10 @@ function readState() {
     const parsed = JSON.parse(storedState ?? legacyState);
     let migrated = legacyState !== null;
     if (!Array.isArray(parsed?.aiPrompts) && Array.isArray(parsed?.aiAgents)) {
-      parsed.aiPrompts = parsed.aiAgents.map(({ type, ...agent }) => ({
+      parsed.aiPrompts = parsed.aiAgents.map(({ type, mode: _legacyMode, ...agent }) => ({
         ...agent,
         agentType: agent.agentType || type,
         icon: AI_PROMPT_ICON_IDS.includes(agent.icon) ? agent.icon : "sparkles",
-        mode: normalizeAiPromptMode(agent.agentType || type, agent.mode),
         promptText: agent.promptText || "",
       }));
       delete parsed.aiAgents;
@@ -291,10 +289,10 @@ function readState() {
     if (Array.isArray(parsed?.aiPrompts)) {
       parsed.aiPrompts = parsed.aiPrompts.map((prompt) => {
         const icon = AI_PROMPT_ICON_IDS.includes(prompt.icon) ? prompt.icon : "sparkles";
-        const mode = normalizeAiPromptMode(prompt.agentType, prompt.mode);
-        if (icon === prompt.icon && mode === prompt.mode) return prompt;
+        const { mode: _legacyMode, ...promptWithoutMode } = prompt;
+        if (icon === prompt.icon && !("mode" in prompt)) return prompt;
         migrated = true;
-        return { ...prompt, icon, mode };
+        return { ...promptWithoutMode, icon };
       });
     }
     if (migrated) {
@@ -411,8 +409,6 @@ export function validateAiPromptForTest(prompt, prompts = []) {
   const agentType = prompt?.agentType?.trim() || "";
   if (!["codex", "claude"].includes(agentType)) return "AI Prompt agent must be Codex or Claude.";
   if (!AI_PROMPT_ICON_IDS.includes(prompt?.icon)) return "AI Prompt icon is not supported.";
-  if (!AI_PROMPT_MODES.includes(prompt?.mode)) return "AI Prompt mode must be Agent or Plan.";
-  if (agentType === "claude" && prompt.mode !== "agent") return "Claude AI Prompts only support Agent mode.";
 
   const name = prompt?.name?.trim() || "";
   if (!name) return "AI Prompt name is required.";
@@ -1759,7 +1755,6 @@ const local = {
       agentType: input.agentType.trim(),
       name: input.name.trim(),
       icon: input.icon,
-      mode: input.mode,
       promptText: input.promptText?.trim() || "",
       updatedAt: timestamp,
     });

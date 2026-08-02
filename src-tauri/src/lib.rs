@@ -591,7 +591,6 @@ struct AiPromptRecord {
     agent_type: String,
     name: String,
     icon: String,
-    mode: String,
     prompt_text: String,
     created_at: i64,
     updated_at: i64,
@@ -1275,7 +1274,6 @@ struct AiPromptInput {
     agent_type: String,
     name: String,
     icon: String,
-    mode: String,
     prompt_text: String,
 }
 
@@ -1751,7 +1749,7 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL COLLATE NOCASE UNIQUE,
             agent_type TEXT NOT NULL,
-            mode TEXT NOT NULL DEFAULT 'plan' CHECK(mode IN ('agent', 'plan')),
+            mode TEXT NOT NULL DEFAULT 'agent' CHECK(mode IN ('agent', 'plan')),
             icon TEXT NOT NULL DEFAULT 'sparkles',
             prompt_text TEXT NOT NULL DEFAULT '',
             created_at INTEGER NOT NULL,
@@ -2078,7 +2076,7 @@ fn migrate_ai_agents_to_prompts(db: &SqliteConnection) -> rusqlite::Result<()> {
         BEGIN IMMEDIATE;
         INSERT OR IGNORE INTO ai_prompts
             (id, name, agent_type, mode, prompt_text, created_at, updated_at)
-        SELECT id, name, type, CASE WHEN type = 'codex' THEN 'plan' ELSE 'agent' END, '', created_at, updated_at
+        SELECT id, name, type, 'agent', '', created_at, updated_at
         FROM ai_agents;
         DROP TABLE ai_agents;
         COMMIT;
@@ -2092,16 +2090,14 @@ fn migrate_ai_prompt_modes(db: &SqliteConnection) -> rusqlite::Result<()> {
     let columns = statement
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<Result<HashSet<_>, _>>()?;
-    if columns.contains("mode") {
-        return Ok(());
+    if !columns.contains("mode") {
+        db.execute(
+            "ALTER TABLE ai_prompts ADD COLUMN mode TEXT NOT NULL DEFAULT 'agent' CHECK(mode IN ('agent', 'plan'))",
+            [],
+        )?;
     }
-
     db.execute(
-        "ALTER TABLE ai_prompts ADD COLUMN mode TEXT NOT NULL DEFAULT 'plan' CHECK(mode IN ('agent', 'plan'))",
-        [],
-    )?;
-    db.execute(
-        "UPDATE ai_prompts SET mode = 'agent' WHERE agent_type = 'claude'",
+        "UPDATE ai_prompts SET mode = 'agent' WHERE mode != 'agent'",
         [],
     )?;
     Ok(())
@@ -2555,10 +2551,9 @@ fn row_to_ai_prompt(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiPromptRecord>
         name: row.get(1)?,
         icon: row.get(2)?,
         agent_type: row.get(3)?,
-        mode: row.get(4)?,
-        prompt_text: row.get(5)?,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
+        prompt_text: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
     })
 }
 
@@ -4884,7 +4879,7 @@ fn save_connection_in_db(
 fn list_ai_prompts_in_db(db: &SqliteConnection) -> Result<Vec<AiPromptRecord>, String> {
     let mut statement = db
         .prepare(
-            "SELECT id, name, icon, agent_type, mode, prompt_text, created_at, updated_at
+            "SELECT id, name, icon, agent_type, prompt_text, created_at, updated_at
              FROM ai_prompts ORDER BY name COLLATE NOCASE ASC, id ASC",
         )
         .map_err(db_error)?;
@@ -4898,7 +4893,7 @@ fn list_ai_prompts_in_db(db: &SqliteConnection) -> Result<Vec<AiPromptRecord>, S
 
 fn get_ai_prompt_in_db(db: &SqliteConnection, id: &str) -> Result<Option<AiPromptRecord>, String> {
     db.query_row(
-        "SELECT id, name, icon, agent_type, mode, prompt_text, created_at, updated_at FROM ai_prompts WHERE id = ?1",
+        "SELECT id, name, icon, agent_type, prompt_text, created_at, updated_at FROM ai_prompts WHERE id = ?1",
         params![id],
         row_to_ai_prompt,
     )
@@ -4930,14 +4925,6 @@ fn save_ai_prompt_in_db(
     ) {
         return Err("AI Prompt icon is not supported.".to_string());
     }
-    let mode = input.mode.trim().to_string();
-    if !matches!(mode.as_str(), "agent" | "plan") {
-        return Err("AI Prompt mode must be Agent or Plan.".to_string());
-    }
-    if agent_type == "claude" && mode != "agent" {
-        return Err("Claude AI Prompts only support Agent mode.".to_string());
-    }
-
     let name = input.name.trim().to_string();
     if name.is_empty() {
         return Err("AI Prompt name is required.".to_string());
@@ -4970,21 +4957,21 @@ fn save_ai_prompt_in_db(
 
     if exists {
         db.execute(
-            "UPDATE ai_prompts SET name = ?1, icon = ?2, agent_type = ?3, mode = ?4, prompt_text = ?5, updated_at = ?6 WHERE id = ?7",
-            params![name, icon, agent_type, mode, prompt_text, timestamp, id],
+            "UPDATE ai_prompts SET name = ?1, icon = ?2, agent_type = ?3, mode = 'agent', prompt_text = ?4, updated_at = ?5 WHERE id = ?6",
+            params![name, icon, agent_type, prompt_text, timestamp, id],
         )
         .map_err(db_error)?;
     } else {
         db.execute(
             "INSERT INTO ai_prompts (id, name, icon, agent_type, mode, prompt_text, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![id, name, icon, agent_type, mode, prompt_text, timestamp, timestamp],
+             VALUES (?1, ?2, ?3, ?4, 'agent', ?5, ?6, ?7)",
+            params![id, name, icon, agent_type, prompt_text, timestamp, timestamp],
         )
         .map_err(db_error)?;
     }
 
     db.query_row(
-        "SELECT id, name, icon, agent_type, mode, prompt_text, created_at, updated_at FROM ai_prompts WHERE id = ?1",
+        "SELECT id, name, icon, agent_type, prompt_text, created_at, updated_at FROM ai_prompts WHERE id = ?1",
         params![id],
         row_to_ai_prompt,
     )
@@ -5034,12 +5021,7 @@ fn ai_prompt_with_task_context(prompt_name: &str, prompt_text: &str, task: &Task
     composed
 }
 
-fn ai_prompt_deep_link(
-    agent_type: &str,
-    mode: &str,
-    prompt: &str,
-    path: &str,
-) -> Result<String, String> {
+fn ai_prompt_deep_link(agent_type: &str, prompt: &str, path: &str) -> Result<String, String> {
     let base_url = match agent_type {
         "codex" => "codex://threads/new",
         "claude" => "claude://code/new",
@@ -5052,9 +5034,6 @@ fn ai_prompt_deep_link(
             "codex" => {
                 query.append_pair("prompt", prompt);
                 query.append_pair("path", path);
-                if mode == "plan" {
-                    query.append_pair("mode", "plan");
-                }
             }
             "claude" => {
                 query.append_pair("q", prompt);
@@ -5359,7 +5338,6 @@ fn prepare_ai_prompt_thread_in_db(
 
     ai_prompt_deep_link(
         &prompt.agent_type,
-        &prompt.mode,
         &ai_prompt_with_task_context(&prompt.name, &prompt.prompt_text, &task),
         &canonical_path,
     )
@@ -12869,20 +12847,14 @@ mod tests {
         assert!(migrated_prompts
             .iter()
             .all(|prompt| prompt.icon == "sparkles"));
-        assert_eq!(
-            migrated_prompts
-                .iter()
-                .find(|prompt| prompt.agent_type == "codex")
-                .map(|prompt| prompt.mode.as_str()),
-            Some("plan")
-        );
-        assert_eq!(
-            migrated_prompts
-                .iter()
-                .find(|prompt| prompt.agent_type == "claude")
-                .map(|prompt| prompt.mode.as_str()),
-            Some("agent")
-        );
+        let non_agent_modes: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM ai_prompts WHERE mode != 'agent'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count non-Agent prompt modes");
+        assert_eq!(non_agent_modes, 0);
         assert!(column_exists(&db, "task_links", "connection_id"));
         assert!(column_exists(&db, "task_links", "external_state_color"));
         assert!(column_exists(&db, "task_links", "target_branch"));
@@ -15690,7 +15662,6 @@ mod tests {
                 agent_type: "codex".to_string(),
                 name: " Implement ticket ".to_string(),
                 icon: "hammer".to_string(),
-                mode: "plan".to_string(),
                 prompt_text: " Fix it carefully. ".to_string(),
             },
         )
@@ -15702,7 +15673,6 @@ mod tests {
                 agent_type: "claude".to_string(),
                 name: "Review ticket".to_string(),
                 icon: "review".to_string(),
-                mode: "agent".to_string(),
                 prompt_text: String::new(),
             },
         )
@@ -15710,7 +15680,6 @@ mod tests {
 
         assert_eq!(codex.name, "Implement ticket");
         assert_eq!(codex.icon, "hammer");
-        assert_eq!(codex.mode, "plan");
         assert_eq!(codex.prompt_text, "Fix it carefully.");
         let listed = list_ai_prompts_in_db(&db).expect("list prompts");
         assert_eq!(
@@ -15728,7 +15697,6 @@ mod tests {
                 agent_type: "claude".to_string(),
                 name: "Ship ticket".to_string(),
                 icon: "target".to_string(),
-                mode: "agent".to_string(),
                 prompt_text: String::new(),
             },
         )
@@ -15756,7 +15724,6 @@ mod tests {
                 agent_type: "codex".to_string(),
                 name: "Implement ticket".to_string(),
                 icon: "hammer".to_string(),
-                mode: "plan".to_string(),
                 prompt_text: String::new(),
             },
         )
@@ -15769,7 +15736,6 @@ mod tests {
                 agent_type: "other".to_string(),
                 name: "Other".to_string(),
                 icon: "hammer".to_string(),
-                mode: "agent".to_string(),
                 prompt_text: String::new(),
             },
         )
@@ -15783,43 +15749,11 @@ mod tests {
                 agent_type: "codex".to_string(),
                 name: "Other".to_string(),
                 icon: "other".to_string(),
-                mode: "plan".to_string(),
                 prompt_text: String::new(),
             },
         )
         .unwrap_err();
         assert_eq!(invalid_icon, "AI Prompt icon is not supported.");
-
-        let invalid_mode = save_ai_prompt_in_db(
-            &db,
-            AiPromptInput {
-                id: None,
-                agent_type: "codex".to_string(),
-                name: "Other".to_string(),
-                icon: "hammer".to_string(),
-                mode: "other".to_string(),
-                prompt_text: String::new(),
-            },
-        )
-        .unwrap_err();
-        assert_eq!(invalid_mode, "AI Prompt mode must be Agent or Plan.");
-
-        let unsupported_claude_mode = save_ai_prompt_in_db(
-            &db,
-            AiPromptInput {
-                id: None,
-                agent_type: "claude".to_string(),
-                name: "Other".to_string(),
-                icon: "hammer".to_string(),
-                mode: "plan".to_string(),
-                prompt_text: String::new(),
-            },
-        )
-        .unwrap_err();
-        assert_eq!(
-            unsupported_claude_mode,
-            "Claude AI Prompts only support Agent mode."
-        );
 
         let blank_name = save_ai_prompt_in_db(
             &db,
@@ -15828,7 +15762,6 @@ mod tests {
                 agent_type: "codex".to_string(),
                 name: "  ".to_string(),
                 icon: "hammer".to_string(),
-                mode: "plan".to_string(),
                 prompt_text: String::new(),
             },
         )
@@ -15842,7 +15775,6 @@ mod tests {
                 agent_type: "claude".to_string(),
                 name: "implement ticket".to_string(),
                 icon: "review".to_string(),
-                mode: "agent".to_string(),
                 prompt_text: String::new(),
             },
         )
@@ -15856,7 +15788,6 @@ mod tests {
                 agent_type: "claude".to_string(),
                 name: "IMPLEMENT TICKET".to_string(),
                 icon: "review".to_string(),
-                mode: "agent".to_string(),
                 prompt_text: String::new(),
             },
         )
@@ -15890,7 +15821,6 @@ mod tests {
                 name: "Legacy Codex".to_string(),
                 agent_type: "codex".to_string(),
                 icon: "sparkles".to_string(),
-                mode: "plan".to_string(),
                 prompt_text: String::new(),
                 created_at: 1,
                 updated_at: 2,
@@ -15904,6 +15834,36 @@ mod tests {
             )
             .expect("check legacy table");
         assert!(!legacy_table_exists);
+    }
+
+    #[test]
+    fn normalizes_existing_ai_prompt_modes_to_agent() {
+        let db = memory_db();
+        db.execute(
+            "INSERT INTO ai_prompts
+                (id, name, agent_type, mode, icon, prompt_text, created_at, updated_at)
+             VALUES ('prompt_1', 'Plan prompt', 'codex', 'plan', 'planning', 'Keep this text.', 1, 2)",
+            [],
+        )
+        .expect("insert legacy Plan prompt");
+
+        init_database(&db).expect("normalize AI Prompt modes");
+
+        let stored_mode: String = db
+            .query_row(
+                "SELECT mode FROM ai_prompts WHERE id = 'prompt_1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read normalized mode");
+        assert_eq!(stored_mode, "agent");
+        let prompt = get_ai_prompt_in_db(&db, "prompt_1")
+            .expect("read normalized prompt")
+            .expect("prompt exists");
+        assert_eq!(prompt.name, "Plan prompt");
+        assert_eq!(prompt.prompt_text, "Keep this text.");
+        assert_eq!(prompt.created_at, 1);
+        assert_eq!(prompt.updated_at, 2);
     }
 
     #[test]
@@ -15929,7 +15889,7 @@ mod tests {
         );
 
         let codex = reqwest::Url::parse(
-            &ai_prompt_deep_link("codex", "plan", &prompt, "/work/app").expect("Codex deep link"),
+            &ai_prompt_deep_link("codex", &prompt, "/work/app").expect("Codex deep link"),
         )
         .expect("parse Codex deep link");
         let codex_query = codex.query_pairs().collect::<HashMap<_, _>>();
@@ -15944,21 +15904,10 @@ mod tests {
             codex_query.get("path").map(|value| value.as_ref()),
             Some("/work/app")
         );
-        assert_eq!(
-            codex_query.get("mode").map(|value| value.as_ref()),
-            Some("plan")
-        );
-
-        let codex_agent = reqwest::Url::parse(
-            &ai_prompt_deep_link("codex", "agent", &prompt, "/work/app")
-                .expect("Codex Agent deep link"),
-        )
-        .expect("parse Codex Agent deep link");
-        assert!(!codex_agent.query_pairs().any(|(key, _)| key == "mode"));
+        assert!(!codex.query_pairs().any(|(key, _)| key == "mode"));
 
         let claude = reqwest::Url::parse(
-            &ai_prompt_deep_link("claude", "agent", &prompt, "/work/app")
-                .expect("Claude deep link"),
+            &ai_prompt_deep_link("claude", &prompt, "/work/app").expect("Claude deep link"),
         )
         .expect("parse Claude deep link");
         let claude_query = claude.query_pairs().collect::<HashMap<_, _>>();
@@ -16047,7 +15996,6 @@ mod tests {
                 agent_type: "codex".to_string(),
                 name: "Implement ticket".to_string(),
                 icon: "hammer".to_string(),
-                mode: "plan".to_string(),
                 prompt_text: "Use the project conventions.".to_string(),
             },
         )
@@ -16082,7 +16030,7 @@ mod tests {
             query.get("prompt").map(|value| value.as_ref()),
             Some(expected_prompt.as_str())
         );
-        assert_eq!(query.get("mode").map(|value| value.as_ref()), Some("plan"));
+        assert!(!query.contains_key("mode"));
         assert!(
             get_task(&db, &task.id)
                 .expect("load original task")
