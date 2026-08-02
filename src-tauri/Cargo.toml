@@ -3,6 +3,7 @@ name = "devcrashflash-station"
 version = "0.8.0"
 description = "Station by DevCrashFlash"
 authors = ["Alexander Schranz"]
+license = "BUSL-1.1"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

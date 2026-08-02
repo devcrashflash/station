@@ -34,6 +34,11 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "resources": {
+      "../LICENSE": "legal/LICENSE",
+      "../COMMERCIAL_LICENSE.md": "legal/COMMERCIAL_LICENSE.md",
+      "../THIRD_PARTY_NOTICES.md": "legal/THIRD_PARTY_NOTICES.md"
+    }
   }
 }

@@ -2,6 +2,24 @@
 
 Minimal Tauri v2 starter using React, JavaScript, Vite, Tailwind CSS, and shadcn/ui.
 
+## License and 40-day evaluation
+
+Station is **source available**, not open source. It is licensed under the
+[Business Source License 1.1](LICENSE). The license permits non-production use
+and grants one 40-day period of ordinary production use for evaluation. After
+that period, continued production use requires a paid
+[commercial license](COMMERCIAL_LICENSE.md); payment is not optional even if the
+application remains functional or displays only a reminder.
+
+Each released version automatically becomes available under the Apache License
+2.0 four years after that version's first public distribution. Third-party
+components remain under their own terms, listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Code contributions require acceptance of the
+[Contributor License Agreement](CONTRIBUTOR_LICENSE_AGREEMENT.md). See
+[CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+
 ## Development
 
 - Install dependencies with `pnpm install`.
@@ -31,6 +49,8 @@ database; anyone with access to that database may be able to read them.
 
 The release command synchronizes the versions in `package.json`, the Tauri config,
 and the Rust package files before building. DMG releases must be built on macOS.
+The application bundle includes the BSL, commercial license, and third-party
+notices under its `legal` resources directory.
 
 ## Local-First Behavior
 

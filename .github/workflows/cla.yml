@@ -1,0 +1,19 @@
+name: Contributor License Agreement
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  cla:
+    name: CLA accepted
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check CLA acceptance
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          node -e 'const body = process.env.PR_BODY || ""; const accepted = /^- \[[xX]\] \*\*I have read and agree to the Station Contributor License Agreement\.\*\*\s*$/m.test(body); if (!accepted) { console.error("Check the Station CLA acceptance box in the pull request description."); process.exit(1); }'

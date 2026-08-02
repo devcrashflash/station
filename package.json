@@ -1,6 +1,7 @@
 {
   "name": "devcrashflash-station",
   "private": true,
+  "license": "BUSL-1.1",
   "version": "0.8.0",
   "type": "module",
   "scripts": {
