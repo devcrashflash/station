@@ -297,6 +297,20 @@ struct TerminalSession {
     detached_output: DetachedOutputBuffer,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PaneProcess {
+    tab_id: String,
+    pane_id: String,
+    process_id: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcessInfo {
+    process_id: u32,
+    parent_process_id: u32,
+    command: String,
+}
+
 struct TerminalTabsRuntime {
     tabs: Vec<TerminalTab>,
     active_tab_id: String,
@@ -846,6 +860,10 @@ fn quick_capture_label_allowed(label: &str) -> bool {
     label == "quick-capture"
 }
 
+fn ai_session_terminal_label_allowed(label: &str) -> bool {
+    label == MAIN_WEBVIEW_LABEL || quick_capture_label_allowed(label)
+}
+
 fn validate_terminal_caller(webview: &Webview, _tab_id: &str) -> Result<(), String> {
     if webview.label() == TERMINAL_WEBVIEW_LABEL {
         Ok(())
@@ -1016,6 +1034,237 @@ fn ai_session_terminal_command(provider: &str, session_id: &str) -> Result<Strin
     }
 }
 
+fn parse_process_list(output: &str) -> Vec<ProcessInfo> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let process_id = fields.next()?.parse().ok()?;
+            let parent_process_id = fields.next()?.parse().ok()?;
+            let command = fields.collect::<Vec<_>>().join(" ");
+            (!command.is_empty()).then_some(ProcessInfo {
+                process_id,
+                parent_process_id,
+                command,
+            })
+        })
+        .collect()
+}
+
+fn process_list() -> Option<Vec<ProcessInfo>> {
+    let output = std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid=,command="])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| parse_process_list(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn codex_cli_command(command: &str) -> bool {
+    command.split_whitespace().take(3).any(|token| {
+        Path::new(token)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| matches!(name, "codex" | "codex.exe" | "codex.js"))
+    })
+}
+
+fn process_descends_from(process_id: u32, ancestor_id: u32, parents: &HashMap<u32, u32>) -> bool {
+    let mut current = process_id;
+    let mut visited = HashSet::new();
+    while visited.insert(current) {
+        if current == ancestor_id {
+            return true;
+        }
+        let Some(parent) = parents.get(&current) else {
+            return false;
+        };
+        current = *parent;
+    }
+    false
+}
+
+fn codex_rollout_matches_session(path: &Path, session_id: &str) -> bool {
+    let components = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    let in_codex_sessions = components.windows(2).any(|window| {
+        window[0] == ".codex" && matches!(window[1], "sessions" | "archived_sessions")
+    });
+    if !in_codex_sessions {
+        return false;
+    }
+    let Some(stem) = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".jsonl"))
+        .and_then(|name| name.strip_prefix("rollout-"))
+    else {
+        return false;
+    };
+    let Some((_, time_and_session)) = stem.split_once('T') else {
+        return false;
+    };
+    let mut fields = time_and_session.splitn(4, '-');
+    let has_timestamp = fields.next().is_some_and(|value| value.len() == 2)
+        && fields.next().is_some_and(|value| value.len() == 2)
+        && fields.next().is_some_and(|value| value.len() == 2);
+    has_timestamp && fields.next() == Some(session_id)
+}
+
+#[cfg(target_os = "macos")]
+fn process_open_files(process_id: u32) -> Vec<PathBuf> {
+    let output = std::process::Command::new("/usr/sbin/lsof")
+        .args(["-p", &process_id.to_string(), "-Fn"])
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix('n'))
+        .map(PathBuf::from)
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn process_open_files(process_id: u32) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(format!("/proc/{process_id}/fd")) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+        .collect()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn process_open_files(_process_id: u32) -> Vec<PathBuf> {
+    Vec::new()
+}
+
+fn find_matching_codex_pane(
+    panes: &[PaneProcess],
+    processes: &[ProcessInfo],
+    session_id: &str,
+    mut open_files: impl FnMut(u32) -> Vec<PathBuf>,
+) -> Option<PaneProcess> {
+    let parents = processes
+        .iter()
+        .map(|process| (process.process_id, process.parent_process_id))
+        .collect::<HashMap<_, _>>();
+    for pane in panes {
+        for process in processes.iter().filter(|process| {
+            codex_cli_command(&process.command)
+                && process_descends_from(process.process_id, pane.process_id, &parents)
+        }) {
+            if open_files(process.process_id)
+                .iter()
+                .any(|path| codex_rollout_matches_session(path, session_id))
+            {
+                return Some(pane.clone());
+            }
+        }
+    }
+    None
+}
+
+fn pane_processes(runtime: &TerminalTabsRuntime) -> Vec<PaneProcess> {
+    let mut panes = Vec::new();
+    let mut push_pane = |tab: &TerminalTab, pane_id: &str| {
+        let Some(process_id) = runtime
+            .sessions
+            .get(pane_id)
+            .and_then(|session| session.process_id)
+        else {
+            return;
+        };
+        if !panes
+            .iter()
+            .any(|pane: &PaneProcess| pane.pane_id == pane_id)
+        {
+            panes.push(PaneProcess {
+                tab_id: tab.id.clone(),
+                pane_id: pane_id.to_string(),
+                process_id,
+            });
+        }
+    };
+
+    if let Some(active) = runtime
+        .tabs
+        .iter()
+        .find(|tab| tab.id == runtime.active_tab_id)
+    {
+        push_pane(active, &active.focused_pane_id);
+    }
+    for tab in &runtime.tabs {
+        let mut pane_ids = Vec::new();
+        tab.root.pane_ids(&mut pane_ids);
+        for pane_id in pane_ids {
+            push_pane(tab, &pane_id);
+        }
+    }
+    panes
+}
+
+fn focus_existing_codex_session(
+    app: &tauri::AppHandle,
+    state: &TerminalTabsState,
+    session_id: &str,
+) -> Result<Option<WorkspaceTabsSnapshot>, String> {
+    let panes = {
+        let runtime = state.runtime.lock().map_err(db_error)?;
+        pane_processes(&runtime)
+    };
+    let Some(processes) = process_list() else {
+        return Ok(None);
+    };
+    let Some(found) = find_matching_codex_pane(&panes, &processes, session_id, process_open_files)
+    else {
+        return Ok(None);
+    };
+
+    let (layout, snapshot) = {
+        let mut runtime = state.runtime.lock().map_err(db_error)?;
+        if !runtime.sessions.contains_key(&found.pane_id) {
+            return Ok(None);
+        }
+        let Some(tab_index) = runtime.tabs.iter().position(|tab| tab.id == found.tab_id) else {
+            return Ok(None);
+        };
+        if !runtime.tabs[tab_index].root.contains_pane(&found.pane_id) {
+            return Ok(None);
+        }
+        runtime.tabs[tab_index].focused_pane_id = found.pane_id;
+        runtime.active_tab_id = found.tab_id.clone();
+        persist_tabs(app, &runtime)?;
+        (
+            runtime.tabs[tab_index].layout(),
+            snapshot_from_runtime(&runtime),
+        )
+    };
+    apply_active_webview(app, &found.tab_id)?;
+    emit_layout(app, &layout);
+    emit_snapshot(app, &snapshot);
+    Ok(Some(snapshot))
+}
+
+fn show_and_focus_workspace_window(app: &tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_window("main")
+        .ok_or_else(|| "The main window is unavailable.".to_string())?;
+    window.show().map_err(db_error)?;
+    window.unminimize().map_err(db_error)?;
+    window.set_focus().map_err(db_error)
+}
+
 #[tauri::command]
 pub async fn open_ai_session_terminal(
     app: tauri::AppHandle,
@@ -1025,19 +1274,19 @@ pub async fn open_ai_session_terminal(
     session_id: String,
     cwd: Option<String>,
 ) -> Result<WorkspaceTabsSnapshot, String> {
-    if !quick_capture_label_allowed(webview.label()) {
-        return Err("Only quick capture can use this AI session command.".to_string());
+    if !ai_session_terminal_label_allowed(webview.label()) {
+        return Err("This webview cannot open AI sessions in a terminal.".to_string());
     }
     let command = ai_session_terminal_command(&provider, &session_id)?;
+    if provider == "codex" {
+        if let Some(snapshot) = focus_existing_codex_session(&app, &state, &session_id)? {
+            show_and_focus_workspace_window(&app)?;
+            return Ok(snapshot);
+        }
+    }
     let snapshot = create_terminal_tab_inner(&app, &state, true, cwd)?;
     complete_terminal_startup_input_inner(&app, &state, &snapshot.active_tab_id, command)?;
-
-    let window = app
-        .get_window("main")
-        .ok_or_else(|| "The main window is unavailable.".to_string())?;
-    window.show().map_err(db_error)?;
-    window.unminimize().map_err(db_error)?;
-    window.set_focus().map_err(db_error)?;
+    show_and_focus_workspace_window(&app)?;
     Ok(snapshot)
 }
 
@@ -2872,10 +3121,12 @@ mod tests {
     }
 
     #[test]
-    fn restricts_ai_session_terminal_commands_to_quick_capture() {
+    fn restricts_ai_session_terminal_commands_to_supported_surfaces() {
         assert!(quick_capture_label_allowed("quick-capture"));
-        assert!(!quick_capture_label_allowed(MAIN_WEBVIEW_LABEL));
-        assert!(!quick_capture_label_allowed(TERMINAL_WEBVIEW_LABEL));
+        assert!(ai_session_terminal_label_allowed("quick-capture"));
+        assert!(ai_session_terminal_label_allowed(MAIN_WEBVIEW_LABEL));
+        assert!(!ai_session_terminal_label_allowed(TAB_BAR_WEBVIEW_LABEL));
+        assert!(!ai_session_terminal_label_allowed(TERMINAL_WEBVIEW_LABEL));
     }
 
     #[test]
@@ -2896,6 +3147,65 @@ mod tests {
             ai_session_terminal_command("codex", "bad; command").unwrap_err(),
             "Invalid AI session identifier."
         );
+    }
+
+    #[test]
+    fn parses_processes_and_recognizes_codex_cli_commands() {
+        let processes = parse_process_list(
+            "  10 1 -fish\n  20 10 codex\n  30 10 node /opt/codex.js resume thread-1\n",
+        );
+        assert_eq!(processes.len(), 3);
+        assert_eq!(processes[1].parent_process_id, 10);
+        assert!(codex_cli_command(&processes[1].command));
+        assert!(codex_cli_command(&processes[2].command));
+        assert!(!codex_cli_command("/opt/codex-code-mode-host"));
+    }
+
+    #[test]
+    fn matches_only_codex_rollout_paths_for_the_exact_session_suffix() {
+        let matching = Path::new(
+            "/Users/test/.codex/sessions/2026/08/03/rollout-2026-08-03T09-03-14-thread-1.jsonl",
+        );
+        assert!(codex_rollout_matches_session(matching, "thread-1"));
+        assert!(!codex_rollout_matches_session(matching, "thread-2"));
+        assert!(!codex_rollout_matches_session(matching, "1"));
+        assert!(!codex_rollout_matches_session(
+            Path::new("/tmp/rollout-2026-08-03T09-03-14-thread-1.jsonl"),
+            "thread-1"
+        ));
+    }
+
+    #[test]
+    fn finds_a_matching_codex_process_below_the_preferred_pane_shell() {
+        let panes = vec![
+            PaneProcess {
+                tab_id: "active".into(),
+                pane_id: "active-pane".into(),
+                process_id: 10,
+            },
+            PaneProcess {
+                tab_id: "other".into(),
+                pane_id: "other-pane".into(),
+                process_id: 40,
+            },
+        ];
+        let processes = parse_process_list(
+            "10 1 -fish\n20 10 codex\n40 1 -fish\n50 40 codex resume thread-1\n",
+        );
+        let rollout = || {
+            vec![PathBuf::from(
+                "/home/test/.codex/sessions/2026/08/03/rollout-2026-08-03T09-03-14-thread-1.jsonl",
+            )]
+        };
+        let preferred =
+            find_matching_codex_pane(&panes, &processes, "thread-1", |_| rollout()).unwrap();
+        assert_eq!(preferred.pane_id, "active-pane");
+
+        let found = find_matching_codex_pane(&panes, &processes, "thread-1", |process_id| {
+            (process_id == 50).then(&rollout).unwrap_or_default()
+        })
+        .unwrap();
+        assert_eq!(found.pane_id, "other-pane");
     }
 
     #[test]

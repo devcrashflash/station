@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
 import {
   Archive,
   ArchiveRestore,
@@ -40,7 +39,6 @@ import {
   AI_SESSION_SOURCE_OPTIONS,
   AI_SESSION_WINDOWS,
   aiSessionArchiveActionLabel,
-  aiSessionCommand,
   aiSessionCanArchive,
   aiSessionProviderBadgeClass,
   aiSessionProviderFilterEnabled,
@@ -66,27 +64,14 @@ import {
   sortAiSessions,
 } from "@/lib/aiSessions";
 import { isPrimarySearchShortcut, shortcutModifier } from "@/lib/keyboardShortcut";
-import { workspaceTabsApi } from "@/lib/workspaceTabs";
 import { cn } from "@/lib/utils";
 
 async function openSessionInTerminal(session) {
-  let createdTabId = null;
-  const readyTabs = new Set();
-  let markReady;
-  const ready = new Promise((resolve) => { markReady = resolve; });
-  const unlisten = await listen("terminal-startup-ready", ({ payload }) => {
-    readyTabs.add(payload.tabId);
-    if (payload.tabId === createdTabId) markReady();
+  await api.openAiSessionTerminal({
+    provider: session.provider,
+    sessionId: session.id,
+    cwd: session.cwd || null,
   });
-  try {
-    const snapshot = await workspaceTabsApi.createTerminal(true, session.cwd || null);
-    createdTabId = snapshot.activeTabId;
-    if (readyTabs.has(createdTabId)) markReady();
-    await ready;
-    await workspaceTabsApi.completeTerminalStartupInput(createdTabId, aiSessionCommand(session));
-  } finally {
-    unlisten();
-  }
 }
 
 export function AiAgentsView({
