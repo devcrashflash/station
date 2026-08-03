@@ -84,8 +84,8 @@ test("normalizes source settings and detects an all-disabled configuration", () 
     codexDesktop: true,
     claudeCli: true,
     claudeDesktop: true,
-    foregroundRefreshIntervalSeconds: 30,
-    backgroundRefreshIntervalSeconds: 60,
+    foregroundRefreshIntervalSeconds: 5,
+    backgroundRefreshIntervalSeconds: 5,
   });
   assert.equal(aiSessionSourcesDisabled({
     codexCli: false,
@@ -224,8 +224,8 @@ test("normalizes supported AI session refresh intervals", () => {
   assert.equal(normalizeAiSessionForegroundRefreshInterval(0), 0);
   assert.equal(normalizeAiSessionForegroundRefreshInterval(5), 5);
   assert.equal(normalizeAiSessionForegroundRefreshInterval("60"), 60);
-  assert.equal(normalizeAiSessionForegroundRefreshInterval(999), 30);
-  assert.equal(normalizeAiSessionBackgroundRefreshInterval(0), 60);
+  assert.equal(normalizeAiSessionForegroundRefreshInterval(999), 5);
+  assert.equal(normalizeAiSessionBackgroundRefreshInterval(0), 5);
   assert.equal(normalizeAiSessionBackgroundRefreshInterval("15"), 15);
   assert.equal(aiSessionPollingIntervalMs({
     foregroundRefreshIntervalSeconds: 15,
@@ -251,7 +251,7 @@ test("migrates legacy refresh settings and detects waiting child sessions", () =
     claudeCli: true,
     claudeDesktop: true,
     foregroundRefreshIntervalSeconds: 5,
-    backgroundRefreshIntervalSeconds: 60,
+    backgroundRefreshIntervalSeconds: 5,
   });
   assert.equal(aiSessionsWaitingForInput([
     { waitingForInput: false, children: [{ waitingForInput: true }] },

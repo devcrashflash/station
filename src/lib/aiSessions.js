@@ -59,20 +59,20 @@ export const DEFAULT_AI_SESSION_SETTINGS = {
   codexDesktop: true,
   claudeCli: true,
   claudeDesktop: true,
-  foregroundRefreshIntervalSeconds: 30,
-  backgroundRefreshIntervalSeconds: 60,
+  foregroundRefreshIntervalSeconds: 5,
+  backgroundRefreshIntervalSeconds: 5,
 };
 
 export function normalizeAiSessionForegroundRefreshInterval(value) {
   const numeric = Number(value);
-  return AI_SESSION_REFRESH_INTERVALS.some((option) => option.value === numeric) ? numeric : 30;
+  return AI_SESSION_REFRESH_INTERVALS.some((option) => option.value === numeric) ? numeric : 5;
 }
 
 export function normalizeAiSessionBackgroundRefreshInterval(value) {
   const numeric = Number(value);
   return AI_SESSION_BACKGROUND_REFRESH_INTERVALS.some((option) => option.value === numeric)
     ? numeric
-    : 60;
+    : 5;
 }
 
 export function aiSessionPollingIntervalMs(settings, foreground) {

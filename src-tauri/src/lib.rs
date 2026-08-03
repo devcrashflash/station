@@ -1243,11 +1243,11 @@ struct AiSessionSettings {
 }
 
 fn default_ai_session_foreground_refresh_interval() -> u64 {
-    30
+    5
 }
 
 fn default_ai_session_background_refresh_interval() -> u64 {
-    60
+    5
 }
 
 #[tauri::command]
@@ -15706,8 +15706,8 @@ mod tests {
                 codex_desktop: true,
                 claude_cli: false,
                 claude_desktop: true,
-                foreground_refresh_interval_seconds: 30,
-                background_refresh_interval_seconds: 60,
+                foreground_refresh_interval_seconds: 5,
+                background_refresh_interval_seconds: 5,
             }
         );
 
@@ -15723,7 +15723,7 @@ mod tests {
             load_ai_session_settings(&db)
                 .expect("normalize refresh interval")
                 .foreground_refresh_interval_seconds,
-            30
+            5
         );
 
         set_app_setting(
@@ -15736,7 +15736,7 @@ mod tests {
         .unwrap();
         let migrated = load_ai_session_settings(&db).expect("migrate legacy refresh interval");
         assert_eq!(migrated.foreground_refresh_interval_seconds, 5);
-        assert_eq!(migrated.background_refresh_interval_seconds, 60);
+        assert_eq!(migrated.background_refresh_interval_seconds, 5);
 
         let settings = AiSessionSettings {
             codex_cli: false,
