@@ -186,6 +186,8 @@ struct QuickCaptureRuntime {
     enabled: bool,
     shortcut: String,
     registered: bool,
+    shortcut_recording: bool,
+    shortcut_registration_suspended: bool,
     error: Option<String>,
 }
 
@@ -224,6 +226,82 @@ fn quick_capture_settings(
 ) -> Result<QuickCaptureSettings, String> {
     let runtime = state.quick_capture_settings.lock().map_err(db_error)?;
     Ok(quick_capture_settings_from_runtime(&runtime))
+}
+
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+fn apply_quick_capture_shortcut_recording(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    active: bool,
+) -> Result<(), String> {
+    let mut runtime = state.quick_capture_settings.lock().map_err(db_error)?;
+
+    if active {
+        if runtime.shortcut_recording {
+            return Ok(());
+        }
+        runtime.shortcut_recording = true;
+        if runtime.enabled && runtime.registered {
+            if let Err(error) = app.global_shortcut().unregister(runtime.shortcut.as_str()) {
+                runtime.shortcut_recording = false;
+                return Err(format!("Could not prepare shortcut recording: {error}"));
+            }
+            runtime.registered = false;
+            runtime.shortcut_registration_suspended = true;
+        }
+        return Ok(());
+    }
+
+    if runtime.shortcut_registration_suspended {
+        if let Err(error) = app.global_shortcut().register(runtime.shortcut.as_str()) {
+            runtime.shortcut_recording = false;
+            runtime.shortcut_registration_suspended = false;
+            runtime.error = Some(format!("Could not restore the current shortcut: {error}"));
+            return Err(format!("Could not restore the current shortcut: {error}"));
+        }
+        runtime.registered = true;
+        runtime.shortcut_registration_suspended = false;
+        runtime.error = None;
+    }
+    runtime.shortcut_recording = false;
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_quick_capture_shortcut_recording(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    active: bool,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = &state;
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let app_handle = app.clone();
+        app.run_on_main_thread(move || {
+            let state = app_handle.state::<AppState>();
+            let result = apply_quick_capture_shortcut_recording(&app_handle, state.inner(), active);
+            let _ = sender.send(result);
+        })
+        .map_err(|error| format!("Could not schedule shortcut recording: {error}"))?;
+        return receiver
+            .recv()
+            .map_err(|error| format!("Could not finish shortcut recording: {error}"))?;
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    return apply_quick_capture_shortcut_recording(&app, state.inner(), active);
+
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+    {
+        let _ = (app, state, active);
+        Err("Quick capture is available in the desktop app only.".to_string())
+    }
+}
+
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+fn quick_capture_shortcut_should_toggle(state: ShortcutState, shortcut_recording: bool) -> bool {
+    state == ShortcutState::Pressed && !shortcut_recording
 }
 
 fn centered_origin(
@@ -1413,7 +1491,17 @@ pub fn run() {
             app.handle().plugin(
                 tauri_plugin_global_shortcut::Builder::new()
                     .with_handler(|app, _shortcut, event| {
-                        if event.state() == ShortcutState::Pressed {
+                        let shortcut_recording = app
+                            .try_state::<AppState>()
+                            .and_then(|state| {
+                                state
+                                    .quick_capture_settings
+                                    .lock()
+                                    .ok()
+                                    .map(|runtime| runtime.shortcut_recording)
+                            })
+                            .unwrap_or(true);
+                        if quick_capture_shortcut_should_toggle(event.state(), shortcut_recording) {
                             #[cfg(target_os = "macos")]
                             {
                                 let app_handle = app.clone();
@@ -1463,6 +1551,8 @@ pub fn run() {
                     enabled,
                     shortcut,
                     registered: enabled && error.is_none(),
+                    shortcut_recording: false,
+                    shortcut_registration_suspended: false,
                     error,
                 }
             };
@@ -1471,6 +1561,8 @@ pub fn run() {
                 enabled: false,
                 shortcut: DEFAULT_QUICK_CAPTURE_SHORTCUT.to_string(),
                 registered: false,
+                shortcut_recording: false,
+                shortcut_registration_suspended: false,
                 error: Some("Quick capture is available in the desktop app only.".to_string()),
             };
 
@@ -1499,6 +1591,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             open_blank_browser_tab,
             quick_capture_settings,
+            set_quick_capture_shortcut_recording,
             save_quick_capture_settings,
             hide_quick_capture,
             resize_quick_capture,
@@ -2484,6 +2577,8 @@ fn apply_quick_capture_settings(
         enabled: input.enabled,
         shortcut: next_shortcut,
         registered: input.enabled,
+        shortcut_recording: false,
+        shortcut_registration_suspended: false,
         error: None,
     };
     Ok(quick_capture_settings_from_runtime(&runtime))
@@ -11413,6 +11508,23 @@ mod tests {
             normalize_quick_capture_shortcut("Alt+KeyK").expect("normalize alt shortcut"),
             "alt+KeyK"
         );
+    }
+
+    #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+    #[test]
+    fn quick_capture_shortcut_toggle_is_suppressed_while_recording() {
+        assert!(quick_capture_shortcut_should_toggle(
+            ShortcutState::Pressed,
+            false
+        ));
+        assert!(!quick_capture_shortcut_should_toggle(
+            ShortcutState::Pressed,
+            true
+        ));
+        assert!(!quick_capture_shortcut_should_toggle(
+            ShortcutState::Released,
+            false
+        ));
     }
 
     #[cfg(any(target_os = "macos", windows, target_os = "linux"))]

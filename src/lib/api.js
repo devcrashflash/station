@@ -79,6 +79,8 @@ export const api = {
     registered: false,
     error: null,
   })),
+  setQuickCaptureShortcutRecording: (active) =>
+    call("set_quick_capture_shortcut_recording", { active }, () => null),
   saveQuickCaptureSettings: (payload) => call("save_quick_capture_settings", { input: payload }, () => ({
     enabled: false,
     shortcut: "CommandOrControl+Shift+Space",

@@ -5,6 +5,7 @@ import {
   formatShortcut,
   isPrimarySearchShortcut,
   shortcutFromKeyboardEvent,
+  shortcutPreviewFromKeyboardEvent,
 } from "./keyboardShortcut.js";
 
 function keyEvent(overrides = {}) {
@@ -29,6 +30,47 @@ test("records a modified key using Tauri accelerator names", () => {
     status: "complete",
     shortcut: "Shift+Super+Space",
   });
+});
+
+test("builds live shortcut previews from pressed modifiers and keys", () => {
+  assert.equal(shortcutPreviewFromKeyboardEvent(keyEvent({
+    key: "Control",
+    code: "ControlLeft",
+    ctrlKey: true,
+  })), "Control");
+  assert.equal(shortcutPreviewFromKeyboardEvent(keyEvent({
+    key: "Alt",
+    code: "AltLeft",
+    altKey: true,
+  })), "Alt");
+  assert.equal(shortcutPreviewFromKeyboardEvent(keyEvent({
+    key: "Shift",
+    code: "ShiftLeft",
+    shiftKey: true,
+  })), "Shift");
+  assert.equal(shortcutPreviewFromKeyboardEvent(keyEvent({
+    key: "Meta",
+    code: "MetaLeft",
+    metaKey: true,
+  })), "Super");
+  assert.equal(shortcutPreviewFromKeyboardEvent(keyEvent({
+    ctrlKey: true,
+    altKey: true,
+    shiftKey: true,
+    metaKey: true,
+  })), "Control+Alt+Shift+Super+KeyK");
+});
+
+test("removes the released key from an incomplete shortcut preview", () => {
+  assert.equal(shortcutPreviewFromKeyboardEvent(keyEvent({
+    key: "Control",
+    code: "ControlLeft",
+  }), { includeKey: false }), "");
+  assert.equal(shortcutPreviewFromKeyboardEvent(keyEvent({
+    key: "Shift",
+    code: "ShiftLeft",
+    ctrlKey: true,
+  }), { includeKey: false }), "Control");
 });
 
 test("rejects bare keys and ignores modifier-only presses", () => {

@@ -92,6 +92,11 @@ function shortcutSignature(shortcut, platform) {
   return parts && `${parts.control ? 1 : 0}${parts.alt ? 1 : 0}${parts.shift ? 1 : 0}${parts.meta ? 1 : 0}:${parts.code}`;
 }
 
+export function shortcutsMatch(left, right, platform) {
+  const leftSignature = shortcutSignature(left, platform);
+  return leftSignature !== null && leftSignature === shortcutSignature(right, platform);
+}
+
 export function normalizeTerminalShortcuts(shortcuts = {}) {
   return Object.fromEntries(Object.entries(DEFAULT_TERMINAL_SHORTCUTS).map(([id, fallback]) => [
     id,

@@ -20,8 +20,9 @@ import {
   normalizeAiSessionSettings,
 } from "@/lib/aiSessions";
 import { calendarWarnings } from "@/lib/calendar";
-import { formatShortcut, shortcutFromKeyboardEvent } from "@/lib/keyboardShortcut";
-import { quickCaptureStatus } from "@/lib/quickCaptureSettings";
+import { api } from "@/lib/api";
+import { formatShortcut, shortcutFromKeyboardEvent, shortcutPreviewFromKeyboardEvent } from "@/lib/keyboardShortcut";
+import { quickCaptureShortcutConflict, quickCaptureStatus } from "@/lib/quickCaptureSettings";
 import { terminalFontFamily, terminalFontOptions, terminalFontStyle, terminalFontStyleOptions } from "@/lib/terminalFonts";
 import {
   DEFAULT_TERMINAL_SHORTCUTS,
@@ -475,6 +476,7 @@ export function SettingsDialog({
             {activeTab === "quick-capture" && (
               <QuickCaptureSettingsTab
                 settings={quickCaptureSettings}
+                terminalShortcuts={terminalSettings?.shortcuts}
                 onSave={onSaveQuickCaptureSettings}
               />
             )}
@@ -689,14 +691,21 @@ function AiSessionSettingsTab({ settings, onSave }) {
   );
 }
 
-function QuickCaptureSettingsTab({ settings, onSave }) {
+function QuickCaptureSettingsTab({ settings, terminalShortcuts, onSave }) {
   const [candidate, setCandidate] = useState(settings?.shortcut || "CommandOrControl+Shift+Space");
   const [isRecording, setIsRecording] = useState(false);
+  const [isStartingRecording, setIsStartingRecording] = useState(false);
+  const [recordingPreview, setRecordingPreview] = useState(null);
   const [notice, setNotice] = useState(settings?.error || "");
   const [noticeIsError, setNoticeIsError] = useState(Boolean(settings?.error));
   const [isSaving, setIsSaving] = useState(false);
+  const recorderMountedRef = useRef(true);
+  const nativeRecordingRequestedRef = useRef(false);
   const supported = settings?.supported === true;
   const status = quickCaptureStatus(settings);
+  const shortcutConflict = candidate !== settings?.shortcut
+    ? quickCaptureShortcutConflict(candidate, terminalShortcuts)
+    : null;
 
   useEffect(() => {
     setCandidate(settings?.shortcut || settings?.defaultShortcut || "CommandOrControl+Shift+Space");
@@ -704,33 +713,131 @@ function QuickCaptureSettingsTab({ settings, onSave }) {
     setNoticeIsError(Boolean(settings?.error));
   }, [settings]);
 
-  function handleRecorderKeyDown(event) {
-    if (!isRecording) return;
-    event.preventDefault();
-    event.stopPropagation();
+  useEffect(() => {
+    recorderMountedRef.current = true;
+    return () => {
+      recorderMountedRef.current = false;
+      setTerminalShortcutRecording(false);
+      if (nativeRecordingRequestedRef.current) {
+        api.setQuickCaptureShortcutRecording(false).catch(console.error);
+      }
+    };
+  }, []);
 
-    const result = shortcutFromKeyboardEvent(event);
-    if (result.status === "cancel") {
-      setIsRecording(false);
-      setNotice("Recording cancelled.");
-      setNoticeIsError(false);
-      return;
-    }
-    if (result.status === "recording") {
-      setNotice("Press a non-modifier key to finish the shortcut.");
-      setNoticeIsError(false);
-      return;
-    }
-    if (result.status === "error") {
-      setNotice(result.error);
-      setNoticeIsError(true);
-      return;
+  useEffect(() => {
+    if (!isRecording) return undefined;
+    setTerminalShortcutRecording(true);
+    let active = true;
+    let pendingFinish = null;
+
+    async function finishRecording(result) {
+      try {
+        await api.setQuickCaptureShortcutRecording(false);
+        nativeRecordingRequestedRef.current = false;
+        if (!active) return;
+        setIsRecording(false);
+        setRecordingPreview(null);
+        if (result.status === "cancel") {
+          setNotice("Recording cancelled.");
+        } else {
+          setNotice("Shortcut recorded. Save to activate it.");
+        }
+        setNoticeIsError(false);
+      } catch (error) {
+        if (!active) return;
+        setIsRecording(false);
+        setRecordingPreview(null);
+        setNotice(error?.message || String(error));
+        setNoticeIsError(true);
+      }
     }
 
-    setCandidate(result.shortcut);
-    setIsRecording(false);
-    setNotice("Shortcut recorded. Save to activate it.");
+    function handleRecorderKeyDown(event) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.repeat || pendingFinish) return;
+
+      const result = shortcutFromKeyboardEvent(event);
+      if (result.status === "cancel") {
+        pendingFinish = { result, code: event.code };
+        setNotice("Release Escape to cancel recording.");
+        setNoticeIsError(false);
+        return;
+      }
+      if (result.status === "recording") {
+        setRecordingPreview(shortcutPreviewFromKeyboardEvent(event));
+        setNotice("Press a non-modifier key to finish the shortcut.");
+        setNoticeIsError(false);
+        return;
+      }
+      if (result.status === "error") {
+        setRecordingPreview("");
+        setNotice(result.error);
+        setNoticeIsError(true);
+        return;
+      }
+
+      setCandidate(result.shortcut);
+      setRecordingPreview(result.shortcut);
+      pendingFinish = { result, code: event.code };
+      setNotice("Shortcut recorded. Release the key to finish.");
+      setNoticeIsError(false);
+    }
+
+    function handleRecorderKeyUp(event) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (!pendingFinish) {
+        setRecordingPreview(shortcutPreviewFromKeyboardEvent(event, { includeKey: false }));
+        return;
+      }
+      if (event.code !== pendingFinish.code) return;
+      const { result } = pendingFinish;
+      pendingFinish = null;
+      finishRecording(result);
+    }
+
+    window.addEventListener("keydown", handleRecorderKeyDown, true);
+    window.addEventListener("keyup", handleRecorderKeyUp, true);
+    return () => {
+      active = false;
+      window.removeEventListener("keydown", handleRecorderKeyDown, true);
+      window.removeEventListener("keyup", handleRecorderKeyUp, true);
+      setTerminalShortcutRecording(false);
+      if (nativeRecordingRequestedRef.current) {
+        api.setQuickCaptureShortcutRecording(false)
+          .then(() => { nativeRecordingRequestedRef.current = false; })
+          .catch(console.error);
+      }
+    };
+  }, [isRecording]);
+
+  async function startRecording() {
+    setIsStartingRecording(true);
+    setNotice("Preparing shortcut recording…");
     setNoticeIsError(false);
+    nativeRecordingRequestedRef.current = true;
+    try {
+      await api.setQuickCaptureShortcutRecording(true);
+      if (!recorderMountedRef.current) {
+        await api.setQuickCaptureShortcutRecording(false);
+        nativeRecordingRequestedRef.current = false;
+        return;
+      }
+      setTerminalShortcutRecording(true);
+      setRecordingPreview("");
+      setIsRecording(true);
+      setNotice("Press the new shortcut. Escape cancels.");
+    } catch (error) {
+      nativeRecordingRequestedRef.current = false;
+      setTerminalShortcutRecording(false);
+      setRecordingPreview(null);
+      if (!recorderMountedRef.current) return;
+      setNotice(error?.message || String(error));
+      setNoticeIsError(true);
+    } finally {
+      if (recorderMountedRef.current) setIsStartingRecording(false);
+    }
   }
 
   async function save(shortcut) {
@@ -788,7 +895,7 @@ function QuickCaptureSettingsTab({ settings, onSave }) {
           <label className="flex items-start gap-3 rounded-lg border bg-muted/20 p-4">
             <Checkbox
               checked={settings.enabled}
-              disabled={isSaving || isRecording}
+              disabled={isSaving || isRecording || isStartingRecording}
               onCheckedChange={(checked) => toggleEnabled(checked === true)}
             />
             <span className="grid gap-1">
@@ -821,26 +928,28 @@ function QuickCaptureSettingsTab({ settings, onSave }) {
               </div>
               <div className="grid justify-items-end gap-1">
                 <span className="text-xs text-muted-foreground">New shortcut</span>
-                <Kbd className="h-7 px-2 text-sm">{formatShortcut(candidate)}</Kbd>
+                <Kbd className="h-7 px-2 text-sm">
+                  {formatShortcut(isRecording ? recordingPreview : candidate) || "—"}
+                </Kbd>
               </div>
             </div>
 
             <Button
               type="button"
               variant={isRecording ? "secondary" : "outline"}
-              disabled={isSaving}
-              onClick={() => {
-                setIsRecording(true);
-                setNotice("Press the new shortcut. Escape cancels.");
-                setNoticeIsError(false);
-              }}
-              onKeyDown={handleRecorderKeyDown}
-              onBlur={() => setIsRecording(false)}
+              disabled={isSaving || isStartingRecording}
+              onClick={startRecording}
             >
-              <Keyboard />
-              {isRecording ? "Press shortcut…" : "Record shortcut"}
+              {isStartingRecording ? <LoaderCircle className="animate-spin" /> : <Keyboard />}
+              {isStartingRecording ? "Preparing…" : isRecording ? "Press shortcut…" : "Record shortcut"}
             </Button>
           </FieldSet>
+
+          {shortcutConflict && (
+            <p className="text-sm text-amber-700 dark:text-amber-300" role="status">
+              This shortcut is also assigned to {shortcutConflict.label}. Saving it confirms that Smart Overlay may override that action.
+            </p>
+          )}
 
           {notice && (
             <p className={cn("text-sm text-muted-foreground", noticeIsError && "text-destructive")} role="status">
@@ -849,11 +958,11 @@ function QuickCaptureSettingsTab({ settings, onSave }) {
           )}
 
           <div className="flex flex-wrap gap-2">
-            <Button type="button" disabled={isSaving || isRecording} onClick={() => save(candidate)}>
+            <Button type="button" disabled={isSaving || isRecording || isStartingRecording} onClick={() => save(candidate)}>
               {isSaving && <LoaderCircle className="animate-spin" />}
               Save shortcut
             </Button>
-            <Button type="button" variant="outline" disabled={isSaving || isRecording} onClick={() => save(settings.defaultShortcut)}>
+            <Button type="button" variant="outline" disabled={isSaving || isRecording || isStartingRecording} onClick={() => save(settings.defaultShortcut)}>
               <RotateCcw />
               Restore default
             </Button>
