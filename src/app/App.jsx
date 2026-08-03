@@ -207,6 +207,7 @@ function App() {
   const [showProjectSwitcher, setShowProjectSwitcher] = useState(false);
   const [projectSwitcherCycleRequestKey, setProjectSwitcherCycleRequestKey] = useState(0);
   const [projectSwitcherReturnTabId, setProjectSwitcherReturnTabId] = useState(null);
+  const [taskSearchFocusRequestKey, setTaskSearchFocusRequestKey] = useState(0);
   const [smartInboxFocusRequestKey, setSmartInboxFocusRequestKey] = useState(0);
   const [aiSessionsActiveViewRequestKey, setAiSessionsActiveViewRequestKey] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
@@ -844,6 +845,7 @@ function App() {
 
   function selectProject(projectId) {
     navigateToLocation(projectLocation(projectId));
+    setTaskSearchFocusRequestKey((current) => current + 1);
   }
 
   function closeProjectSwitcher() {
@@ -1049,6 +1051,7 @@ function App() {
       ) : selectedProject ? (
         <ProjectWorkspaceView
           project={selectedProject}
+          taskSearchFocusRequestKey={taskSearchFocusRequestKey}
           tasks={tasks}
           resources={resources}
           localResources={localResources}
