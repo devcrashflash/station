@@ -19,7 +19,8 @@ import { dashboardTaskCreatedAt, dashboardTaskProjectName, latestDashboardTasks 
 import { isPrimarySearchShortcut, shortcutModifier } from "@/lib/keyboardShortcut";
 import { isSupportedOcrFile } from "@/lib/ocr";
 import { reviewRequestInput, reviewRequestSubtitle } from "@/lib/smartInboxReviewRequests";
-import { filterSmartInboxItems } from "@/lib/smartInboxSearch";
+import { buildAllSmartInboxItems } from "@/lib/smartInboxAll";
+import { filterAllSmartInboxItems, filterSmartInboxItems } from "@/lib/smartInboxSearch";
 import { cn } from "@/lib/utils";
 import { calendarEventOpenUrl, calendarEventTimeLabel, calendarWarnings, sortCalendarEvents } from "@/lib/calendar";
 
@@ -50,7 +51,7 @@ export function InboxView({
   onReconnectCalendarAccount,
   onShowCalendarSettings,
 }) {
-  const [activeTab, setActiveTab] = useState("todos");
+  const [activeTab, setActiveTab] = useState("all");
   const latestTasks = latestDashboardTasks(tasks, 20);
   const recentTasks = latestTasks.slice(0, 3);
 
@@ -244,7 +245,14 @@ function InboxCaptureTabs({
     trello: { items: [], warnings: [], loaded: false, syncing: false },
   });
   const startedProviders = useRef(new Set());
+  const allItems = useMemo(() => buildAllSmartInboxItems({
+    todos,
+    tasks,
+    files,
+    providerItems,
+  }), [files, providerItems, tasks, todos]);
   const tabs = [
+    { id: "all", label: "All", count: allItems.length, icon: Inbox },
     { id: "todos", label: "Todo", count: todos.length, icon: Inbox },
     { id: "tasks", label: "Tasks", count: taskCount, icon: ClipboardList },
     { id: "latest-files", label: "Latest files", count: files.length, icon: Files },
@@ -253,15 +261,19 @@ function InboxCaptureTabs({
     { id: "trello", label: "Trello", count: providerItems.trello.items.length, icon: SquareKanban },
   ];
   const isProviderTab = ["github", "gitlab", "trello"].includes(activeTab);
-  const activeItems = activeTab === "todos"
-    ? todos
-    : activeTab === "tasks"
-      ? tasks
-      : activeTab === "latest-files"
-        ? files
-        : providerItems[activeTab]?.items || [];
+  const activeItems = activeTab === "all"
+    ? allItems
+    : activeTab === "todos"
+      ? todos
+      : activeTab === "tasks"
+        ? tasks
+        : activeTab === "latest-files"
+          ? files
+          : providerItems[activeTab]?.items || [];
   const visibleItems = useMemo(
-    () => filterSmartInboxItems(activeTab, activeItems, searchQuery, projects),
+    () => activeTab === "all"
+      ? filterAllSmartInboxItems(activeItems, searchQuery, projects)
+      : filterSmartInboxItems(activeTab, activeItems, searchQuery, projects),
     [activeItems, activeTab, projects, searchQuery],
   );
   const filteredEmptyText = activeItems.length > 0 && visibleItems.length === 0
@@ -460,7 +472,20 @@ function InboxCaptureTabs({
       </div>
 
       <div role="tabpanel" aria-label={tabLabel(tabs, activeTab)}>
-        {activeTab === "todos" ? (
+        {activeTab === "all" ? (
+          <AllSmartInboxItemList
+            entries={visibleItems}
+            providerItems={providerItems}
+            projects={projects}
+            onEditTodo={onEditTodo}
+            onOpenTodo={onOpenTodo}
+            onDeleteTodo={onDeleteTodo}
+            onOpenFile={onOpenFile}
+            onOpenReviewRequest={onOpenReviewRequest}
+            onOpenTask={onOpenTask}
+            emptyText={filteredEmptyText}
+          />
+        ) : activeTab === "todos" ? (
           <SmartInboxTodoList
             todos={visibleItems}
             onEditTodo={onEditTodo}
@@ -500,6 +525,69 @@ function InboxCaptureTabs({
           onSave={onUpdateProviderSources}
           onSaved={() => syncProviderItems(settingsProvider)}
         />
+      )}
+    </div>
+  );
+}
+
+function AllSmartInboxItemList({
+  entries,
+  providerItems,
+  projects,
+  onEditTodo,
+  onOpenTodo,
+  onDeleteTodo,
+  onOpenFile,
+  onOpenReviewRequest,
+  onOpenTask,
+  emptyText,
+}) {
+  const warnings = ["github", "gitlab", "trello"]
+    .flatMap((provider) => providerItems[provider]?.warnings || []);
+
+  return (
+    <div className="grid gap-2">
+      <ProviderWarnings warnings={warnings} />
+      {entries.length === 0 ? (
+        <EmptyState text={emptyText || "No inbox items."} />
+      ) : (
+        <div className="flex flex-col gap-2">
+          {entries.map(({ category, item, key }) => {
+            if (category === "todos") {
+              return (
+                <SmartInboxTodoItem
+                  key={key}
+                  todo={item}
+                  onEditTodo={onEditTodo}
+                  onOpenTodo={onOpenTodo}
+                  onDeleteTodo={onDeleteTodo}
+                />
+              );
+            }
+            if (category === "tasks") {
+              return (
+                <DashboardTaskItem
+                  key={key}
+                  task={item}
+                  projects={projects}
+                  onOpenTask={onOpenTask}
+                />
+              );
+            }
+            if (category === "latest-files") {
+              return <RecentDirectoryFileItem key={key} file={item} onOpenFile={onOpenFile} />;
+            }
+            return (
+              <ReviewRequestItem
+                key={key}
+                provider={category}
+                item={item}
+                onOpenReviewRequest={onOpenReviewRequest}
+                onOpenTask={onOpenTask}
+              />
+            );
+          })}
+        </div>
       )}
     </div>
   );
@@ -611,28 +699,36 @@ export function DashboardTaskList({
   return (
     <div className="flex flex-col gap-2">
       {tasks.map((task) => (
-        <div
+        <DashboardTaskItem
           key={task.id}
-          className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border bg-card p-3"
-        >
-          <span className="min-w-0 overflow-hidden">
-            <span className="block truncate text-sm font-medium">{task.title}</span>
-            <span className="mt-1 block truncate text-xs text-muted-foreground">
-              {dashboardTaskProjectName(task, projects)} · {dashboardTaskCreatedAt(task)}
-            </span>
-          </span>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={!onOpenTask}
-            onClick={() => onOpenTask?.(task)}
-          >
-            <Eye />
-            View
-          </Button>
-        </div>
+          task={task}
+          projects={projects}
+          onOpenTask={onOpenTask}
+        />
       ))}
+    </div>
+  );
+}
+
+function DashboardTaskItem({ task, projects, onOpenTask }) {
+  return (
+    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border bg-card p-3">
+      <span className="min-w-0 overflow-hidden">
+        <span className="block truncate text-sm font-medium">{task.title}</span>
+        <span className="mt-1 block truncate text-xs text-muted-foreground">
+          {dashboardTaskProjectName(task, projects)} · {dashboardTaskCreatedAt(task)}
+        </span>
+      </span>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        disabled={!onOpenTask}
+        onClick={() => onOpenTask?.(task)}
+      >
+        <Eye />
+        View
+      </Button>
     </div>
   );
 }
@@ -654,103 +750,115 @@ function ReviewRequestList({
 
   return (
     <div className="grid gap-2">
-      {warnings.map((warning) => (
-        <div
-          key={`${warning.connectionId || warning.connectionName}:${warning.message}`}
-          className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
-        >
-          {warning.connectionName}: {warning.message}
-        </div>
-      ))}
+      <ProviderWarnings warnings={warnings} />
       {items.length === 0 ? (
         <EmptyState text={emptyText || (provider === "trello" ? "No assigned Trello cards." : `No ${displayName} review requests.`)} />
       ) : (
         <div className="flex flex-col gap-2">
-          {items.map((item) => {
-            const input = reviewRequestInput(item);
-            const canOpen = Boolean(item.url);
-            const linkedTask = item.linkedTask || null;
-            return (
-              <div
-                key={`${item.provider}:${item.externalId || item.url}`}
-                className={cn(
-                  "grid min-w-0 max-w-full grid-cols-[auto_minmax(0,1fr)] items-center gap-3 rounded-md border bg-card p-3 transition-colors sm:grid-cols-[auto_minmax(0,1fr)_auto_auto]",
-                  canOpen && "cursor-pointer hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-                )}
-                role={canOpen ? "link" : undefined}
-                tabIndex={canOpen ? 0 : undefined}
-                title={canOpen ? `Open ${provider === "trello" ? "Trello card" : "review request"}` : undefined}
-                onClick={() => openReviewRequestLink(item.url)}
-                onKeyDown={(event) => {
-                  if (!canOpen || (event.key !== "Enter" && event.key !== " ")) return;
-                  event.preventDefault();
-                  openReviewRequestLink(item.url);
-                }}
-              >
-                <span className="flex size-10 shrink-0 items-center justify-center rounded-md border bg-muted/40">
-                  {provider === "trello" ? (
-                    <SquareKanban className="size-4 text-muted-foreground" />
-                  ) : (
-                    <GitPullRequest className="size-4 text-muted-foreground" />
-                  )}
-                </span>
-                <span
-                  className="min-w-0 overflow-hidden text-left"
-                >
-                  <span className="block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm font-medium">
-                    {item.title}
-                  </span>
-                  <span className="mt-1 block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-xs text-muted-foreground">
-                    {reviewRequestSubtitle(item)}
-                  </span>
-                </span>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="col-start-2 row-start-2 w-fit sm:col-start-auto sm:row-start-auto"
-                  disabled={!canOpen}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    openReviewRequestLink(item.url);
-                  }}
-                >
-                  <ExternalLink />
-                  View
-                </Button>
-                {linkedTask ? (
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="col-start-2 row-start-3 w-fit sm:col-start-auto sm:row-start-auto"
-                    disabled={!onOpenTask}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onOpenTask?.(linkedTask);
-                    }}
-                  >
-                    <Eye />
-                    View Task
-                  </Button>
-                ) : (
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="col-start-2 row-start-3 w-fit sm:col-start-auto sm:row-start-auto"
-                    disabled={!input || !onOpenReviewRequest}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onOpenReviewRequest?.(input);
-                    }}
-                  >
-                    <Plus />
-                    Create task
-                  </Button>
-                )}
-              </div>
-            );
-          })}
+          {items.map((item) => (
+            <ReviewRequestItem
+              key={`${item.provider}:${item.externalId || item.url}`}
+              provider={provider}
+              item={item}
+              onOpenReviewRequest={onOpenReviewRequest}
+              onOpenTask={onOpenTask}
+            />
+          ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+function ProviderWarnings({ warnings }) {
+  return warnings.map((warning) => (
+    <div
+      key={`${warning.provider || "provider"}:${warning.connectionId || warning.connectionName}:${warning.message}`}
+      className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive"
+    >
+      {warning.connectionName}: {warning.message}
+    </div>
+  ));
+}
+
+function ReviewRequestItem({ provider, item, onOpenReviewRequest, onOpenTask }) {
+  const input = reviewRequestInput(item);
+  const canOpen = Boolean(item.url);
+  const linkedTask = item.linkedTask || null;
+
+  return (
+    <div
+      className={cn(
+        "grid min-w-0 max-w-full grid-cols-[auto_minmax(0,1fr)] items-center gap-3 rounded-md border bg-card p-3 transition-colors sm:grid-cols-[auto_minmax(0,1fr)_auto_auto]",
+        canOpen && "cursor-pointer hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+      )}
+      role={canOpen ? "link" : undefined}
+      tabIndex={canOpen ? 0 : undefined}
+      title={canOpen ? `Open ${provider === "trello" ? "Trello card" : "review request"}` : undefined}
+      onClick={() => openReviewRequestLink(item.url)}
+      onKeyDown={(event) => {
+        if (!canOpen || (event.key !== "Enter" && event.key !== " ")) return;
+        event.preventDefault();
+        openReviewRequestLink(item.url);
+      }}
+    >
+      <span className="flex size-10 shrink-0 items-center justify-center rounded-md border bg-muted/40">
+        {provider === "trello" ? (
+          <SquareKanban className="size-4 text-muted-foreground" />
+        ) : (
+          <GitPullRequest className="size-4 text-muted-foreground" />
+        )}
+      </span>
+      <span className="min-w-0 overflow-hidden text-left">
+        <span className="block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm font-medium">
+          {item.title}
+        </span>
+        <span className="mt-1 block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-xs text-muted-foreground">
+          {reviewRequestSubtitle(item)}
+        </span>
+      </span>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="col-start-2 row-start-2 w-fit sm:col-start-auto sm:row-start-auto"
+        disabled={!canOpen}
+        onClick={(event) => {
+          event.stopPropagation();
+          openReviewRequestLink(item.url);
+        }}
+      >
+        <ExternalLink />
+        View
+      </Button>
+      {linkedTask ? (
+        <Button
+          type="button"
+          size="sm"
+          className="col-start-2 row-start-3 w-fit sm:col-start-auto sm:row-start-auto"
+          disabled={!onOpenTask}
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpenTask?.(linkedTask);
+          }}
+        >
+          <Eye />
+          View Task
+        </Button>
+      ) : (
+        <Button
+          type="button"
+          size="sm"
+          className="col-start-2 row-start-3 w-fit sm:col-start-auto sm:row-start-auto"
+          disabled={!input || !onOpenReviewRequest}
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpenReviewRequest?.(input);
+          }}
+        >
+          <Plus />
+          Create task
+        </Button>
       )}
     </div>
   );
@@ -899,39 +1007,42 @@ export function RecentDirectoryFilesList({
       ) : (
         <div className="flex flex-col gap-2">
           {files.slice(0, 5).map((file) => (
-            <div
-              key={file.path}
-              className="flex min-w-0 max-w-full items-center gap-3 rounded-md border bg-card p-3"
-            >
-              <button
-                type="button"
-                className="flex min-w-0 flex-1 items-center gap-3 overflow-hidden text-left transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={!onOpenFile}
-                onClick={() => onOpenFile?.(file)}
-                title="Create task"
-              >
-                <RecentFilePreview file={file} />
-                <span className="min-w-0 flex-1 overflow-hidden">
-                  <span className="block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm font-medium">{file.name}</span>
-                  <span className="block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-xs text-muted-foreground">
-                    {file.directoryName} · {file.relativePath || file.path}
-                  </span>
-                </span>
-              </button>
-              <Button
-                type="button"
-                size="sm"
-                className="shrink-0"
-                onClick={() => onOpenFile?.(file)}
-                disabled={!onOpenFile}
-              >
-                <Plus />
-                Create task
-              </Button>
-            </div>
+            <RecentDirectoryFileItem key={file.path} file={file} onOpenFile={onOpenFile} />
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function RecentDirectoryFileItem({ file, onOpenFile }) {
+  return (
+    <div className="flex min-w-0 max-w-full items-center gap-3 rounded-md border bg-card p-3">
+      <button
+        type="button"
+        className="flex min-w-0 flex-1 items-center gap-3 overflow-hidden text-left transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
+        disabled={!onOpenFile}
+        onClick={() => onOpenFile?.(file)}
+        title="Create task"
+      >
+        <RecentFilePreview file={file} />
+        <span className="min-w-0 flex-1 overflow-hidden">
+          <span className="block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm font-medium">{file.name}</span>
+          <span className="block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-xs text-muted-foreground">
+            {file.directoryName} · {file.relativePath || file.path}
+          </span>
+        </span>
+      </button>
+      <Button
+        type="button"
+        size="sm"
+        className="shrink-0"
+        onClick={() => onOpenFile?.(file)}
+        disabled={!onOpenFile}
+      >
+        <Plus />
+        Create task
+      </Button>
     </div>
   );
 }
