@@ -93,6 +93,13 @@ function percent(value) {
   return `${value * 100}%`;
 }
 
+function syncTerminalScrollbackState(terminal) {
+  terminal.element?.classList.toggle(
+    "terminal-has-scrollback",
+    terminal.buffer.active.baseY > 0,
+  );
+}
+
 async function copyTextToClipboard(text) {
   if (navigator.clipboard?.writeText) {
     try {
@@ -367,6 +374,7 @@ function TerminalPane({
         event.preventDefault();
         event.stopPropagation();
         terminal.clear();
+        syncTerminalScrollbackState(terminal);
         terminal.focus();
         return false;
       }
@@ -391,6 +399,9 @@ function TerminalPane({
       );
       if (selection !== null) void copyTextToClipboard(selection);
     });
+    const writeParsedDisposable = terminal.onWriteParsed(() => {
+      syncTerminalScrollbackState(terminal);
+    });
     const cwdDisposable = terminal.parser.registerOscHandler(7, (data) => {
       const cwd = parseOsc7Cwd(data);
       if (!cwd) return false;
@@ -399,6 +410,7 @@ function TerminalPane({
     });
     const resizeObserver = new ResizeObserver(() => {
       fit.fit();
+      syncTerminalScrollbackState(terminal);
       invoke("terminal_resize", {
         tabId,
         paneId: pane.paneId,
@@ -414,10 +426,14 @@ function TerminalPane({
       dataDisposable.dispose();
       titleDisposable.dispose();
       selectionDisposable.dispose();
+      writeParsedDisposable.dispose();
       cwdDisposable.dispose();
       fileLinksDisposable.dispose();
       linkModifier.dispose();
+      terminal.element?.classList.remove("terminal-has-scrollback");
     };
+
+    syncTerminalScrollbackState(terminal);
 
     if (searchOpenRef.current && searchQueryRef.current) {
       searchAddon.findNext(searchQueryRef.current, { ...TERMINAL_SEARCH_OPTIONS, incremental: true });
@@ -530,6 +546,7 @@ function TerminalPane({
     );
     terminal.options.letterSpacing = terminalCellLetterSpacing(characterWidth, horizontalSpacing);
     fit.fit();
+    syncTerminalScrollbackState(terminal);
     terminal.refresh(0, terminal.rows - 1);
     invoke("terminal_resize", {
       tabId,
@@ -572,6 +589,7 @@ function TerminalPane({
     const terminal = terminalRef.current;
     const fit = fitRef.current;
     terminal?.clear();
+    if (terminal) syncTerminalScrollbackState(terminal);
     await attach(terminal, fit, "restart_terminal");
     focus();
   }
