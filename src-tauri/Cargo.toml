@@ -1,6 +1,6 @@
 [package]
 name = "devcrashflash-station"
-version = "0.10.0"
+version = "0.10.1"
 description = "Station by DevCrashFlash"
 authors = ["Alexander Schranz"]
 edition = "2021"
