@@ -9,6 +9,13 @@ export function aiSessionWaitingStatusFromPayload(payload) {
   return aiSessionsWaitingForInputCount(payload?.sessions) > 0;
 }
 
+export function aiSessionWaitingTerminalTabIdsFromPayload(payload) {
+  if (!Array.isArray(payload?.waitingTerminalTabIds)) return [];
+  return [...new Set(payload.waitingTerminalTabIds.filter((tabId) => (
+    typeof tabId === "string" && tabId.length > 0
+  )))];
+}
+
 export function normalizeAiSessionSnapshot(payload, now = Date.now()) {
   const refreshedAt = Number(payload?.lastRefreshedAt);
   const loadedAt = Number(payload?.loadedAt);
@@ -22,6 +29,7 @@ export function normalizeAiSessionSnapshot(payload, now = Date.now()) {
     waitingSessionCount: Number.isFinite(Number(payload?.waitingSessionCount))
       ? Math.max(0, Number(payload.waitingSessionCount))
       : aiSessionsWaitingForInputCount(sessions),
+    waitingTerminalTabIds: aiSessionWaitingTerminalTabIdsFromPayload(payload),
   };
 }
 

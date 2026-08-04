@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  aiSessionWaitingTerminalTabIdsFromPayload,
   aiSessionWaitingStatusFromPayload,
   newerAiSessionSnapshot,
   normalizeAiSessionSnapshot,
@@ -16,6 +17,21 @@ test("derives waiting status from native snapshots", () => {
   assert.equal(aiSessionWaitingStatusFromPayload(null), false);
 });
 
+test("normalizes waiting terminal tab ids independently from global waiting status", () => {
+  assert.deepEqual(aiSessionWaitingTerminalTabIdsFromPayload({
+    waitingSessionCount: 0,
+    waitingTerminalTabIds: ["terminal-2", "terminal-1", "terminal-2", "", null],
+  }), ["terminal-2", "terminal-1"]);
+  assert.deepEqual(aiSessionWaitingTerminalTabIdsFromPayload({
+    waitingSessionCount: 2,
+    waitingTerminalTabIds: "terminal-1",
+  }), []);
+  assert.equal(aiSessionWaitingStatusFromPayload({
+    waitingSessionCount: 1,
+    waitingTerminalTabIds: [],
+  }), true);
+});
+
 test("normalizes native and browser AI session snapshots", () => {
   assert.deepEqual(normalizeAiSessionSnapshot({
     sessions: [{ waitingForInput: true, children: [] }],
@@ -28,6 +44,7 @@ test("normalizes native and browser AI session snapshots", () => {
     loadedAt: 123,
     lastRefreshedAt: 123,
     waitingSessionCount: 1,
+    waitingTerminalTabIds: [],
   });
 });
 

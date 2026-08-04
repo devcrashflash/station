@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { api } from "@/lib/api";
 import {
   AI_SESSION_MONITOR_UPDATED_EVENT,
+  aiSessionWaitingTerminalTabIdsFromPayload,
   aiSessionWaitingStatusFromPayload,
 } from "@/lib/aiSessionEvents";
 import {
@@ -26,6 +27,7 @@ export function TabBar() {
   const [snapshot, setSnapshot] = useState(EMPTY_SNAPSHOT);
   const [tabDrag, setTabDrag] = useState(null);
   const [hasWaitingAiSession, setHasWaitingAiSession] = useState(false);
+  const [waitingTerminalTabIds, setWaitingTerminalTabIds] = useState([]);
   const tabBarItemsRef = useRef(null);
   const suppressActivationRef = useRef(false);
 
@@ -49,6 +51,7 @@ export function TabBar() {
     listen(AI_SESSION_MONITOR_UPDATED_EVENT, ({ payload }) => {
       if (!disposed) {
         setHasWaitingAiSession(aiSessionWaitingStatusFromPayload(payload));
+        setWaitingTerminalTabIds(aiSessionWaitingTerminalTabIdsFromPayload(payload));
       }
     }).then((cleanup) => {
       if (disposed) {
@@ -57,7 +60,10 @@ export function TabBar() {
       }
       unlisten = cleanup;
       api.latestAiSessions().then((next) => {
-        if (!disposed) setHasWaitingAiSession(aiSessionWaitingStatusFromPayload(next));
+        if (!disposed) {
+          setHasWaitingAiSession(aiSessionWaitingStatusFromPayload(next));
+          setWaitingTerminalTabIds(aiSessionWaitingTerminalTabIdsFromPayload(next));
+        }
       }).catch(console.error);
     }).catch(console.error);
     return () => {
@@ -212,6 +218,9 @@ export function TabBar() {
       <div ref={tabBarItemsRef} className="tab-bar-items">
         {snapshot.tabs.map((tab) => {
           const active = tab.id === snapshot.activeTabId;
+          const waitingForAiSession = tab.kind === "main"
+            ? hasWaitingAiSession
+            : waitingTerminalTabIds.includes(tab.id);
           const shortcutNumber = workspaceNumberForTab(snapshot, tab.id);
           return (
             <div
@@ -234,11 +243,11 @@ export function TabBar() {
                   }
                   activate(tab.id);
                 }}
-                title={tab.kind === "main" && hasWaitingAiSession
+                title={waitingForAiSession
                   ? `${tab.title} — AI session waiting for you`
                   : tab.title}
               >
-                {tab.kind === "main" && hasWaitingAiSession && (
+                {waitingForAiSession && (
                   <span
                     className="workspace-tab-waiting-dot"
                     aria-label="AI session waiting for you"

@@ -22,6 +22,7 @@ const EMPTY_RESULT = {
   loadedAt: Date.now(),
   lastRefreshedAt: null,
   waitingSessionCount: 0,
+  waitingTerminalTabIds: [],
 };
 
 export function useAiSessionMonitor({

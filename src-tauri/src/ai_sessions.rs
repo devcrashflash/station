@@ -15,7 +15,9 @@ use std::{
 use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_opener::OpenerExt;
 
-use crate::{db_error, now_millis, set_ai_session_dock_badge, AiSessionSettings, AppState};
+use crate::{
+    db_error, now_millis, set_ai_session_dock_badge, terminal_tabs, AiSessionSettings, AppState,
+};
 
 pub const AI_SESSION_MONITOR_UPDATED_EVENT: &str = "ai-session-monitor-updated";
 const AI_SESSION_MONITOR_WINDOW_HOURS: i64 = 24 * 30;
@@ -67,6 +69,7 @@ pub struct AiSessionSnapshot {
     loaded_at: i64,
     last_refreshed_at: i64,
     waiting_session_count: u32,
+    waiting_terminal_tab_ids: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -171,6 +174,24 @@ fn waiting_session_count(sessions: &[AiSession]) -> u32 {
         .count()
         .try_into()
         .unwrap_or(u32::MAX)
+}
+
+fn waiting_terminal_session_keys(sessions: &[AiSession]) -> Vec<(String, String)> {
+    fn collect(session: &AiSession, keys: &mut HashSet<(String, String)>) {
+        if session.archived_at.is_some() || !session_tree_waiting_for_input(session) {
+            return;
+        }
+        keys.insert((session.provider.clone(), session.id.clone()));
+        for child in &session.children {
+            collect(child, keys);
+        }
+    }
+
+    let mut keys = HashSet::new();
+    for session in sessions {
+        collect(session, &mut keys);
+    }
+    keys.into_iter().collect()
 }
 
 pub fn init_database(db: &Connection) -> rusqlite::Result<()> {
@@ -1426,6 +1447,12 @@ fn scan_ai_session_snapshot(
     let result = scan_ai_sessions(state.inner(), since, settings)?;
     let refreshed_at = now_millis();
     let waiting_session_count = waiting_session_count(&result.sessions);
+    let waiting_terminal_sessions = waiting_terminal_session_keys(&result.sessions);
+    let terminal_state = app.state::<terminal_tabs::TerminalTabsState>();
+    let waiting_terminal_tab_ids = terminal_tabs::matching_ai_session_tab_ids(
+        terminal_state.inner(),
+        &waiting_terminal_sessions,
+    );
     Ok(AiSessionSnapshot {
         sessions: result.sessions,
         archived_sessions: result.archived_sessions,
@@ -1433,6 +1460,7 @@ fn scan_ai_session_snapshot(
         loaded_at: refreshed_at,
         last_refreshed_at: refreshed_at,
         waiting_session_count,
+        waiting_terminal_tab_ids,
     })
 }
 
@@ -1721,6 +1749,7 @@ mod tests {
     fn snapshot(sessions: Vec<AiSession>, refreshed_at: i64) -> AiSessionSnapshot {
         AiSessionSnapshot {
             waiting_session_count: waiting_session_count(&sessions),
+            waiting_terminal_tab_ids: vec![],
             sessions,
             archived_sessions: vec![],
             warnings: vec![],
@@ -1777,6 +1806,32 @@ mod tests {
         let idle = session("idle", 100, None);
         assert_eq!(waiting_session_count(&[waiting_parent, idle]), 1);
         assert_eq!(waiting_session_count(&[]), 0);
+    }
+
+    #[test]
+    fn collects_waiting_parent_and_child_sessions_for_terminal_matching() {
+        let mut waiting_parent = session("parent", 100, None);
+        waiting_parent.children.push(AiSession {
+            waiting_for_input: true,
+            ..session("child", 100, Some("parent"))
+        });
+        let idle = session("idle", 100, None);
+        let archived = AiSession {
+            waiting_for_input: true,
+            archived_at: Some(200),
+            ..session("archived", 100, None)
+        };
+
+        let keys = waiting_terminal_session_keys(&[waiting_parent, idle, archived])
+            .into_iter()
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            keys,
+            HashSet::from([
+                ("codex".to_string(), "parent".to_string()),
+                ("codex".to_string(), "child".to_string()),
+            ])
+        );
     }
 
     #[test]

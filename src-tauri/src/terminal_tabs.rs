@@ -1084,14 +1084,20 @@ fn claude_cli_command(command: &str) -> bool {
     })
 }
 
-fn claude_command_matches_session(command: &str, session_id: &str) -> bool {
+fn claude_command_session_ids(command: &str) -> Vec<String> {
     let fields = command.split_whitespace().collect::<Vec<_>>();
-    fields.windows(2).any(|fields| {
-        matches!(fields[0], "--resume" | "-r" | "--session-id") && fields[1] == session_id
-    }) || fields.iter().any(|field| {
-        field.strip_prefix("--resume=") == Some(session_id)
-            || field.strip_prefix("--session-id=") == Some(session_id)
-    })
+    let mut session_ids = fields
+        .windows(2)
+        .filter(|fields| matches!(fields[0], "--resume" | "-r" | "--session-id"))
+        .map(|fields| fields[1].to_string())
+        .collect::<Vec<_>>();
+    session_ids.extend(fields.iter().filter_map(|field| {
+        field
+            .strip_prefix("--resume=")
+            .or_else(|| field.strip_prefix("--session-id="))
+            .map(str::to_string)
+    }));
+    session_ids
 }
 
 fn parse_claude_live_session(content: &str, process_id: u32) -> Option<String> {
@@ -1133,7 +1139,7 @@ fn process_descends_from(process_id: u32, ancestor_id: u32, parents: &HashMap<u3
     false
 }
 
-fn codex_rollout_matches_session(path: &Path, session_id: &str) -> bool {
+fn codex_rollout_session_id(path: &Path) -> Option<String> {
     let components = path
         .components()
         .filter_map(|component| component.as_os_str().to_str())
@@ -1142,7 +1148,7 @@ fn codex_rollout_matches_session(path: &Path, session_id: &str) -> bool {
         window[0] == ".codex" && matches!(window[1], "sessions" | "archived_sessions")
     });
     if !in_codex_sessions {
-        return false;
+        return None;
     }
     let Some(stem) = path
         .file_name()
@@ -1150,25 +1156,32 @@ fn codex_rollout_matches_session(path: &Path, session_id: &str) -> bool {
         .and_then(|name| name.strip_suffix(".jsonl"))
         .and_then(|name| name.strip_prefix("rollout-"))
     else {
-        return false;
+        return None;
     };
     let Some((_, time_and_session)) = stem.split_once('T') else {
-        return false;
+        return None;
     };
     let mut fields = time_and_session.splitn(4, '-');
     let has_timestamp = fields.next().is_some_and(|value| value.len() == 2)
         && fields.next().is_some_and(|value| value.len() == 2)
         && fields.next().is_some_and(|value| value.len() == 2);
-    has_timestamp && fields.next() == Some(session_id)
+    if !has_timestamp {
+        return None;
+    }
+    fields.next().map(str::to_string)
 }
 
-fn claude_transcript_matches_session(path: &Path, session_id: &str) -> bool {
-    path.components()
+fn claude_transcript_session_id(path: &Path) -> Option<String> {
+    if !path
+        .components()
         .any(|component| component.as_os_str() == "projects")
-        && path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name == format!("{session_id}.jsonl"))
+    {
+        return None;
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".jsonl"))
+        .map(str::to_string)
 }
 
 #[cfg(target_os = "macos")]
@@ -1205,48 +1218,74 @@ fn process_open_files(_process_id: u32) -> Vec<PathBuf> {
     Vec::new()
 }
 
-fn find_matching_ai_pane(
+fn find_matching_ai_panes(
     panes: &[PaneProcess],
     processes: &[ProcessInfo],
-    provider: &str,
-    session_id: &str,
+    sessions: &HashSet<(String, String)>,
     mut open_files: impl FnMut(u32) -> Vec<PathBuf>,
     mut live_claude_session: impl FnMut(u32) -> Option<String>,
-) -> Option<PaneProcess> {
+) -> Vec<PaneProcess> {
     let parents = processes
         .iter()
         .map(|process| (process.process_id, process.parent_process_id))
         .collect::<HashMap<_, _>>();
+    let mut matches = Vec::new();
     for pane in panes {
         for process in processes
             .iter()
             .filter(|process| process_descends_from(process.process_id, pane.process_id, &parents))
         {
-            let command_matches = match provider {
-                "codex" => codex_cli_command(&process.command),
-                "claude" => claude_cli_command(&process.command),
-                _ => false,
-            };
-            if !command_matches {
+            let provider = if codex_cli_command(&process.command) {
+                "codex"
+            } else if claude_cli_command(&process.command) {
+                "claude"
+            } else {
                 continue;
+            };
+            let mut detected_session_ids = if provider == "claude" {
+                claude_command_session_ids(&process.command)
+            } else {
+                Vec::new()
+            };
+            if provider == "claude" {
+                detected_session_ids.extend(live_claude_session(process.process_id));
             }
-            let session_matches = provider == "claude"
-                && (claude_command_matches_session(&process.command, session_id)
-                    || live_claude_session(process.process_id).as_deref() == Some(session_id));
-            let open_file_matches = !session_matches
-                && open_files(process.process_id)
-                    .iter()
-                    .any(|path| match provider {
-                        "codex" => codex_rollout_matches_session(path, session_id),
-                        "claude" => claude_transcript_matches_session(path, session_id),
-                        _ => false,
-                    });
-            if session_matches || open_file_matches {
-                return Some(pane.clone());
+            detected_session_ids.extend(open_files(process.process_id).iter().filter_map(|path| {
+                match provider {
+                    "codex" => codex_rollout_session_id(path),
+                    "claude" => claude_transcript_session_id(path),
+                    _ => None,
+                }
+            }));
+            if detected_session_ids
+                .iter()
+                .any(|session_id| sessions.contains(&(provider.to_string(), session_id.clone())))
+            {
+                matches.push(pane.clone());
+                break;
             }
         }
     }
-    None
+    matches
+}
+
+fn find_matching_ai_pane(
+    panes: &[PaneProcess],
+    processes: &[ProcessInfo],
+    provider: &str,
+    session_id: &str,
+    open_files: impl FnMut(u32) -> Vec<PathBuf>,
+    live_claude_session: impl FnMut(u32) -> Option<String>,
+) -> Option<PaneProcess> {
+    find_matching_ai_panes(
+        panes,
+        processes,
+        &HashSet::from([(provider.to_string(), session_id.to_string())]),
+        open_files,
+        live_claude_session,
+    )
+    .into_iter()
+    .next()
 }
 
 fn pane_processes(runtime: &TerminalTabsRuntime) -> Vec<PaneProcess> {
@@ -1286,6 +1325,52 @@ fn pane_processes(runtime: &TerminalTabsRuntime) -> Vec<PaneProcess> {
         }
     }
     panes
+}
+
+fn matching_tab_ids_in_order(panes: Vec<PaneProcess>, tab_order: &[String]) -> Vec<String> {
+    let matching_tabs = panes
+        .into_iter()
+        .map(|pane| pane.tab_id)
+        .collect::<HashSet<_>>();
+    tab_order
+        .iter()
+        .filter(|tab_id| matching_tabs.contains(*tab_id))
+        .cloned()
+        .collect()
+}
+
+pub(crate) fn matching_ai_session_tab_ids(
+    state: &TerminalTabsState,
+    sessions: &[(String, String)],
+) -> Vec<String> {
+    if sessions.is_empty() {
+        return Vec::new();
+    }
+    let (panes, tab_order) = {
+        let Ok(runtime) = state.runtime.lock() else {
+            return Vec::new();
+        };
+        (
+            pane_processes(&runtime),
+            runtime
+                .tabs
+                .iter()
+                .map(|tab| tab.id.clone())
+                .collect::<Vec<_>>(),
+        )
+    };
+    let Some(processes) = process_list() else {
+        return Vec::new();
+    };
+    let targets = sessions.iter().cloned().collect::<HashSet<_>>();
+    let matching_panes = find_matching_ai_panes(
+        &panes,
+        &processes,
+        &targets,
+        process_open_files,
+        claude_live_session_id,
+    );
+    matching_tab_ids_in_order(matching_panes, &tab_order)
 }
 
 fn focus_existing_ai_session(
@@ -3247,13 +3332,14 @@ mod tests {
         let matching = Path::new(
             "/Users/test/.codex/sessions/2026/08/03/rollout-2026-08-03T09-03-14-thread-1.jsonl",
         );
-        assert!(codex_rollout_matches_session(matching, "thread-1"));
-        assert!(!codex_rollout_matches_session(matching, "thread-2"));
-        assert!(!codex_rollout_matches_session(matching, "1"));
-        assert!(!codex_rollout_matches_session(
-            Path::new("/tmp/rollout-2026-08-03T09-03-14-thread-1.jsonl"),
-            "thread-1"
-        ));
+        assert_eq!(
+            codex_rollout_session_id(matching).as_deref(),
+            Some("thread-1")
+        );
+        assert_eq!(
+            codex_rollout_session_id(Path::new("/tmp/rollout-2026-08-03T09-03-14-thread-1.jsonl")),
+            None
+        );
     }
 
     #[test]
@@ -3314,18 +3400,17 @@ mod tests {
             "/Applications/Claude.app/Contents/MacOS/Claude"
         ));
 
-        assert!(claude_command_matches_session(
-            "claude --resume session-1",
-            "session-1"
-        ));
-        assert!(claude_command_matches_session(
-            "claude --session-id=session-1",
-            "session-1"
-        ));
-        assert!(!claude_command_matches_session(
-            "claude --resume session-10",
-            "session-1"
-        ));
+        assert_eq!(
+            claude_command_session_ids("claude --resume session-1"),
+            vec!["session-1"]
+        );
+        assert_eq!(
+            claude_command_session_ids("claude --session-id=session-1"),
+            vec!["session-1"]
+        );
+        assert!(!claude_command_session_ids("claude --resume session-10")
+            .iter()
+            .any(|session_id| session_id == "session-1"));
     }
 
     #[test]
@@ -3342,12 +3427,14 @@ mod tests {
     #[test]
     fn matches_only_exact_claude_transcript_paths() {
         let matching = Path::new("/home/test/.claude/projects/-work-app/session-1.jsonl");
-        assert!(claude_transcript_matches_session(matching, "session-1"));
-        assert!(!claude_transcript_matches_session(matching, "session"));
-        assert!(!claude_transcript_matches_session(
-            Path::new("/home/test/.claude/session-1.jsonl"),
-            "session-1"
-        ));
+        assert_eq!(
+            claude_transcript_session_id(matching).as_deref(),
+            Some("session-1")
+        );
+        assert_eq!(
+            claude_transcript_session_id(Path::new("/home/test/.claude/session-1.jsonl")),
+            None
+        );
     }
 
     #[test]
@@ -3388,6 +3475,65 @@ mod tests {
         )
         .unwrap();
         assert_eq!(original.pane_id, "original-pane");
+    }
+
+    #[test]
+    fn maps_all_matching_ai_panes_to_unique_tabs_in_visible_order() {
+        let panes = vec![
+            PaneProcess {
+                tab_id: "tab-a".into(),
+                pane_id: "codex-pane".into(),
+                process_id: 10,
+            },
+            PaneProcess {
+                tab_id: "tab-a".into(),
+                pane_id: "claude-split-pane".into(),
+                process_id: 40,
+            },
+            PaneProcess {
+                tab_id: "tab-b".into(),
+                pane_id: "unmatched-pane".into(),
+                process_id: 70,
+            },
+            PaneProcess {
+                tab_id: "tab-c".into(),
+                pane_id: "duplicate-codex-pane".into(),
+                process_id: 100,
+            },
+        ];
+        let processes = parse_process_list(
+            "10 1 -fish\n20 10 codex\n40 1 -fish\n50 40 claude --resume session-2\n70 1 -fish\n80 70 codex\n100 1 -fish\n110 100 codex\n",
+        );
+        let targets = HashSet::from([
+            ("codex".to_string(), "thread-1".to_string()),
+            ("claude".to_string(), "session-2".to_string()),
+        ]);
+        let matching = find_matching_ai_panes(
+            &panes,
+            &processes,
+            &targets,
+            |process_id| {
+                match process_id {
+                20 | 110 => vec![PathBuf::from(
+                    "/home/test/.codex/sessions/2026/08/03/rollout-2026-08-03T09-03-14-thread-1.jsonl",
+                )],
+                80 => vec![PathBuf::from(
+                    "/home/test/.codex/sessions/2026/08/03/rollout-2026-08-03T09-03-14-idle.jsonl",
+                )],
+                _ => Vec::new(),
+            }
+            },
+            |_| None,
+        );
+
+        assert_eq!(matching.len(), 3);
+        assert_eq!(
+            matching_tab_ids_in_order(matching, &["tab-b".into(), "tab-a".into(), "tab-c".into()],),
+            vec!["tab-a", "tab-c"]
+        );
+        assert!(
+            find_matching_ai_panes(&panes, &[], &targets, |_| Vec::new(), |_| None,).is_empty()
+        );
     }
 
     #[test]
