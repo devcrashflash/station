@@ -591,6 +591,18 @@ function App() {
     setSmartInboxTodos(await api.listSmartInboxTodos());
   }
 
+  async function refreshAllSmartInboxItems() {
+    const results = await Promise.allSettled([
+      refreshSmartInboxTodos(),
+      api.listTasks({ projectId: null }).then(setTasks),
+      refreshRecentDirectoryFiles(),
+    ]);
+
+    for (const result of results) {
+      if (result.status === "rejected") reportError(result.reason);
+    }
+  }
+
   async function refreshProject(projectId = selectedProjectId) {
     if (!projectId) return;
     const [taskList, resourceList, localResourceList, connectionIds] = await Promise.all([
@@ -1115,6 +1127,7 @@ function App() {
               ? undefined
               : openRecentDirectoryFile
           }
+          onRefreshAll={refreshAllSmartInboxItems}
           onRefreshRecentFiles={() => refreshRecentDirectoryFiles().catch(reportError)}
           onLoadProviderItems={(provider) => api.listSmartInboxProviderItems({ provider })}
           onSyncProviderItems={(provider) => api.syncSmartInboxProviderItems({ provider })}

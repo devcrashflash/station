@@ -35,6 +35,7 @@ export function InboxView({
   onOpenTodo,
   onDeleteTodo,
   onOpenRecentFile,
+  onRefreshAll,
   onRefreshRecentFiles,
   onLoadProviderItems,
   onSyncProviderItems,
@@ -82,6 +83,7 @@ export function InboxView({
           onOpenTodo={onOpenTodo}
           onDeleteTodo={onDeleteTodo}
           onOpenFile={onOpenRecentFile}
+          onRefreshAll={onRefreshAll}
           onRefresh={onRefreshRecentFiles}
           onLoadProviderItems={onLoadProviderItems}
           onSyncProviderItems={onSyncProviderItems}
@@ -226,6 +228,7 @@ function InboxCaptureTabs({
   onOpenTodo,
   onDeleteTodo,
   onOpenFile,
+  onRefreshAll,
   onRefresh,
   onLoadProviderItems,
   onSyncProviderItems,
@@ -261,6 +264,8 @@ function InboxCaptureTabs({
     { id: "trello", label: "Trello", count: providerItems.trello.items.length, icon: SquareKanban },
   ];
   const isProviderTab = ["github", "gitlab", "trello"].includes(activeTab);
+  const isAnyProviderSyncing = ["github", "gitlab", "trello"]
+    .some((provider) => providerItems[provider].syncing);
   const activeItems = activeTab === "all"
     ? allItems
     : activeTab === "todos"
@@ -320,6 +325,20 @@ function InboxCaptureTabs({
     setIsRefreshing(true);
     try {
       await onRefresh();
+    } finally {
+      setIsRefreshing(false);
+    }
+  }
+
+  async function refreshAll() {
+    if (!onRefreshAll || isRefreshing || isAnyProviderSyncing) return;
+
+    setIsRefreshing(true);
+    try {
+      await Promise.all([
+        onRefreshAll(),
+        ...["github", "gitlab", "trello"].map(syncProviderItems),
+      ]);
     } finally {
       setIsRefreshing(false);
     }
@@ -401,6 +420,23 @@ function InboxCaptureTabs({
           onValueChange={onActiveTabChange}
           ariaLabel="Smart inbox captures"
         />
+        {activeTab === "all" && onRefreshAll && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon-sm"
+                aria-label="Refresh all smart inbox items"
+                disabled={isRefreshing || isAnyProviderSyncing}
+                onClick={refreshAll}
+              >
+                <RefreshCw className={isRefreshing || isAnyProviderSyncing ? "animate-spin" : ""} />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Refresh all smart inbox items</TooltipContent>
+          </Tooltip>
+        )}
         {activeTab === "latest-files" && onRefresh && (
           <Tooltip>
             <TooltipTrigger asChild>
