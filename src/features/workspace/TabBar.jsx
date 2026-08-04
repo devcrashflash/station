@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { emit, listen } from "@tauri-apps/api/event";
+import { listen } from "@tauri-apps/api/event";
 
+import { api } from "@/lib/api";
 import {
-  AI_SESSION_WAITING_STATUS_EVENT,
-  AI_SESSION_WAITING_STATUS_REQUEST_EVENT,
+  AI_SESSION_MONITOR_UPDATED_EVENT,
   aiSessionWaitingStatusFromPayload,
 } from "@/lib/aiSessionEvents";
 import {
@@ -46,7 +46,7 @@ export function TabBar() {
   useEffect(() => {
     let disposed = false;
     let unlisten = null;
-    listen(AI_SESSION_WAITING_STATUS_EVENT, ({ payload }) => {
+    listen(AI_SESSION_MONITOR_UPDATED_EVENT, ({ payload }) => {
       if (!disposed) {
         setHasWaitingAiSession(aiSessionWaitingStatusFromPayload(payload));
       }
@@ -56,7 +56,9 @@ export function TabBar() {
         return;
       }
       unlisten = cleanup;
-      emit(AI_SESSION_WAITING_STATUS_REQUEST_EVENT).catch(console.error);
+      api.latestAiSessions().then((next) => {
+        if (!disposed) setHasWaitingAiSession(aiSessionWaitingStatusFromPayload(next));
+      }).catch(console.error);
     }).catch(console.error);
     return () => {
       disposed = true;

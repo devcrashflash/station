@@ -674,7 +674,7 @@ function AiSessionSettingsTab({ settings, onSave }) {
               disabled={isSaving}
             />
             <p className="text-xs text-muted-foreground">
-              Used everywhere else so waiting sessions can notify you.
+              Used whenever AI Agents is not foreground. Monitoring continues while Station runs.
             </p>
           </Field>
         </div>

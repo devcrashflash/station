@@ -13,7 +13,6 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
-#[cfg(target_os = "macos")]
 use tauri::Emitter;
 use tauri::Manager;
 #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
@@ -1250,8 +1249,7 @@ fn default_ai_session_background_refresh_interval() -> u64 {
     5
 }
 
-#[tauri::command]
-fn set_ai_session_dock_badge(app: tauri::AppHandle, count: u32) -> Result<(), String> {
+pub(crate) fn set_ai_session_dock_badge(app: tauri::AppHandle, count: u32) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         let window = app
@@ -1574,9 +1572,22 @@ pub fn run() {
             });
             app.manage(programs::ProgramCatalog::default());
             app.manage(terminal_tabs_state);
+            let ai_session_settings = {
+                let state = app.state::<AppState>();
+                let db = state
+                    .db
+                    .lock()
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                load_ai_session_settings(&db).map_err(std::io::Error::other)?
+            };
+            let ai_session_monitor =
+                ai_sessions::start_monitor(app.handle().clone(), ai_session_settings);
+            app.manage(ai_session_monitor);
             #[cfg(target_os = "macos")]
             install_workspace_menu(app)?;
             terminal_tabs::setup_workspace_window(app)?;
+            ai_sessions::setup_monitor_window_events(app.handle())
+                .map_err(std::io::Error::other)?;
             #[cfg(not(target_os = "macos"))]
             let app_handle = app.handle().clone();
             #[cfg(not(target_os = "macos"))]
@@ -1598,8 +1609,9 @@ pub fn run() {
             programs::list_programs,
             programs::program_icon,
             programs::launch_program,
-            ai_sessions::list_ai_sessions,
-            set_ai_session_dock_badge,
+            ai_sessions::latest_ai_sessions,
+            ai_sessions::refresh_ai_sessions,
+            ai_sessions::set_ai_session_monitor_view_active,
             ai_sessions::archive_ai_session,
             ai_sessions::restore_ai_session,
             ai_sessions::open_ai_session_desktop,
@@ -2410,6 +2422,7 @@ fn list_ai_session_settings(
 #[tauri::command]
 fn save_ai_session_settings(
     state: tauri::State<'_, AppState>,
+    monitor: tauri::State<'_, ai_sessions::AiSessionMonitorHandle>,
     mut input: AiSessionSettings,
 ) -> Result<AiSessionSettings, String> {
     input.foreground_refresh_interval_seconds =
@@ -2417,8 +2430,11 @@ fn save_ai_session_settings(
     input.background_refresh_interval_seconds =
         normalize_ai_session_background_refresh_interval(input.background_refresh_interval_seconds);
     let value = serde_json::to_string(&input).map_err(db_error)?;
-    let db = state.db.lock().map_err(db_error)?;
-    set_app_setting(&db, AI_SESSION_SETTINGS_KEY, Some(&value)).map_err(db_error)?;
+    {
+        let db = state.db.lock().map_err(db_error)?;
+        set_app_setting(&db, AI_SESSION_SETTINGS_KEY, Some(&value)).map_err(db_error)?;
+    }
+    monitor.update_settings(input);
     Ok(input)
 }
 

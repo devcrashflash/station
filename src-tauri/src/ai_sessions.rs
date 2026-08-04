@@ -7,11 +7,18 @@ use std::{
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::Command,
+    sync::{Arc, Condvar, Mutex},
+    thread,
     time::UNIX_EPOCH,
+    time::{Duration, Instant},
 };
+use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_opener::OpenerExt;
 
-use crate::{db_error, now_millis, AiSessionSettings, AppState};
+use crate::{db_error, now_millis, set_ai_session_dock_badge, AiSessionSettings, AppState};
+
+pub const AI_SESSION_MONITOR_UPDATED_EVENT: &str = "ai-session-monitor-updated";
+const AI_SESSION_MONITOR_WINDOW_HOURS: i64 = 24 * 30;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -49,6 +56,121 @@ pub struct AiSessionList {
     sessions: Vec<AiSession>,
     archived_sessions: Vec<AiSession>,
     warnings: Vec<AiSessionProviderWarning>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiSessionSnapshot {
+    sessions: Vec<AiSession>,
+    archived_sessions: Vec<AiSession>,
+    warnings: Vec<AiSessionProviderWarning>,
+    loaded_at: i64,
+    last_refreshed_at: i64,
+    waiting_session_count: u32,
+}
+
+#[derive(Debug)]
+struct AiSessionMonitorRuntime {
+    settings: AiSessionSettings,
+    view_active: bool,
+    window_foreground: bool,
+    requested_generation: u64,
+    completed_generation: u64,
+    latest: Option<AiSessionSnapshot>,
+    last_error: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct AiSessionMonitorHandle {
+    shared: Arc<(Mutex<AiSessionMonitorRuntime>, Condvar)>,
+}
+
+impl AiSessionMonitorHandle {
+    fn polling_interval(runtime: &AiSessionMonitorRuntime) -> Duration {
+        Duration::from_secs(ai_session_polling_interval_seconds(
+            &runtime.settings,
+            runtime.view_active && runtime.window_foreground,
+        ))
+    }
+
+    fn request_refresh(&self) -> Result<AiSessionSnapshot, String> {
+        let (lock, wake) = &*self.shared;
+        let mut runtime = lock.lock().map_err(db_error)?;
+        runtime.requested_generation = runtime.requested_generation.saturating_add(1);
+        let requested_generation = runtime.requested_generation;
+        wake.notify_all();
+        while runtime.completed_generation < requested_generation {
+            runtime = wake.wait(runtime).map_err(db_error)?;
+        }
+        match &runtime.last_error {
+            Some(error) => Err(error.clone()),
+            None => runtime
+                .latest
+                .clone()
+                .ok_or_else(|| "AI session refresh did not produce a snapshot.".to_string()),
+        }
+    }
+
+    fn latest_or_refresh(&self) -> Result<AiSessionSnapshot, String> {
+        let latest = {
+            let (lock, _) = &*self.shared;
+            lock.lock().map_err(db_error)?.latest.clone()
+        };
+        match latest {
+            Some(snapshot) => Ok(snapshot),
+            None => self.request_refresh(),
+        }
+    }
+
+    pub(crate) fn update_settings(&self, settings: AiSessionSettings) {
+        let (lock, wake) = &*self.shared;
+        if let Ok(mut runtime) = lock.lock() {
+            runtime.settings = settings;
+            runtime.requested_generation = runtime.requested_generation.saturating_add(1);
+            wake.notify_all();
+        }
+    }
+
+    fn update_view_active(&self, active: bool) {
+        let (lock, wake) = &*self.shared;
+        if let Ok(mut runtime) = lock.lock() {
+            if runtime.view_active != active {
+                runtime.view_active = active;
+                wake.notify_all();
+            }
+        }
+    }
+
+    fn update_window_foreground(&self, foreground: bool) {
+        let (lock, wake) = &*self.shared;
+        if let Ok(mut runtime) = lock.lock() {
+            if runtime.window_foreground != foreground {
+                runtime.window_foreground = foreground;
+                wake.notify_all();
+            }
+        }
+    }
+}
+
+fn ai_session_polling_interval_seconds(settings: &AiSessionSettings, foreground: bool) -> u64 {
+    if foreground && settings.foreground_refresh_interval_seconds > 0 {
+        settings.foreground_refresh_interval_seconds
+    } else {
+        settings.background_refresh_interval_seconds
+    }
+}
+
+fn session_tree_waiting_for_input(session: &AiSession) -> bool {
+    session.waiting_for_input || session.children.iter().any(session_tree_waiting_for_input)
+}
+
+fn waiting_session_count(sessions: &[AiSession]) -> u32 {
+    sessions
+        .iter()
+        .filter(|session| session.archived_at.is_none() && session_tree_waiting_for_input(session))
+        .count()
+        .try_into()
+        .unwrap_or(u32::MAX)
 }
 
 pub fn init_database(db: &Connection) -> rusqlite::Result<()> {
@@ -1261,9 +1383,8 @@ fn reconcile_archived_sessions(
     Ok((sessions, archived_sessions))
 }
 
-#[tauri::command]
-pub fn list_ai_sessions(
-    state: tauri::State<'_, AppState>,
+fn scan_ai_sessions(
+    state: &AppState,
     since: i64,
     settings: AiSessionSettings,
 ) -> Result<AiSessionList, String> {
@@ -1293,6 +1414,219 @@ pub fn list_ai_sessions(
         archived_sessions,
         warnings,
     })
+}
+
+fn scan_ai_session_snapshot(
+    app: &tauri::AppHandle,
+    settings: AiSessionSettings,
+) -> Result<AiSessionSnapshot, String> {
+    let requested_at = now_millis();
+    let since = requested_at - AI_SESSION_MONITOR_WINDOW_HOURS * 3_600_000;
+    let state = app.state::<AppState>();
+    let result = scan_ai_sessions(state.inner(), since, settings)?;
+    let refreshed_at = now_millis();
+    let waiting_session_count = waiting_session_count(&result.sessions);
+    Ok(AiSessionSnapshot {
+        sessions: result.sessions,
+        archived_sessions: result.archived_sessions,
+        warnings: result.warnings,
+        loaded_at: refreshed_at,
+        last_refreshed_at: refreshed_at,
+        waiting_session_count,
+    })
+}
+
+fn publish_snapshot(app: &tauri::AppHandle, snapshot: &AiSessionSnapshot) {
+    if let Err(error) = set_ai_session_dock_badge(app.clone(), snapshot.waiting_session_count) {
+        eprintln!("Could not update AI session dock badge: {error}");
+    }
+    if let Err(error) = app.emit(AI_SESSION_MONITOR_UPDATED_EVENT, snapshot) {
+        eprintln!("Could not publish AI session monitor update: {error}");
+    }
+}
+
+fn complete_monitor_attempt(
+    runtime: &mut AiSessionMonitorRuntime,
+    completed_generation: u64,
+    result: Result<AiSessionSnapshot, String>,
+) -> Option<AiSessionSnapshot> {
+    runtime.completed_generation = completed_generation;
+    match result {
+        Ok(snapshot) => {
+            runtime.latest = Some(snapshot.clone());
+            runtime.last_error = None;
+            Some(snapshot)
+        }
+        Err(error) => {
+            runtime.last_error = Some(error);
+            None
+        }
+    }
+}
+
+fn run_monitor(app: tauri::AppHandle, handle: AiSessionMonitorHandle) {
+    let mut last_attempt_at: Option<Instant> = None;
+    loop {
+        let (settings, started_generation) = {
+            let (lock, wake) = &*handle.shared;
+            let mut runtime = match lock.lock() {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!("AI session monitor state is unavailable: {error}");
+                    return;
+                }
+            };
+            loop {
+                let requested = runtime.requested_generation > runtime.completed_generation;
+                let interval = AiSessionMonitorHandle::polling_interval(&runtime);
+                let due = last_attempt_at
+                    .map(|attempt| attempt.elapsed() >= interval)
+                    .unwrap_or(true);
+                if requested || due {
+                    break (runtime.settings, runtime.requested_generation);
+                }
+                let remaining = interval.saturating_sub(
+                    last_attempt_at
+                        .map(|attempt| attempt.elapsed())
+                        .unwrap_or_default(),
+                );
+                let waited = wake.wait_timeout(runtime, remaining);
+                match waited {
+                    Ok((next_runtime, _)) => runtime = next_runtime,
+                    Err(error) => {
+                        eprintln!("AI session monitor wait failed: {error}");
+                        return;
+                    }
+                }
+            }
+        };
+
+        let result = scan_ai_session_snapshot(&app, settings);
+        last_attempt_at = Some(Instant::now());
+        {
+            let (lock, wake) = &*handle.shared;
+            let mut runtime = match lock.lock() {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!("AI session monitor state is unavailable: {error}");
+                    return;
+                }
+            };
+            let published = if runtime.settings == settings {
+                if let Err(error) = &result {
+                    eprintln!("Could not refresh AI sessions in the background: {error}");
+                }
+                let completed_generation = runtime.requested_generation;
+                complete_monitor_attempt(&mut runtime, completed_generation, result)
+            } else {
+                runtime.completed_generation = started_generation;
+                None
+            };
+            wake.notify_all();
+            drop(runtime);
+            if let Some(snapshot) = published {
+                publish_snapshot(&app, &snapshot);
+            }
+        }
+    }
+}
+
+pub fn start_monitor(app: tauri::AppHandle, settings: AiSessionSettings) -> AiSessionMonitorHandle {
+    let window_foreground = app
+        .get_window("main")
+        .map(|window| {
+            window.is_visible().unwrap_or(false)
+                && !window.is_minimized().unwrap_or(false)
+                && window.is_focused().unwrap_or(false)
+        })
+        .unwrap_or(false);
+    let handle = AiSessionMonitorHandle {
+        shared: Arc::new((
+            Mutex::new(AiSessionMonitorRuntime {
+                settings,
+                view_active: false,
+                window_foreground,
+                requested_generation: 0,
+                completed_generation: 0,
+                latest: None,
+                last_error: None,
+            }),
+            Condvar::new(),
+        )),
+    };
+    let worker_handle = handle.clone();
+    thread::Builder::new()
+        .name("ai-session-monitor".to_string())
+        .spawn(move || run_monitor(app, worker_handle))
+        .expect("could not start AI session monitor");
+    handle
+}
+
+fn main_window_is_foreground(window: &tauri::Window) -> bool {
+    window.is_visible().unwrap_or(false)
+        && !window.is_minimized().unwrap_or(false)
+        && window.is_focused().unwrap_or(false)
+}
+
+pub fn setup_monitor_window_events(app: &tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_window("main")
+        .ok_or_else(|| "Could not find the main application window.".to_string())?;
+    let monitor = app.state::<AiSessionMonitorHandle>().inner().clone();
+    monitor.update_window_foreground(main_window_is_foreground(&window));
+    let latest = monitor
+        .shared
+        .0
+        .lock()
+        .ok()
+        .and_then(|runtime| runtime.latest.clone());
+    if let Some(snapshot) = latest {
+        publish_snapshot(app, &snapshot);
+    }
+    let observed_window = window.clone();
+    window.on_window_event(move |event| {
+        if matches!(
+            event,
+            WindowEvent::Focused(_)
+                | WindowEvent::Resized(_)
+                | WindowEvent::ScaleFactorChanged { .. }
+                | WindowEvent::Destroyed
+        ) {
+            monitor.update_window_foreground(
+                !matches!(event, WindowEvent::Destroyed)
+                    && main_window_is_foreground(&observed_window),
+            );
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn latest_ai_sessions(
+    monitor: tauri::State<'_, AiSessionMonitorHandle>,
+) -> Result<AiSessionSnapshot, String> {
+    let monitor = monitor.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || monitor.latest_or_refresh())
+        .await
+        .map_err(db_error)?
+}
+
+#[tauri::command]
+pub async fn refresh_ai_sessions(
+    monitor: tauri::State<'_, AiSessionMonitorHandle>,
+) -> Result<AiSessionSnapshot, String> {
+    let monitor = monitor.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || monitor.request_refresh())
+        .await
+        .map_err(db_error)?
+}
+
+#[tauri::command]
+pub fn set_ai_session_monitor_view_active(
+    monitor: tauri::State<'_, AiSessionMonitorHandle>,
+    active: bool,
+) {
+    monitor.update_view_active(active);
 }
 
 #[tauri::command]
@@ -1382,6 +1716,113 @@ mod tests {
             open_targets: Vec::new(),
             children: Vec::new(),
         }
+    }
+
+    fn snapshot(sessions: Vec<AiSession>, refreshed_at: i64) -> AiSessionSnapshot {
+        AiSessionSnapshot {
+            waiting_session_count: waiting_session_count(&sessions),
+            sessions,
+            archived_sessions: vec![],
+            warnings: vec![],
+            loaded_at: refreshed_at,
+            last_refreshed_at: refreshed_at,
+        }
+    }
+
+    fn monitor_runtime(settings: AiSessionSettings) -> AiSessionMonitorRuntime {
+        AiSessionMonitorRuntime {
+            settings,
+            view_active: false,
+            window_foreground: false,
+            requested_generation: 0,
+            completed_generation: 0,
+            latest: None,
+            last_error: None,
+        }
+    }
+
+    fn monitor_handle(settings: AiSessionSettings) -> AiSessionMonitorHandle {
+        AiSessionMonitorHandle {
+            shared: Arc::new((Mutex::new(monitor_runtime(settings)), Condvar::new())),
+        }
+    }
+
+    #[test]
+    fn selects_native_foreground_and_background_refresh_intervals() {
+        let settings = AiSessionSettings {
+            foreground_refresh_interval_seconds: 15,
+            background_refresh_interval_seconds: 60,
+            ..AiSessionSettings::default()
+        };
+        assert_eq!(ai_session_polling_interval_seconds(&settings, true), 15);
+        assert_eq!(ai_session_polling_interval_seconds(&settings, false), 60);
+
+        let foreground_off = AiSessionSettings {
+            foreground_refresh_interval_seconds: 0,
+            ..settings
+        };
+        assert_eq!(
+            ai_session_polling_interval_seconds(&foreground_off, true),
+            60
+        );
+    }
+
+    #[test]
+    fn counts_waiting_top_level_session_trees_for_badges() {
+        let mut waiting_parent = session("parent", 100, None);
+        waiting_parent.children.push(AiSession {
+            waiting_for_input: true,
+            ..session("child", 100, Some("parent"))
+        });
+        let idle = session("idle", 100, None);
+        assert_eq!(waiting_session_count(&[waiting_parent, idle]), 1);
+        assert_eq!(waiting_session_count(&[]), 0);
+    }
+
+    #[test]
+    fn settings_and_foreground_changes_wake_and_reconfigure_monitor_state() {
+        let handle = monitor_handle(AiSessionSettings::default());
+        handle.update_view_active(true);
+        handle.update_window_foreground(true);
+        let settings = AiSessionSettings {
+            foreground_refresh_interval_seconds: 30,
+            background_refresh_interval_seconds: 300,
+            ..AiSessionSettings::default()
+        };
+        handle.update_settings(settings);
+
+        let runtime = handle.shared.0.lock().unwrap();
+        assert!(runtime.view_active);
+        assert!(runtime.window_foreground);
+        assert_eq!(runtime.settings, settings);
+        assert_eq!(runtime.requested_generation, 1);
+        assert_eq!(
+            AiSessionMonitorHandle::polling_interval(&runtime),
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn monitor_attempts_complete_coalesced_requests_and_retain_last_success_on_failure() {
+        let mut runtime = monitor_runtime(AiSessionSettings::default());
+        runtime.requested_generation = 3;
+        let successful = snapshot(vec![session("one", 100, None)], 100);
+        assert_eq!(
+            complete_monitor_attempt(&mut runtime, 3, Ok(successful.clone())),
+            Some(successful.clone())
+        );
+        assert_eq!(runtime.completed_generation, 3);
+        assert_eq!(runtime.latest, Some(successful.clone()));
+        assert_eq!(runtime.last_error, None);
+
+        runtime.requested_generation = 4;
+        assert_eq!(
+            complete_monitor_attempt(&mut runtime, 4, Err("scan failed".to_string())),
+            None
+        );
+        assert_eq!(runtime.completed_generation, 4);
+        assert_eq!(runtime.latest, Some(successful));
+        assert_eq!(runtime.last_error.as_deref(), Some("scan failed"));
     }
 
     #[test]

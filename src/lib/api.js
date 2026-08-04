@@ -113,9 +113,14 @@ export const api = {
   saveAiSessionSettings: (payload) =>
     call("save_ai_session_settings", { input: payload }, () => local.saveAiSessionSettings(payload)),
   listAiSessions: ({ since, settings }) =>
-    call("list_ai_sessions", { since, settings: normalizeAiSessionSettings(settings) }, local.listAiSessions),
-  setAiSessionDockBadgeCount: ({ count }) =>
-    call("set_ai_session_dock_badge", { count }, () => null),
+    call("refresh_ai_sessions", {}, () => local.listAiSessions({ since, settings })),
+  latestAiSessions: ({ since, settings } = {}) =>
+    call("latest_ai_sessions", {}, () => local.listAiSessions({
+      since: since ?? Date.now() - 30 * 24 * 3_600_000,
+      settings: normalizeAiSessionSettings(settings),
+    })),
+  setAiSessionMonitorViewActive: ({ active }) =>
+    call("set_ai_session_monitor_view_active", { active }, () => null),
   archiveAiSession: ({ session }) =>
     call("archive_ai_session", { session }, () => local.archiveAiSession(session)),
   restoreAiSession: ({ provider, sessionId }) =>

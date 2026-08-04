@@ -398,6 +398,11 @@ test("local fallback archives, upserts, lists, validates, and restores AI sessio
   assert.equal(listed.archivedSessions.length, 1);
   assert.equal(listed.archivedSessions[0].title, "Updated");
   assert.equal(listed.archivedSessions[0].archiveScope, "station");
+  assert.deepEqual(
+    (await api.latestAiSessions()).archivedSessions.map(({ id }) => id),
+    ["session-1"],
+  );
+  assert.equal(await api.setAiSessionMonitorViewActive({ active: true }), null);
 
   await assert.rejects(api.archiveAiSession({
     session: { ...session, id: "bad;id" },

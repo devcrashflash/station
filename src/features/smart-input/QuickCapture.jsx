@@ -29,9 +29,10 @@ import {
   normalizeAiSessionSettings,
 } from "@/lib/aiSessions";
 import {
-  AI_SESSION_WAITING_STATUS_EVENT,
-  AI_SESSION_WAITING_STATUS_REQUEST_EVENT,
+  AI_SESSION_MONITOR_UPDATED_EVENT,
   aiSessionWaitingStatusFromPayload,
+  newerAiSessionSnapshot,
+  normalizeAiSessionSnapshot,
 } from "@/lib/aiSessionEvents";
 import { isWorkspaceShortcut } from "@/lib/workspaceTabs";
 import { shortcutModifier } from "@/lib/keyboardShortcut";
@@ -107,7 +108,7 @@ export function QuickCapture() {
       });
       if (agentLoadRun.current !== run) return;
       setAgentSettings(settings);
-      setAgentResult({ ...result, loadedAt: Date.now() });
+      setAgentResult(normalizeAiSessionSnapshot(result));
     } catch (loadError) {
       if (agentLoadRun.current === run) setError(loadError?.message || String(loadError));
     } finally {
@@ -211,9 +212,11 @@ export function QuickCapture() {
   useEffect(() => {
     let disposed = false;
     let unlisten = null;
-    listen(AI_SESSION_WAITING_STATUS_EVENT, ({ payload }) => {
+    listen(AI_SESSION_MONITOR_UPDATED_EVENT, ({ payload }) => {
       if (!disposed) {
         setHasWaitingAiSession(aiSessionWaitingStatusFromPayload(payload));
+        const next = normalizeAiSessionSnapshot(payload);
+        setAgentResult((current) => newerAiSessionSnapshot(current, next));
       }
     }).then((cleanup) => {
       if (disposed) {
@@ -221,7 +224,14 @@ export function QuickCapture() {
         return;
       }
       unlisten = cleanup;
-      emit(AI_SESSION_WAITING_STATUS_REQUEST_EVENT).catch(console.error);
+      api.latestAiSessions().then((next) => {
+        if (disposed) return;
+        setHasWaitingAiSession(aiSessionWaitingStatusFromPayload(next));
+        setAgentResult((current) => newerAiSessionSnapshot(
+          current,
+          normalizeAiSessionSnapshot(next),
+        ));
+      }).catch(console.error);
     }).catch(console.error);
     return () => {
       disposed = true;
