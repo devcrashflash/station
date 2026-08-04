@@ -572,7 +572,11 @@ body.terminal-window #root {
   flex-direction: column;
   justify-content: flex-start;
   height: 100%;
-  padding: 2px 0;
+  padding: 2px 0 4px;
+}
+
+.terminal-pane-split-below .terminal-host .xterm {
+  padding-bottom: 6px;
 }
 
 .terminal-host .xterm.terminal-has-scrollback {

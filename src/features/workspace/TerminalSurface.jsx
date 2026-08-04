@@ -14,6 +14,7 @@ import {
   copyableTerminalSelection,
   flattenPaneLayout,
   nextTerminalFontZoomOffset,
+  paneHasHorizontalSplitBelow,
   paneIds,
   parseOsc7Cwd,
   terminalFontSizeWithZoom,
@@ -185,6 +186,7 @@ function TerminalPane({
   active,
   focused,
   titled,
+  splitBelow,
   bounds,
   dragging,
   onMoveStart,
@@ -554,7 +556,7 @@ function TerminalPane({
       cols: terminal.cols,
       rows: terminal.rows,
     }).catch(() => {});
-  }, [fontFamily, fontWeight, fontStyle, fontSize, lineHeight, horizontalSpacing, scrollbackLines, pane.paneId, tabId]);
+  }, [fontFamily, fontWeight, fontStyle, fontSize, lineHeight, horizontalSpacing, scrollbackLines, splitBelow, pane.paneId, tabId]);
 
   useEffect(() => {
     if (!focused) return;
@@ -596,7 +598,7 @@ function TerminalPane({
 
   return (
     <section
-      className={`terminal-pane ${titled ? "terminal-pane-titled" : ""} ${focused ? "terminal-pane-focused" : ""} ${dragging ? "terminal-pane-drag-source" : ""}`}
+      className={`terminal-pane ${titled ? "terminal-pane-titled" : ""} ${splitBelow ? "terminal-pane-split-below" : ""} ${focused ? "terminal-pane-focused" : ""} ${dragging ? "terminal-pane-drag-source" : ""}`}
       onPointerDown={focus}
       data-pane-id={pane.paneId}
       style={{
@@ -961,6 +963,7 @@ function TerminalTabSurface({
           bounds={bounds}
           focused={active && pane.paneId === layout.focusedPaneId}
           titled={panesAreSplit}
+          splitBelow={paneHasHorizontalSplitBelow(bounds, flattened.splits)}
           dragging={pane.paneId === paneDrag?.sourcePaneId}
           onMoveStart={startPaneMove}
           searchOpen={searchTarget?.tabId === tabId && searchTarget?.paneId === pane.paneId}
