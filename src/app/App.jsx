@@ -53,7 +53,7 @@ import {
 } from "@/lib/ocr";
 import { DEFAULT_PROJECT_COLOR } from "@/lib/projectAvatar";
 import { quickCaptureTitle } from "@/lib/quickCapture";
-import { parseSmartInput } from "@/lib/smartInputParser";
+import { parseSmartInboxTodo, parseSmartInput } from "@/lib/smartInputParser";
 import { DEFAULT_TERMINAL_SHORTCUTS } from "@/lib/terminalShortcuts";
 import { useTheme } from "@/lib/theme";
 import { isWorkspaceShortcut, workspaceTabsApi } from "@/lib/workspaceTabs";
@@ -709,10 +709,11 @@ function App() {
 
   async function promoteSmartInboxTodo(todo) {
     if (todo.kind !== "file") {
+      const input = todo.rawText || todo.title;
       await submitSmartInput(
-        todo.rawText || todo.title,
+        input,
         null,
-        textParsedPayload(todo.title),
+        toParsedPayload(parseSmartInboxTodo(todo)),
         todo.id,
       );
       return;

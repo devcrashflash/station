@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseSmartInput, plainTextTaskBody } from "./smartInputParser.js";
+import {
+  parseSmartInboxTodo,
+  parseSmartInput,
+  plainTextTaskBody,
+} from "./smartInputParser.js";
 
 test("parses plain text as a task", () => {
   assert.deepEqual(parseSmartInput("Review the onboarding PR"), {
@@ -82,6 +86,57 @@ test("parses generic urls as external task links", () => {
   assert.equal(parsed.provider, null);
   assert.equal(parsed.externalId, "https://example.com/docs/auth-flow");
   assert.equal(parsed.title, "auth flow");
+});
+
+test("preserves GitHub issue metadata when promoting a smart inbox todo", () => {
+  const url = "https://github.com/sulu/sulu/issues/8965";
+  const parsed = parseSmartInboxTodo({
+    kind: "text",
+    title: url,
+    rawText: url,
+  });
+
+  assert.deepEqual(parsed, {
+    kind: "github_issue",
+    provider: "github",
+    externalId: "sulu/sulu#8965",
+    url,
+    repoUrl: "https://github.com/sulu/sulu",
+    title: "sulu/sulu issue #8965",
+  });
+});
+
+test("preserves Trello card metadata when promoting a smart inbox todo", () => {
+  const url = "https://trello.com/c/cJgHKeFH/196-make-email-required-when-created-contact-via-invite-wizard";
+  const parsed = parseSmartInboxTodo({
+    kind: "text",
+    title: url,
+    rawText: url,
+  });
+
+  assert.deepEqual(parsed, {
+    kind: "trello_card",
+    provider: "trello",
+    externalId: "cJgHKeFH",
+    url,
+    title: "196 make email required when created contact via invite wizard",
+  });
+});
+
+test("preserves an edited title when promoting a plain-text smart inbox todo", () => {
+  const parsed = parseSmartInboxTodo({
+    kind: "text",
+    title: "Edited task title",
+    rawText: "Original task title\n\nAdd tests",
+  });
+
+  assert.deepEqual(parsed, {
+    kind: "text",
+    provider: null,
+    externalId: null,
+    url: null,
+    title: "Edited task title",
+  });
 });
 
 test("removes a matching opening title from a plain-text task body", () => {
