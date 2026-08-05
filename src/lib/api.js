@@ -119,6 +119,12 @@ export const api = {
       since: since ?? Date.now() - 30 * 24 * 3_600_000,
       settings: normalizeAiSessionSettings(settings),
     })),
+  latestAiSessionStatus: () =>
+    call("latest_ai_session_status", {}, () => ({
+      lastRefreshedAt: Date.now(),
+      waitingSessionCount: 0,
+      waitingTerminalTabIds: [],
+    })),
   setAiSessionMonitorViewActive: ({ active }) =>
     call("set_ai_session_monitor_view_active", { active }, () => null),
   archiveAiSession: ({ session }) =>

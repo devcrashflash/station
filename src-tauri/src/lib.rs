@@ -1610,6 +1610,7 @@ pub fn run() {
             programs::program_icon,
             programs::launch_program,
             ai_sessions::latest_ai_sessions,
+            ai_sessions::latest_ai_session_status,
             ai_sessions::refresh_ai_sessions,
             ai_sessions::set_ai_session_monitor_view_active,
             ai_sessions::archive_ai_session,

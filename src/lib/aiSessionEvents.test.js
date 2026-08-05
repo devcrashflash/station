@@ -2,11 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  aiSessionPayloadIncludesSessions,
   aiSessionWaitingTerminalTabIdsFromPayload,
   aiSessionWaitingStatusFromPayload,
   newerAiSessionSnapshot,
   normalizeAiSessionSnapshot,
 } from "./aiSessionEvents.js";
+
+test("distinguishes full snapshots from compact monitor status", () => {
+  assert.equal(aiSessionPayloadIncludesSessions({ sessions: [] }), true);
+  assert.equal(aiSessionPayloadIncludesSessions({ waitingSessionCount: 2 }), false);
+  assert.equal(aiSessionPayloadIncludesSessions(null), false);
+});
 
 test("derives waiting status from native snapshots", () => {
   assert.equal(aiSessionWaitingStatusFromPayload({ waitingSessionCount: 2 }), true);

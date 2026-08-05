@@ -4,7 +4,8 @@ use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
-    io::{BufRead, BufReader},
+    hash::{DefaultHasher, Hash, Hasher},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::Command,
     sync::{Arc, Condvar, Mutex},
@@ -72,6 +73,24 @@ pub struct AiSessionSnapshot {
     waiting_terminal_tab_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiSessionMonitorStatus {
+    last_refreshed_at: i64,
+    waiting_session_count: u32,
+    waiting_terminal_tab_ids: Vec<String>,
+}
+
+impl From<&AiSessionSnapshot> for AiSessionMonitorStatus {
+    fn from(snapshot: &AiSessionSnapshot) -> Self {
+        Self {
+            last_refreshed_at: snapshot.last_refreshed_at,
+            waiting_session_count: snapshot.waiting_session_count,
+            waiting_terminal_tab_ids: snapshot.waiting_terminal_tab_ids.clone(),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct AiSessionMonitorRuntime {
     settings: AiSessionSettings,
@@ -122,6 +141,23 @@ impl AiSessionMonitorHandle {
         match latest {
             Some(snapshot) => Ok(snapshot),
             None => self.request_refresh(),
+        }
+    }
+
+    fn latest_status_or_refresh(&self) -> Result<AiSessionMonitorStatus, String> {
+        let status = {
+            let (lock, _) = &*self.shared;
+            lock.lock()
+                .map_err(db_error)?
+                .latest
+                .as_ref()
+                .map(AiSessionMonitorStatus::from)
+        };
+        match status {
+            Some(status) => Ok(status),
+            None => self
+                .request_refresh()
+                .map(|snapshot| AiSessionMonitorStatus::from(&snapshot)),
         }
     }
 
@@ -267,6 +303,15 @@ fn millis(value: i64) -> i64 {
 fn file_millis(path: &Path) -> i64 {
     fs::metadata(path)
         .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn file_created_millis(metadata: &fs::Metadata) -> i64 {
+    metadata
+        .created()
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis() as i64)
@@ -910,66 +955,56 @@ fn discover_codex(since: i64) -> Result<Vec<AiSession>, String> {
         .collect())
 }
 
-fn read_claude_transcript(path: &Path, projects_root: &Path) -> Option<AiSession> {
-    let file = fs::File::open(path).ok()?;
-    let relative = path.strip_prefix(projects_root).ok()?;
-    let components = relative
-        .iter()
-        .map(|value| value.to_string_lossy())
-        .collect::<Vec<_>>();
-    let subagent_index = components.iter().position(|value| value == "subagents");
-    let parent_id = subagent_index
-        .and_then(|index| index.checked_sub(1))
-        .and_then(|index| components.get(index))
-        .map(|value| value.to_string());
-    let is_subagent = parent_id.is_some();
-    let mut id = if is_subagent {
-        path.file_stem()
-            .map(|value| value.to_string_lossy().into_owned())
-    } else {
-        None
-    };
-    let mut cwd = None;
-    let mut created_at = 0;
-    let mut updated_at = 0;
-    let mut title = None;
-    let mut first_prompt = None;
-    let mut origin = "unknown".to_string();
-    let mut pending_inputs = HashSet::new();
-    let mut running = false;
-    let mut completed_at = None;
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        id = id.or_else(|| {
+#[derive(Debug, Clone, Default)]
+struct ClaudeTranscriptState {
+    id: Option<String>,
+    cwd: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+    title: Option<String>,
+    first_prompt: Option<String>,
+    origin: String,
+    pending_inputs: HashSet<String>,
+    running: bool,
+    completed_at: Option<i64>,
+}
+
+impl ClaudeTranscriptState {
+    fn apply(&mut self, value: &Value) {
+        self.id = self.id.take().or_else(|| {
             value
                 .get("sessionId")
                 .and_then(Value::as_str)
                 .map(str::to_string)
         });
-        cwd = cwd.or_else(|| value.get("cwd").and_then(Value::as_str).map(str::to_string));
+        self.cwd = self
+            .cwd
+            .take()
+            .or_else(|| value.get("cwd").and_then(Value::as_str).map(str::to_string));
         let timestamp = timestamp_millis(value.get("timestamp").and_then(Value::as_str));
         if timestamp > 0 {
-            created_at = if created_at == 0 {
+            self.created_at = if self.created_at == 0 {
                 timestamp
             } else {
-                created_at.min(timestamp)
+                self.created_at.min(timestamp)
             };
-            updated_at = updated_at.max(timestamp);
+            self.updated_at = self.updated_at.max(timestamp);
         }
         if value.get("type").and_then(Value::as_str) == Some("ai-title") {
-            title = value
+            self.title = value
                 .get("aiTitle")
                 .and_then(Value::as_str)
                 .map(str::to_string);
         }
-        if origin == "unknown" {
-            origin = match value.get("entrypoint").and_then(Value::as_str) {
+        if self.origin == "unknown" {
+            self.origin = match value.get("entrypoint").and_then(Value::as_str) {
                 Some("cli") => "cli".to_string(),
                 Some("claude-desktop") => "desktop".to_string(),
-                _ => origin,
+                _ => std::mem::take(&mut self.origin),
             };
+            if self.origin.is_empty() {
+                self.origin = "unknown".to_string();
+            }
         }
         let is_user = value.get("type").and_then(Value::as_str) == Some("user");
         let is_interruption = is_user
@@ -977,8 +1012,8 @@ fn read_claude_transcript(path: &Path, projects_root: &Path) -> Option<AiSession
                 .pointer("/message/content")
                 .and_then(content_text)
                 .is_some_and(|text| text.trim().starts_with("[Request interrupted by user"));
-        if first_prompt.is_none() && is_user && !is_interruption {
-            first_prompt = value
+        if self.first_prompt.is_none() && is_user && !is_interruption {
+            self.first_prompt = value
                 .pointer("/message/content")
                 .and_then(content_text)
                 .map(|text| concise_title(&text, "Claude session"));
@@ -994,7 +1029,7 @@ fn read_claude_transcript(path: &Path, projects_root: &Path) -> Option<AiSession
                     && item.get("name").and_then(Value::as_str) == Some("AskUserQuestion")
                 {
                     if let Some(id) = item.get("id").and_then(Value::as_str) {
-                        pending_inputs.insert(id.to_string());
+                        self.pending_inputs.insert(id.to_string());
                     }
                 }
             }
@@ -1004,16 +1039,16 @@ fn read_claude_transcript(path: &Path, projects_root: &Path) -> Option<AiSession
                     .and_then(Value::as_str),
                 Some("end_turn" | "stop_sequence" | "max_tokens" | "refusal")
             ) {
-                running = false;
-                completed_at = Some(timestamp);
+                self.running = false;
+                self.completed_at = Some(timestamp);
             }
         } else if is_interruption {
-            running = false;
-            completed_at = None;
-            pending_inputs.clear();
+            self.running = false;
+            self.completed_at = None;
+            self.pending_inputs.clear();
         } else if is_user {
-            running = true;
-            completed_at = None;
+            self.running = true;
+            self.completed_at = None;
             for item in value
                 .pointer("/message/content")
                 .and_then(Value::as_array)
@@ -1022,43 +1057,143 @@ fn read_claude_transcript(path: &Path, projects_root: &Path) -> Option<AiSession
             {
                 if item.get("type").and_then(Value::as_str) == Some("tool_result") {
                     if let Some(id) = item.get("tool_use_id").and_then(Value::as_str) {
-                        pending_inputs.remove(id);
+                        self.pending_inputs.remove(id);
                     }
                 }
             }
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct ClaudeTranscriptCacheEntry {
+    file_len: u64,
+    modified_at: i64,
+    created_at: i64,
+    prefix_len: usize,
+    prefix_hash: u64,
+    complete_len: u64,
+    state: ClaudeTranscriptState,
+    session: AiSession,
+}
+
+#[derive(Debug, Default)]
+struct ClaudeDiscoveryCache {
+    transcripts: HashMap<PathBuf, ClaudeTranscriptCacheEntry>,
+    #[cfg(test)]
+    full_reads: usize,
+    #[cfg(test)]
+    incremental_reads: usize,
+}
+
+fn claude_path_context(path: &Path, projects_root: &Path) -> Option<(Option<String>, bool)> {
+    let relative = path.strip_prefix(projects_root).ok()?;
+    let components = relative
+        .iter()
+        .map(|value| value.to_string_lossy())
+        .collect::<Vec<_>>();
+    let subagent_index = components.iter().position(|value| value == "subagents");
+    let parent_id = subagent_index
+        .and_then(|index| index.checked_sub(1))
+        .and_then(|index| components.get(index))
+        .map(|value| value.to_string());
+    let is_subagent = parent_id.is_some();
+    Some((parent_id, is_subagent))
+}
+
+fn initial_claude_transcript_state(
+    path: &Path,
+    projects_root: &Path,
+) -> Option<ClaudeTranscriptState> {
+    let (_, is_subagent) = claude_path_context(path, projects_root)?;
+    Some(ClaudeTranscriptState {
+        id: if is_subagent {
+            path.file_stem()
+                .map(|value| value.to_string_lossy().into_owned())
+        } else {
+            None
+        },
+        origin: "unknown".to_string(),
+        ..ClaudeTranscriptState::default()
+    })
+}
+
+fn read_complete_claude_lines<R: BufRead>(
+    reader: &mut R,
+    state: &mut ClaudeTranscriptState,
+    start: u64,
+) -> u64 {
+    let mut complete_len = start;
+    loop {
+        let mut line = String::new();
+        let Ok(bytes_read) = reader.read_line(&mut line) else {
+            break;
+        };
+        if bytes_read == 0 {
+            break;
+        }
+        let parsed = serde_json::from_str::<Value>(&line);
+        if !line.ends_with('\n') && parsed.is_err() {
+            break;
+        }
+        complete_len = complete_len.saturating_add(bytes_read as u64);
+        if let Ok(value) = parsed {
+            state.apply(&value);
+        }
+    }
+    complete_len
+}
+
+fn claude_prefix_hash(path: &Path, prefix_len: usize) -> Option<u64> {
+    let mut file = fs::File::open(path).ok()?;
+    let mut prefix = [0_u8; 4096];
+    let read = file.read(&mut prefix[..prefix_len.min(4096)]).ok()?;
+    let mut hasher = DefaultHasher::new();
+    prefix[..read].hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+fn claude_session_from_state(
+    path: &Path,
+    projects_root: &Path,
+    state: &ClaudeTranscriptState,
+) -> Option<AiSession> {
+    let (parent_id, is_subagent) = claude_path_context(path, projects_root)?;
     let fallback = if is_subagent {
         "Claude subagent"
     } else {
         "Claude session"
     };
-    if completed_at == Some(0) {
-        completed_at = match file_millis(path) {
+    let completed_at = if state.completed_at == Some(0) {
+        match file_millis(path) {
             0 => None,
             value => Some(value),
-        };
-    }
-    let updated_at = if updated_at == 0 {
+        }
+    } else {
+        state.completed_at
+    };
+    let updated_at = if state.updated_at == 0 {
         file_millis(path)
     } else {
-        updated_at
+        state.updated_at
     };
     Some(AiSession {
-        id: id?,
+        id: state.id.clone()?,
         provider: "claude".to_string(),
-        title: title
+        title: state
+            .title
+            .clone()
             .filter(|value| !value.trim().is_empty())
-            .or(first_prompt)
+            .or_else(|| state.first_prompt.clone())
             .unwrap_or_else(|| fallback.to_string()),
-        cwd,
-        created_at,
+        cwd: state.cwd.clone(),
+        created_at: state.created_at,
         updated_at,
         parent_id,
         kind: if is_subagent { "subagent" } else { "session" }.to_string(),
-        origin,
-        waiting_for_input: !pending_inputs.is_empty(),
-        running,
+        origin: state.origin.clone(),
+        waiting_for_input: !state.pending_inputs.is_empty(),
+        running: state.running,
         completed_at,
         archived_at: None,
         archive_scope: None,
@@ -1069,6 +1204,84 @@ fn read_claude_transcript(path: &Path, projects_root: &Path) -> Option<AiSession
         },
         children: Vec::new(),
     })
+}
+
+fn read_claude_transcript_cached(
+    path: &Path,
+    projects_root: &Path,
+    cache: &mut ClaudeDiscoveryCache,
+) -> Option<AiSession> {
+    let metadata = fs::metadata(path).ok()?;
+    let file_len = metadata.len();
+    let modified_at = file_millis(path);
+    let created_at = file_created_millis(&metadata);
+    let prefix_len = cache
+        .transcripts
+        .get(path)
+        .map(|entry| entry.prefix_len)
+        .unwrap_or_else(|| file_len.min(4096) as usize);
+    let prefix_hash = claude_prefix_hash(path, prefix_len)?;
+    if let Some(entry) = cache.transcripts.get(path) {
+        if entry.file_len == file_len
+            && entry.modified_at == modified_at
+            && entry.created_at == created_at
+            && entry.prefix_hash == prefix_hash
+        {
+            return Some(entry.session.clone());
+        }
+    }
+
+    let can_append = cache.transcripts.get(path).is_some_and(|entry| {
+        file_len > entry.file_len
+            && prefix_hash == entry.prefix_hash
+            && (created_at == 0 || entry.created_at == 0 || created_at == entry.created_at)
+    });
+    let (mut state, complete_len) = if can_append {
+        let entry = cache.transcripts.get(path)?;
+        let mut state = entry.state.clone();
+        let mut file = fs::File::open(path).ok()?;
+        file.seek(SeekFrom::Start(entry.complete_len)).ok()?;
+        let mut reader = BufReader::new(file);
+        let complete_len = read_complete_claude_lines(&mut reader, &mut state, entry.complete_len);
+        #[cfg(test)]
+        {
+            cache.incremental_reads += 1;
+        }
+        (state, complete_len)
+    } else {
+        let mut state = initial_claude_transcript_state(path, projects_root)?;
+        let file = fs::File::open(path).ok()?;
+        let mut reader = BufReader::new(file);
+        let complete_len = read_complete_claude_lines(&mut reader, &mut state, 0);
+        #[cfg(test)]
+        {
+            cache.full_reads += 1;
+        }
+        (state, complete_len)
+    };
+    if state.origin.is_empty() {
+        state.origin = "unknown".to_string();
+    }
+    let session = claude_session_from_state(path, projects_root, &state)?;
+    cache.transcripts.insert(
+        path.to_path_buf(),
+        ClaudeTranscriptCacheEntry {
+            file_len,
+            modified_at,
+            created_at,
+            prefix_len,
+            prefix_hash,
+            complete_len,
+            state,
+            session: session.clone(),
+        },
+    );
+    Some(session)
+}
+
+#[cfg(test)]
+fn read_claude_transcript(path: &Path, projects_root: &Path) -> Option<AiSession> {
+    read_claude_transcript_cached(path, projects_root, &mut ClaudeDiscoveryCache::default())
 }
 
 fn archived_claude_session_ids(desktop_sessions_root: Option<&Path>) -> HashSet<String> {
@@ -1093,11 +1306,42 @@ fn archived_claude_session_ids(desktop_sessions_root: Option<&Path>) -> HashSet<
         .collect()
 }
 
+#[cfg(test)]
 fn discover_claude_from_roots(
     projects_root: &Path,
     desktop_sessions_root: Option<&Path>,
 ) -> Vec<AiSession> {
+    discover_claude_from_roots_cached(
+        projects_root,
+        desktop_sessions_root,
+        i64::MIN,
+        &mut ClaudeDiscoveryCache::default(),
+    )
+}
+
+fn claude_parent_transcript_path(path: &Path, projects_root: &Path) -> Option<PathBuf> {
+    let relative = path.strip_prefix(projects_root).ok()?;
+    let components = relative.iter().collect::<Vec<_>>();
+    let subagent_index = components
+        .iter()
+        .position(|value| value.to_string_lossy() == "subagents")?;
+    let parent_id = components.get(subagent_index.checked_sub(1)?)?;
+    let mut parent = projects_root.to_path_buf();
+    for component in components.iter().take(subagent_index.saturating_sub(1)) {
+        parent.push(component);
+    }
+    parent.push(format!("{}.jsonl", parent_id.to_string_lossy()));
+    Some(parent)
+}
+
+fn discover_claude_from_roots_cached(
+    projects_root: &Path,
+    desktop_sessions_root: Option<&Path>,
+    since: i64,
+    cache: &mut ClaudeDiscoveryCache,
+) -> Vec<AiSession> {
     if !projects_root.is_dir() {
+        cache.transcripts.clear();
         return Vec::new();
     }
     let archived_ids = archived_claude_session_ids(desktop_sessions_root);
@@ -1107,21 +1351,37 @@ fn discover_claude_from_roots(
         &|path| path.extension().is_some_and(|value| value == "jsonl"),
         &mut files,
     );
-    files
+    let available = files.iter().cloned().collect::<HashSet<_>>();
+    let mut selected = files
         .iter()
-        .filter_map(|path| read_claude_transcript(path, projects_root))
+        .filter(|path| file_millis(path) >= since)
+        .cloned()
+        .collect::<HashSet<_>>();
+    for path in selected.clone() {
+        if let Some(parent) = claude_parent_transcript_path(&path, projects_root) {
+            if available.contains(&parent) {
+                selected.insert(parent);
+            }
+        }
+    }
+    cache.transcripts.retain(|path, _| selected.contains(path));
+    selected
+        .iter()
+        .filter_map(|path| read_claude_transcript_cached(path, projects_root, cache))
         .filter(|session| !archived_ids.contains(&session.id))
         .collect()
 }
 
-fn discover_claude() -> Result<Vec<AiSession>, String> {
+fn discover_claude(since: i64, cache: &mut ClaudeDiscoveryCache) -> Result<Vec<AiSession>, String> {
     let home = claude_home()
         .ok_or_else(|| "Could not determine the Claude data directory.".to_string())?;
     let projects_root = home.join("projects");
     let desktop_sessions_root = claude_desktop_sessions_root();
-    Ok(discover_claude_from_roots(
+    Ok(discover_claude_from_roots_cached(
         &projects_root,
         desktop_sessions_root.as_deref(),
+        since,
+        cache,
     ))
 }
 
@@ -1423,6 +1683,7 @@ fn scan_ai_sessions(
     state: &AppState,
     since: i64,
     settings: AiSessionSettings,
+    claude_cache: &mut ClaudeDiscoveryCache,
 ) -> Result<AiSessionList, String> {
     let mut sessions = Vec::new();
     let mut warnings = Vec::new();
@@ -1431,7 +1692,9 @@ fn scan_ai_sessions(
         providers.push(("codex", discover_codex(since)));
     }
     if settings.claude_cli || settings.claude_desktop {
-        providers.push(("claude", discover_claude()));
+        providers.push(("claude", discover_claude(since, claude_cache)));
+    } else {
+        claude_cache.transcripts.clear();
     }
     for (provider, result) in providers {
         match result {
@@ -1455,11 +1718,12 @@ fn scan_ai_sessions(
 fn scan_ai_session_snapshot(
     app: &tauri::AppHandle,
     settings: AiSessionSettings,
+    claude_cache: &mut ClaudeDiscoveryCache,
 ) -> Result<AiSessionSnapshot, String> {
     let requested_at = now_millis();
     let since = requested_at - AI_SESSION_MONITOR_WINDOW_HOURS * 3_600_000;
     let state = app.state::<AppState>();
-    let result = scan_ai_sessions(state.inner(), since, settings)?;
+    let result = scan_ai_sessions(state.inner(), since, settings, claude_cache)?;
     let refreshed_at = now_millis();
     let waiting_session_count = waiting_session_count(&result.sessions);
     let waiting_terminal_sessions = waiting_terminal_session_keys(&result.sessions);
@@ -1479,11 +1743,19 @@ fn scan_ai_session_snapshot(
     })
 }
 
-fn publish_snapshot(app: &tauri::AppHandle, snapshot: &AiSessionSnapshot) {
+fn publish_snapshot(app: &tauri::AppHandle, snapshot: &AiSessionSnapshot, include_sessions: bool) {
     if let Err(error) = set_ai_session_dock_badge(app.clone(), snapshot.waiting_session_count) {
         eprintln!("Could not update AI session dock badge: {error}");
     }
-    if let Err(error) = app.emit(AI_SESSION_MONITOR_UPDATED_EVENT, snapshot) {
+    let emitted = if include_sessions {
+        app.emit(AI_SESSION_MONITOR_UPDATED_EVENT, snapshot)
+    } else {
+        app.emit(
+            AI_SESSION_MONITOR_UPDATED_EVENT,
+            AiSessionMonitorStatus::from(snapshot),
+        )
+    };
+    if let Err(error) = emitted {
         eprintln!("Could not publish AI session monitor update: {error}");
     }
 }
@@ -1509,6 +1781,7 @@ fn complete_monitor_attempt(
 
 fn run_monitor(app: tauri::AppHandle, handle: AiSessionMonitorHandle) {
     let mut last_attempt_at: Option<Instant> = None;
+    let mut claude_cache = ClaudeDiscoveryCache::default();
     loop {
         let (settings, started_generation) = {
             let (lock, wake) = &*handle.shared;
@@ -1544,7 +1817,7 @@ fn run_monitor(app: tauri::AppHandle, handle: AiSessionMonitorHandle) {
             }
         };
 
-        let result = scan_ai_session_snapshot(&app, settings);
+        let result = scan_ai_session_snapshot(&app, settings, &mut claude_cache);
         last_attempt_at = Some(Instant::now());
         {
             let (lock, wake) = &*handle.shared;
@@ -1555,6 +1828,7 @@ fn run_monitor(app: tauri::AppHandle, handle: AiSessionMonitorHandle) {
                     return;
                 }
             };
+            let include_sessions = runtime.view_active;
             let published = if runtime.settings == settings {
                 if let Err(error) = &result {
                     eprintln!("Could not refresh AI sessions in the background: {error}");
@@ -1568,7 +1842,7 @@ fn run_monitor(app: tauri::AppHandle, handle: AiSessionMonitorHandle) {
             wake.notify_all();
             drop(runtime);
             if let Some(snapshot) = published {
-                publish_snapshot(&app, &snapshot);
+                publish_snapshot(&app, &snapshot, include_sessions);
             }
         }
     }
@@ -1624,7 +1898,13 @@ pub fn setup_monitor_window_events(app: &tauri::AppHandle) -> Result<(), String>
         .ok()
         .and_then(|runtime| runtime.latest.clone());
     if let Some(snapshot) = latest {
-        publish_snapshot(app, &snapshot);
+        let include_sessions = monitor
+            .shared
+            .0
+            .lock()
+            .map(|runtime| runtime.view_active)
+            .unwrap_or(false);
+        publish_snapshot(app, &snapshot, include_sessions);
     }
     let observed_window = window.clone();
     window.on_window_event(move |event| {
@@ -1650,6 +1930,16 @@ pub async fn latest_ai_sessions(
 ) -> Result<AiSessionSnapshot, String> {
     let monitor = monitor.inner().clone();
     tauri::async_runtime::spawn_blocking(move || monitor.latest_or_refresh())
+        .await
+        .map_err(db_error)?
+}
+
+#[tauri::command]
+pub async fn latest_ai_session_status(
+    monitor: tauri::State<'_, AiSessionMonitorHandle>,
+) -> Result<AiSessionMonitorStatus, String> {
+    let monitor = monitor.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || monitor.latest_status_or_refresh())
         .await
         .map_err(db_error)?
 }
@@ -2898,6 +3188,105 @@ mod tests {
         assert_eq!(child_session.id, "agent-child");
         assert_eq!(child_session.parent_id.as_deref(), Some(parent_id));
         assert!(child_session.open_targets.is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn caches_unchanged_claude_transcripts_and_reads_appends_incrementally() {
+        use std::io::Write;
+
+        let directory = fixture_dir("claude-incremental-cache");
+        let projects_root = directory.join("projects");
+        let project = projects_root.join("project-a");
+        fs::create_dir_all(&project).unwrap();
+        let path = project.join("44444444-4444-4444-8444-444444444444.jsonl");
+        let prompt = "x".repeat(5000);
+        fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"user\",\"sessionId\":\"44444444-4444-4444-8444-444444444444\",\"timestamp\":\"2026-08-05T10:00:00Z\",\"message\":{{\"content\":\"{prompt}\"}}}}\n"
+            ),
+        )
+        .unwrap();
+        let mut cache = ClaudeDiscoveryCache::default();
+
+        let initial = read_claude_transcript_cached(&path, &projects_root, &mut cache).unwrap();
+        assert!(initial.running);
+        assert_eq!(cache.full_reads, 1);
+        let unchanged = read_claude_transcript_cached(&path, &projects_root, &mut cache).unwrap();
+        assert_eq!(unchanged, initial);
+        assert_eq!(cache.full_reads, 1);
+        assert_eq!(cache.incremental_reads, 0);
+
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        write!(file, "{{\"type\":\"assistant\"").unwrap();
+        drop(file);
+        let partial = read_claude_transcript_cached(&path, &projects_root, &mut cache).unwrap();
+        assert!(partial.running);
+        assert_eq!(cache.incremental_reads, 1);
+
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(
+            file,
+            ",\"timestamp\":\"2026-08-05T10:01:00Z\",\"message\":{{\"stop_reason\":\"end_turn\",\"content\":[]}}}}"
+        )
+        .unwrap();
+        drop(file);
+        let completed = read_claude_transcript_cached(&path, &projects_root, &mut cache).unwrap();
+        assert!(!completed.running);
+        assert!(completed.completed_at.is_some());
+        assert_eq!(cache.full_reads, 1);
+        assert_eq!(cache.incremental_reads, 2);
+
+        fs::write(
+            &path,
+            "{\"type\":\"user\",\"sessionId\":\"44444444-4444-4444-8444-444444444444\",\"timestamp\":\"2026-08-05T11:00:00Z\",\"message\":{\"content\":\"Restarted\"}}\n",
+        )
+        .unwrap();
+        let rebuilt = read_claude_transcript_cached(&path, &projects_root, &mut cache).unwrap();
+        assert!(rebuilt.running);
+        assert_eq!(rebuilt.title, "Restarted");
+        assert_eq!(cache.full_reads, 2);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cold_claude_discovery_keeps_old_parents_for_recent_subagents_and_prunes_cache() {
+        let directory = fixture_dir("claude-cold-discovery");
+        let projects_root = directory.join("projects");
+        let project = projects_root.join("project-a");
+        let parent_id = "55555555-5555-4555-8555-555555555555";
+        let parent = project.join(format!("{parent_id}.jsonl"));
+        fs::create_dir_all(project.join(parent_id).join("subagents")).unwrap();
+        fs::write(
+            &parent,
+            format!("{{\"type\":\"user\",\"sessionId\":\"{parent_id}\",\"entrypoint\":\"cli\",\"timestamp\":\"2026-01-01T10:00:00Z\",\"message\":{{\"content\":\"Old parent\"}}}}\n"),
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        let since = now_millis();
+        std::thread::sleep(Duration::from_millis(5));
+        let child = project
+            .join(parent_id)
+            .join("subagents")
+            .join("agent-recent.jsonl");
+        fs::write(
+            &child,
+            format!("{{\"type\":\"user\",\"sessionId\":\"{parent_id}\",\"timestamp\":\"2026-08-05T10:00:00Z\",\"message\":{{\"content\":\"Recent child\"}}}}\n"),
+        )
+        .unwrap();
+        let mut cache = ClaudeDiscoveryCache::default();
+        let sessions = discover_claude_from_roots_cached(&projects_root, None, since, &mut cache);
+        let grouped = group_and_filter(sessions, 0, &AiSessionSettings::default());
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].children.len(), 1);
+        assert_eq!(grouped[0].children[0].origin, "cli");
+        assert_eq!(cache.transcripts.len(), 2);
+
+        fs::remove_file(&child).unwrap();
+        let sessions = discover_claude_from_roots_cached(&projects_root, None, since, &mut cache);
+        assert!(sessions.is_empty());
+        assert!(cache.transcripts.is_empty());
         fs::remove_dir_all(directory).unwrap();
     }
 

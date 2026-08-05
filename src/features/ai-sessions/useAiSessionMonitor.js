@@ -5,11 +5,11 @@ import { api } from "@/lib/api";
 import {
   AI_SESSION_MAX_WINDOW_HOURS,
   aiSessionPollingIntervalMs,
-  aiSessionsWaitingForInputCount,
   normalizeAiSessionSettings,
 } from "@/lib/aiSessions";
 import {
   AI_SESSION_MONITOR_UPDATED_EVENT,
+  aiSessionPayloadIncludesSessions,
   newerAiSessionSnapshot,
   normalizeAiSessionSnapshot,
 } from "@/lib/aiSessionEvents";
@@ -36,21 +36,26 @@ export function useAiSessionMonitor({
     [settings],
   );
   const [result, setResult] = useState(EMPTY_RESULT);
+  const [waitingAiSessionCount, setWaitingAiSessionCount] = useState(0);
   const [loading, setLoading] = useState(false);
   const activeRun = useRef(0);
   const started = useRef(false);
-  const waitingAiSessionCount = useMemo(
-    () => Number.isFinite(Number(result.waitingSessionCount))
-      ? Number(result.waitingSessionCount)
-      : aiSessionsWaitingForInputCount(result.sessions),
-    [result.sessions, result.waitingSessionCount],
-  );
   const hasWaitingAiSession = waitingAiSessionCount > 0;
 
   const applyResult = useCallback((next) => {
     const normalized = normalizeAiSessionSnapshot(next);
     setResult((current) => newerAiSessionSnapshot(current, normalized));
+    setWaitingAiSessionCount((current) => (
+      current === normalized.waitingSessionCount ? current : normalized.waitingSessionCount
+    ));
     return normalized;
+  }, []);
+
+  const applyStatus = useCallback((next) => {
+    const count = Number(next?.waitingSessionCount);
+    if (!Number.isFinite(count)) return;
+    const normalized = Math.max(0, count);
+    setWaitingAiSessionCount((current) => (current === normalized ? current : normalized));
   }, []);
 
   const refresh = useCallback(async ({ quiet = false } = {}) => {
@@ -79,14 +84,24 @@ export function useAiSessionMonitor({
   useEffect(() => {
     if (!settingsReady) return undefined;
     if (isDesktopApp()) return undefined;
-    const quiet = started.current;
+    let disposed = false;
+    let timeoutId = null;
+    const firstQuiet = started.current;
     started.current = true;
-    refresh({ quiet });
-    const interval = window.setInterval(
-      () => refresh({ quiet: true }),
-      aiSessionPollingIntervalMs(normalizedSettings, foreground),
-    );
-    return () => window.clearInterval(interval);
+    async function poll(quiet) {
+      await refresh({ quiet });
+      if (!disposed) {
+        timeoutId = window.setTimeout(
+          () => poll(true),
+          aiSessionPollingIntervalMs(normalizedSettings, foreground),
+        );
+      }
+    }
+    void poll(firstQuiet);
+    return () => {
+      disposed = true;
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+    };
   }, [foreground, normalizedSettings, refresh, settingsReady]);
 
   useEffect(() => {
@@ -94,13 +109,15 @@ export function useAiSessionMonitor({
     let disposed = false;
     let unlisten = null;
     listen(AI_SESSION_MONITOR_UPDATED_EVENT, ({ payload }) => {
-      if (!disposed) applyResult(payload);
+      if (disposed) return;
+      if (aiSessionPayloadIncludesSessions(payload)) applyResult(payload);
+      else applyStatus(payload);
     }).then((cleanup) => {
       if (disposed) cleanup();
       else {
         unlisten = cleanup;
-        api.latestAiSessions().then((next) => {
-          if (!disposed) applyResult(next);
+        api.latestAiSessionStatus().then((next) => {
+          if (!disposed) applyStatus(next);
         }).catch((error) => {
           if (!disposed) onNotice(error?.message || String(error));
         });
@@ -110,7 +127,23 @@ export function useAiSessionMonitor({
       disposed = true;
       unlisten?.();
     };
-  }, [applyResult, onNotice, settingsReady]);
+  }, [applyResult, applyStatus, onNotice, settingsReady]);
+
+  useEffect(() => {
+    if (!settingsReady || !foreground || !isDesktopApp()) return undefined;
+    let disposed = false;
+    setLoading(true);
+    api.latestAiSessions().then((next) => {
+      if (!disposed) applyResult(next);
+    }).catch((error) => {
+      if (!disposed) onNotice(error?.message || String(error));
+    }).finally(() => {
+      if (!disposed) setLoading(false);
+    });
+    return () => {
+      disposed = true;
+    };
+  }, [applyResult, foreground, onNotice, settingsReady]);
 
   useEffect(() => {
     if (!settingsReady || !isDesktopApp()) return;

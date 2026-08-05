@@ -30,6 +30,7 @@ import {
 } from "@/lib/aiSessions";
 import {
   AI_SESSION_MONITOR_UPDATED_EVENT,
+  aiSessionPayloadIncludesSessions,
   aiSessionWaitingStatusFromPayload,
   newerAiSessionSnapshot,
   normalizeAiSessionSnapshot,
@@ -215,8 +216,10 @@ export function QuickCapture() {
     listen(AI_SESSION_MONITOR_UPDATED_EVENT, ({ payload }) => {
       if (!disposed) {
         setHasWaitingAiSession(aiSessionWaitingStatusFromPayload(payload));
-        const next = normalizeAiSessionSnapshot(payload);
-        setAgentResult((current) => newerAiSessionSnapshot(current, next));
+        if (aiSessionPayloadIncludesSessions(payload)) {
+          const next = normalizeAiSessionSnapshot(payload);
+          setAgentResult((current) => newerAiSessionSnapshot(current, next));
+        }
       }
     }).then((cleanup) => {
       if (disposed) {
@@ -224,13 +227,9 @@ export function QuickCapture() {
         return;
       }
       unlisten = cleanup;
-      api.latestAiSessions().then((next) => {
+      api.latestAiSessionStatus().then((next) => {
         if (disposed) return;
         setHasWaitingAiSession(aiSessionWaitingStatusFromPayload(next));
-        setAgentResult((current) => newerAiSessionSnapshot(
-          current,
-          normalizeAiSessionSnapshot(next),
-        ));
       }).catch(console.error);
     }).catch(console.error);
     return () => {

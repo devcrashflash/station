@@ -402,6 +402,10 @@ test("local fallback archives, upserts, lists, validates, and restores AI sessio
     (await api.latestAiSessions()).archivedSessions.map(({ id }) => id),
     ["session-1"],
   );
+  const monitorStatus = await api.latestAiSessionStatus();
+  assert.equal(monitorStatus.lastRefreshedAt > 0, true);
+  assert.equal(monitorStatus.waitingSessionCount, 0);
+  assert.deepEqual(monitorStatus.waitingTerminalTabIds, []);
   assert.equal(await api.setAiSessionMonitorViewActive({ active: true }), null);
 
   await assert.rejects(api.archiveAiSession({

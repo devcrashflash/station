@@ -21,6 +21,10 @@ import { useSynchronizedTheme } from "@/lib/theme";
 
 const EMPTY_SNAPSHOT = { tabs: [{ id: "main", kind: "main", title: "Inbox", closable: false }], activeTabId: "main" };
 
+function sameIds(left, right) {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
 export function TabBar() {
   useSynchronizedTheme();
   const newTerminalShortcut = formatShortcut("CommandOrControl+KeyT");
@@ -51,7 +55,8 @@ export function TabBar() {
     listen(AI_SESSION_MONITOR_UPDATED_EVENT, ({ payload }) => {
       if (!disposed) {
         setHasWaitingAiSession(aiSessionWaitingStatusFromPayload(payload));
-        setWaitingTerminalTabIds(aiSessionWaitingTerminalTabIdsFromPayload(payload));
+        const nextIds = aiSessionWaitingTerminalTabIdsFromPayload(payload);
+        setWaitingTerminalTabIds((current) => (sameIds(current, nextIds) ? current : nextIds));
       }
     }).then((cleanup) => {
       if (disposed) {
@@ -59,10 +64,11 @@ export function TabBar() {
         return;
       }
       unlisten = cleanup;
-      api.latestAiSessions().then((next) => {
+      api.latestAiSessionStatus().then((next) => {
         if (!disposed) {
           setHasWaitingAiSession(aiSessionWaitingStatusFromPayload(next));
-          setWaitingTerminalTabIds(aiSessionWaitingTerminalTabIdsFromPayload(next));
+          const nextIds = aiSessionWaitingTerminalTabIdsFromPayload(next);
+          setWaitingTerminalTabIds((current) => (sameIds(current, nextIds) ? current : nextIds));
         }
       }).catch(console.error);
     }).catch(console.error);

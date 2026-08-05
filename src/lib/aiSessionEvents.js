@@ -2,6 +2,10 @@ import { aiSessionsWaitingForInputCount } from "./aiSessions.js";
 
 export const AI_SESSION_MONITOR_UPDATED_EVENT = "ai-session-monitor-updated";
 
+export function aiSessionPayloadIncludesSessions(payload) {
+  return Array.isArray(payload?.sessions);
+}
+
 export function aiSessionWaitingStatusFromPayload(payload) {
   if (Number.isFinite(Number(payload?.waitingSessionCount))) {
     return Number(payload.waitingSessionCount) > 0;
