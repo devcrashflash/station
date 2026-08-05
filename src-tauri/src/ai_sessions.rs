@@ -1156,6 +1156,19 @@ fn inherit_origins(sessions: &mut [AiSession]) {
     }
 }
 
+fn reconcile_child_lifecycle(parent: &AiSession, children: &mut [AiSession]) {
+    if parent.provider != "claude" || parent.running || parent.waiting_for_input {
+        return;
+    }
+    for child in children {
+        child.running = false;
+        child.waiting_for_input = false;
+        if child.completed_at.is_none() {
+            child.completed_at = parent.completed_at;
+        }
+    }
+}
+
 fn group_and_filter(
     mut sessions: Vec<AiSession>,
     since: i64,
@@ -1182,7 +1195,9 @@ fn group_and_filter(
     }
     sessions.retain(|session| session.parent_id.is_none());
     for session in &mut sessions {
-        session.children = children.remove(&session.id).unwrap_or_default();
+        let mut session_children = children.remove(&session.id).unwrap_or_default();
+        reconcile_child_lifecycle(session, &mut session_children);
+        session.children = session_children;
         session
             .children
             .sort_by_key(|child| std::cmp::Reverse(child.updated_at));
@@ -2783,6 +2798,40 @@ mod tests {
         };
 
         assert!(group_and_filter(vec![parent, child], 0, &settings).is_empty());
+    }
+
+    #[test]
+    fn completed_claude_parents_clear_stale_child_activity() {
+        let mut parent = session("parent", 200, None);
+        parent.provider = "claude".to_string();
+        parent.completed_at = Some(200);
+        let mut child = session("child", 150, Some("parent"));
+        child.provider = "claude".to_string();
+        child.running = true;
+        child.waiting_for_input = true;
+        let settings = AiSessionSettings::default();
+
+        let grouped = group_and_filter(vec![parent, child], 0, &settings);
+        let child = &grouped[0].children[0];
+
+        assert!(!child.running);
+        assert!(!child.waiting_for_input);
+        assert_eq!(child.completed_at, Some(200));
+    }
+
+    #[test]
+    fn active_claude_parents_preserve_child_activity() {
+        let mut parent = session("parent", 200, None);
+        parent.provider = "claude".to_string();
+        parent.running = true;
+        let mut child = session("child", 150, Some("parent"));
+        child.provider = "claude".to_string();
+        child.running = true;
+        let settings = AiSessionSettings::default();
+
+        let grouped = group_and_filter(vec![parent, child], 0, &settings);
+
+        assert!(grouped[0].children[0].running);
     }
 
     #[test]
