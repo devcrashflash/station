@@ -339,11 +339,13 @@ test("local fallback stores AI session source settings and fills missing default
     claudeDesktop: true,
     foregroundRefreshIntervalSeconds: 5,
     backgroundRefreshIntervalSeconds: 5,
+    doneStateDurationSeconds: 10_800,
   });
   assert.deepEqual(await api.saveAiSessionSettings({
     codexCli: false,
     claudeDesktop: false,
     refreshIntervalSeconds: 60,
+    doneStateDurationSeconds: 21_600,
   }), {
     codexCli: false,
     codexDesktop: true,
@@ -351,6 +353,7 @@ test("local fallback stores AI session source settings and fills missing default
     claudeDesktop: false,
     foregroundRefreshIntervalSeconds: 60,
     backgroundRefreshIntervalSeconds: 5,
+    doneStateDurationSeconds: 21_600,
   });
   assert.deepEqual(await api.listAiSessionSettings(), {
     codexCli: false,
@@ -359,6 +362,7 @@ test("local fallback stores AI session source settings and fills missing default
     claudeDesktop: false,
     foregroundRefreshIntervalSeconds: 60,
     backgroundRefreshIntervalSeconds: 5,
+    doneStateDurationSeconds: 21_600,
   });
 });
 

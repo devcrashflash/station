@@ -3065,6 +3065,7 @@ mod tests {
             claude_desktop: false,
             foreground_refresh_interval_seconds: 30,
             background_refresh_interval_seconds: 60,
+            done_state_duration_seconds: 3 * 60 * 60,
         };
 
         let grouped = group_and_filter(vec![codex_cli, codex_desktop, codex_unknown], 0, &settings);
@@ -3085,6 +3086,7 @@ mod tests {
             claude_desktop: true,
             foreground_refresh_interval_seconds: 30,
             background_refresh_interval_seconds: 60,
+            done_state_duration_seconds: 3 * 60 * 60,
         };
 
         assert!(group_and_filter(vec![parent, child], 0, &settings).is_empty());

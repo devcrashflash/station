@@ -1239,6 +1239,8 @@ struct AiSessionSettings {
     foreground_refresh_interval_seconds: u64,
     #[serde(default = "default_ai_session_background_refresh_interval")]
     background_refresh_interval_seconds: u64,
+    #[serde(default = "default_ai_session_done_state_duration")]
+    done_state_duration_seconds: u64,
 }
 
 fn default_ai_session_foreground_refresh_interval() -> u64 {
@@ -1247,6 +1249,10 @@ fn default_ai_session_foreground_refresh_interval() -> u64 {
 
 fn default_ai_session_background_refresh_interval() -> u64 {
     5
+}
+
+fn default_ai_session_done_state_duration() -> u64 {
+    3 * 60 * 60
 }
 
 pub(crate) fn set_ai_session_dock_badge(app: tauri::AppHandle, count: u32) -> Result<(), String> {
@@ -1281,6 +1287,14 @@ fn normalize_ai_session_background_refresh_interval(value: u64) -> u64 {
     }
 }
 
+fn normalize_ai_session_done_state_duration(value: u64) -> u64 {
+    if (60..=7 * 24 * 60 * 60).contains(&value) {
+        value
+    } else {
+        default_ai_session_done_state_duration()
+    }
+}
+
 impl Default for AiSessionSettings {
     fn default() -> Self {
         Self {
@@ -1290,6 +1304,7 @@ impl Default for AiSessionSettings {
             claude_desktop: true,
             foreground_refresh_interval_seconds: default_ai_session_foreground_refresh_interval(),
             background_refresh_interval_seconds: default_ai_session_background_refresh_interval(),
+            done_state_duration_seconds: default_ai_session_done_state_duration(),
         }
     }
 }
@@ -2403,6 +2418,8 @@ fn load_ai_session_settings(db: &SqliteConnection) -> Result<AiSessionSettings, 
                 normalize_ai_session_background_refresh_interval(
                     settings.background_refresh_interval_seconds,
                 );
+            settings.done_state_duration_seconds =
+                normalize_ai_session_done_state_duration(settings.done_state_duration_seconds);
             Ok(settings)
         }
         Err(_) => {
@@ -2430,6 +2447,8 @@ fn save_ai_session_settings(
         normalize_ai_session_foreground_refresh_interval(input.foreground_refresh_interval_seconds);
     input.background_refresh_interval_seconds =
         normalize_ai_session_background_refresh_interval(input.background_refresh_interval_seconds);
+    input.done_state_duration_seconds =
+        normalize_ai_session_done_state_duration(input.done_state_duration_seconds);
     let value = serde_json::to_string(&input).map_err(db_error)?;
     {
         let db = state.db.lock().map_err(db_error)?;
@@ -15725,6 +15744,7 @@ mod tests {
                 claude_desktop: true,
                 foreground_refresh_interval_seconds: 5,
                 background_refresh_interval_seconds: 5,
+                done_state_duration_seconds: 3 * 60 * 60,
             }
         );
 
@@ -15754,6 +15774,7 @@ mod tests {
         let migrated = load_ai_session_settings(&db).expect("migrate legacy refresh interval");
         assert_eq!(migrated.foreground_refresh_interval_seconds, 5);
         assert_eq!(migrated.background_refresh_interval_seconds, 5);
+        assert_eq!(migrated.done_state_duration_seconds, 3 * 60 * 60);
 
         let settings = AiSessionSettings {
             codex_cli: false,
@@ -15762,6 +15783,7 @@ mod tests {
             claude_desktop: false,
             foreground_refresh_interval_seconds: 60,
             background_refresh_interval_seconds: 300,
+            done_state_duration_seconds: 12 * 60 * 60,
         };
         let value = serde_json::to_string(&settings).unwrap();
         set_app_setting(&db, AI_SESSION_SETTINGS_KEY, Some(&value)).unwrap();

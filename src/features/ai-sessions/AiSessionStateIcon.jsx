@@ -2,34 +2,43 @@ import { Bot } from "lucide-react";
 
 import { BurningTreeIcon } from "@/components/common/BurningTreeIcon";
 import { Badge } from "@/components/ui/badge";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
-export function AiSessionStateIcon({ state, className }) {
-  if (state === "running") {
-    return (
-      <span role="img" aria-label="Running" className={cn("relative inline-block shrink-0", className)}>
+export function AiSessionStateIcon({ state, label, className }) {
+  const presentation = {
+    waiting: { label: "Waiting for you", className: "text-amber-600 dark:text-amber-400" },
+    running: { label: "Running", className: "" },
+    done: { label: "Done", className: "text-green-600 dark:text-green-400" },
+    idle: { label: "Idle", className: "text-muted-foreground" },
+  }[state];
+  const resolvedLabel = label || presentation.label;
+  const icon = state === "running" ? (
+    <span className="relative inline-block size-full">
         <span aria-hidden="true" className="running-session-icon__robot absolute inset-0">
           <Bot className="size-full animate-spin text-blue-600 dark:text-blue-400" />
         </span>
         <span aria-hidden="true" className="running-session-icon__tree absolute inset-0">
           <BurningTreeIcon className="size-full" />
         </span>
-      </span>
-    );
-  }
-
-  const presentation = {
-    waiting: { label: "Waiting for you", className: "text-amber-600 dark:text-amber-400" },
-    done: { label: "Done", className: "text-green-600 dark:text-green-400" },
-    idle: { label: "Idle", className: "text-muted-foreground" },
-  }[state];
+    </span>
+  ) : (
+    <Bot aria-hidden="true" className="size-full" />
+  );
 
   return (
-    <Bot
-      role="img"
-      aria-label={presentation.label}
-      className={cn("shrink-0", className, presentation.className)}
-    />
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          role="img"
+          aria-label={resolvedLabel}
+          className={cn("inline-block shrink-0", className, presentation.className)}
+        >
+          {icon}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>{resolvedLabel}</TooltipContent>
+    </Tooltip>
   );
 }
 

@@ -17,13 +17,16 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { Textarea } from "@/components/ui/textarea";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
 import {
+  aiSessionDoneWindowMs,
   aiSessionPreferredOpenTarget,
   aiSessionProviderBadgeClass,
   aiSessionRelativeTime,
   aiSessionSourceLabel,
   aiSessionSourcesDisabled,
+  aiSessionStateTooltip,
   aiSessionTreeState,
   aiSessionTreeWaitingForInput,
   normalizeAiSessionSettings,
@@ -573,9 +576,13 @@ function AgentList({
     return <AgentEmpty>{query ? "No AI agents match your search." : "No AI agents were active in the last 24 hours."}</AgentEmpty>;
   }
 
+  const now = Date.now();
+  const doneWindowMs = aiSessionDoneWindowMs(settings);
+
   return (
-    <div className="overflow-hidden rounded-md border">
-      {sessions.map((session, index) => {
+    <TooltipProvider>
+      <div className="overflow-hidden rounded-md border">
+        {sessions.map((session, index) => {
         const sessionKey = smartOverlaySessionKey(session);
         const highlighted = sessionKey === highlightedId;
         const waiting = aiSessionTreeWaitingForInput(session);
@@ -600,7 +607,13 @@ function AgentList({
           >
             {busyId === sessionKey
               ? <LoaderCircle className="size-5 shrink-0 animate-spin" />
-              : <AiSessionStateIcon state={aiSessionTreeState(session)} className="size-5" />}
+              : (
+                <AiSessionStateIcon
+                  state={aiSessionTreeState(session, now, doneWindowMs)}
+                  label={aiSessionStateTooltip(session, { now, doneWindowMs, tree: true })}
+                  className="size-5"
+                />
+              )}
             <span className="min-w-0 flex-1">
               <span className="flex min-w-0 items-center gap-2">
                 <span className="truncate text-sm font-medium">{session.title}</span>
@@ -617,8 +630,9 @@ function AgentList({
             {index < 9 && <Kbd>{index + 1}</Kbd>}
           </button>
         );
-      })}
-    </div>
+        })}
+      </div>
+    </TooltipProvider>
   );
 }
 

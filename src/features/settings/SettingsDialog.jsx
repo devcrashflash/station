@@ -14,6 +14,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { aiPromptIconFor, aiPromptIconOptions } from "@/lib/aiPromptIcons";
 import {
   AI_SESSION_BACKGROUND_REFRESH_INTERVALS,
+  AI_SESSION_MAX_DONE_DURATION_SECONDS,
+  AI_SESSION_MIN_DONE_DURATION_SECONDS,
   AI_SESSION_REFRESH_INTERVALS,
   AI_SESSION_SOURCE_OPTIONS,
   aiSessionProviderLabel,
@@ -62,6 +64,20 @@ const aiAgentTypeOptions = [
   { value: "codex", label: "Codex", icon: SquareTerminal },
   { value: "claude", label: "Claude", icon: Bot },
 ];
+
+const aiSessionDoneDurationUnits = [
+  { value: "minutes", label: "Minutes", seconds: 60 },
+  { value: "hours", label: "Hours", seconds: 3_600 },
+  { value: "days", label: "Days", seconds: 86_400 },
+];
+
+function aiSessionDoneDurationInput(seconds) {
+  const unit = [...aiSessionDoneDurationUnits]
+    .reverse()
+    .find((option) => seconds % option.seconds === 0)
+    || aiSessionDoneDurationUnits[0];
+  return { value: String(seconds / unit.seconds), unit: unit.value };
+}
 
 const themeOptions = [
   { value: "system", label: "System" },
@@ -559,19 +575,36 @@ function CommandInternalsSettings({ settings, onSave }) {
 
 function AiSessionSettingsTab({ settings, onSave }) {
   const [candidate, setCandidate] = useState(() => normalizeAiSessionSettings(settings));
+  const [doneDuration, setDoneDuration] = useState(() => (
+    aiSessionDoneDurationInput(normalizeAiSessionSettings(settings).doneStateDurationSeconds)
+  ));
   const [notice, setNotice] = useState("");
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
-    setCandidate(normalizeAiSessionSettings(settings));
+    const normalized = normalizeAiSessionSettings(settings);
+    setCandidate(normalized);
+    setDoneDuration(aiSessionDoneDurationInput(normalized.doneStateDurationSeconds));
   }, [settings]);
 
   async function save() {
     setNotice("");
+    const unit = aiSessionDoneDurationUnits.find(({ value }) => value === doneDuration.unit);
+    const doneStateDurationSeconds = Math.round(Number(doneDuration.value) * unit.seconds);
+    if (
+      !Number.isFinite(doneStateDurationSeconds)
+      || doneStateDurationSeconds < AI_SESSION_MIN_DONE_DURATION_SECONDS
+      || doneStateDurationSeconds > AI_SESSION_MAX_DONE_DURATION_SECONDS
+    ) {
+      setNotice("Done duration must be between 1 minute and 7 days.");
+      return;
+    }
     setIsSaving(true);
     try {
-      const next = await onSave(candidate);
-      setCandidate(normalizeAiSessionSettings(next));
+      const next = await onSave({ ...candidate, doneStateDurationSeconds });
+      const normalized = normalizeAiSessionSettings(next);
+      setCandidate(normalized);
+      setDoneDuration(aiSessionDoneDurationInput(normalized.doneStateDurationSeconds));
       setNotice("AI session settings saved.");
     } catch (error) {
       setNotice(error?.message || String(error));
@@ -629,6 +662,50 @@ function AiSessionSettingsTab({ settings, onSave }) {
         <p className="text-xs text-muted-foreground">
           You can disable every local runner to hide all locally discovered AI sessions.
         </p>
+      </FieldSet>
+
+      <FieldSet className="gap-4 rounded-lg border p-4">
+        <FieldLegend className="mb-0 px-1">Session states</FieldLegend>
+        <p className="text-xs text-muted-foreground">
+          Choose how long a completed AI task remains marked as Done before it becomes Idle.
+        </p>
+
+        <Field>
+          <FieldLabel>Done duration</FieldLabel>
+          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_160px]">
+            <Input
+              type="number"
+              min={AI_SESSION_MIN_DONE_DURATION_SECONDS / (aiSessionDoneDurationUnits.find(({ value }) => value === doneDuration.unit)?.seconds || 60)}
+              max={AI_SESSION_MAX_DONE_DURATION_SECONDS / (aiSessionDoneDurationUnits.find(({ value }) => value === doneDuration.unit)?.seconds || 60)}
+              step="any"
+              value={doneDuration.value}
+              aria-label="Done duration value"
+              disabled={isSaving}
+              onChange={(event) => setDoneDuration((current) => ({
+                ...current,
+                value: event.target.value,
+              }))}
+            />
+            <SelectControl
+              value={doneDuration.unit}
+              onValueChange={(value) => setDoneDuration((current) => {
+                const currentUnit = aiSessionDoneDurationUnits.find((option) => option.value === current.unit);
+                const nextUnit = aiSessionDoneDurationUnits.find((option) => option.value === value);
+                const seconds = Number(current.value) * currentUnit.seconds;
+                return {
+                  value: Number.isFinite(seconds) ? String(seconds / nextUnit.seconds) : current.value,
+                  unit: value,
+                };
+              })}
+              options={aiSessionDoneDurationUnits}
+              triggerClassName="w-full"
+              disabled={isSaving}
+            />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Enter any duration from 1 minute to 7 days. The default is 3 hours.
+          </p>
+        </Field>
       </FieldSet>
 
       <FieldSet className="gap-4 rounded-lg border p-4">
