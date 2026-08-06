@@ -20,7 +20,6 @@ import { Textarea } from "@/components/ui/textarea";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
 import {
-  aiSessionDoneWindowMs,
   aiSessionPreferredOpenTarget,
   aiSessionProviderBadgeClass,
   aiSessionRelativeTime,
@@ -33,9 +32,8 @@ import {
 } from "@/lib/aiSessions";
 import {
   AI_SESSION_MONITOR_UPDATED_EVENT,
-  aiSessionPayloadIncludesSessions,
+  aiSessionRevisionFromPayload,
   aiSessionWaitingStatusFromPayload,
-  newerAiSessionSnapshot,
   normalizeAiSessionSnapshot,
 } from "@/lib/aiSessionEvents";
 import { isWorkspaceShortcut } from "@/lib/workspaceTabs";
@@ -58,7 +56,7 @@ import {
 } from "@/lib/smartOverlay";
 import { cn } from "@/lib/utils";
 
-const EMPTY_AGENT_RESULT = { sessions: [], loadedAt: Date.now() };
+const EMPTY_AGENT_RESULT = { sessions: [], revision: "", loadedAt: Date.now() };
 
 export function QuickCapture() {
   const [activeTab, setActiveTab] = useState("inbox");
@@ -84,6 +82,8 @@ export function QuickCapture() {
   const optionRefs = useRef(new Map());
   const programOptionRefs = useRef(new Map());
   const agentLoadRun = useRef(0);
+  const agentRevision = useRef("");
+  const requestedAgentRevision = useRef("");
   const programLoadRun = useRef(0);
   const canSubmit = value.trim().length > 0 && !isSaving;
   const modifier = shortcutModifier();
@@ -105,14 +105,12 @@ export function QuickCapture() {
     setAgentsLoading(true);
     try {
       const settings = normalizeAiSessionSettings(await api.listAiSessionSettings());
-      const requestedAt = Date.now();
-      const result = await api.listAiSessions({
-        since: requestedAt - SMART_OVERLAY_AGENT_WINDOW_HOURS * 3_600_000,
-        settings,
-      });
+      const result = await api.latestAiSessions();
       if (agentLoadRun.current !== run) return;
       setAgentSettings(settings);
-      setAgentResult(normalizeAiSessionSnapshot(result));
+      const normalized = normalizeAiSessionSnapshot(result);
+      agentRevision.current = normalized.revision;
+      setAgentResult(normalized);
     } catch (loadError) {
       if (agentLoadRun.current === run) setError(loadError?.message || String(loadError));
     } finally {
@@ -219,9 +217,21 @@ export function QuickCapture() {
     listen(AI_SESSION_MONITOR_UPDATED_EVENT, ({ payload }) => {
       if (!disposed) {
         setHasWaitingAiSession(aiSessionWaitingStatusFromPayload(payload));
-        if (aiSessionPayloadIncludesSessions(payload)) {
-          const next = normalizeAiSessionSnapshot(payload);
-          setAgentResult((current) => newerAiSessionSnapshot(current, next));
+        const revision = aiSessionRevisionFromPayload(payload);
+        const refreshedAt = Number(payload?.lastRefreshedAt);
+        if (revision === agentRevision.current && Number.isFinite(refreshedAt) && refreshedAt > 0) {
+          setAgentResult((current) => ({ ...current, loadedAt: refreshedAt, lastRefreshedAt: refreshedAt }));
+        }
+        if (
+          activeTab === "agents"
+          && revision
+          && revision !== agentRevision.current
+          && revision !== requestedAgentRevision.current
+        ) {
+          requestedAgentRevision.current = revision;
+          void loadAgents().finally(() => {
+            if (requestedAgentRevision.current === revision) requestedAgentRevision.current = "";
+          });
         }
       }
     }).then((cleanup) => {
@@ -239,7 +249,7 @@ export function QuickCapture() {
       disposed = true;
       unlisten?.();
     };
-  }, []);
+  }, [activeTab, loadAgents]);
 
   useEffect(() => {
     function handleWindowKeyDown(event) {
@@ -320,7 +330,6 @@ export function QuickCapture() {
         await api.openAiSessionTerminal({
           provider: session.provider,
           sessionId: session.id,
-          cwd: session.cwd || null,
         });
       }
       await hide(false);
@@ -577,7 +586,6 @@ function AgentList({
   }
 
   const now = Date.now();
-  const doneWindowMs = aiSessionDoneWindowMs(settings);
 
   return (
     <TooltipProvider>
@@ -609,8 +617,8 @@ function AgentList({
               ? <LoaderCircle className="size-5 shrink-0 animate-spin" />
               : (
                 <AiSessionStateIcon
-                  state={aiSessionTreeState(session, now, doneWindowMs)}
-                  label={aiSessionStateTooltip(session, { now, doneWindowMs, tree: true })}
+                  state={aiSessionTreeState(session)}
+                  label={aiSessionStateTooltip(session, { now, tree: true })}
                   className="size-5"
                 />
               )}

@@ -46,7 +46,25 @@ pub struct AiSession {
     children: Vec<AiSession>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub struct AiSessionDisplay {
+    id: String,
+    provider: String,
+    origin: String,
+    title: String,
+    cwd: Option<String>,
+    updated_at: i64,
+    state: String,
+    completed_at: Option<i64>,
+    archived_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archive_scope: Option<String>,
+    open_targets: Vec<String>,
+    children: Vec<AiSessionDisplay>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub struct AiSessionProviderWarning {
     provider: String,
@@ -64,9 +82,10 @@ pub struct AiSessionList {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AiSessionSnapshot {
-    sessions: Vec<AiSession>,
-    archived_sessions: Vec<AiSession>,
+    sessions: Vec<AiSessionDisplay>,
+    archived_sessions: Vec<AiSessionDisplay>,
     warnings: Vec<AiSessionProviderWarning>,
+    revision: String,
     loaded_at: i64,
     last_refreshed_at: i64,
     waiting_session_count: u32,
@@ -76,17 +95,25 @@ pub struct AiSessionSnapshot {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AiSessionMonitorStatus {
+    revision: String,
     last_refreshed_at: i64,
     waiting_session_count: u32,
     waiting_terminal_tab_ids: Vec<String>,
 }
 
-impl From<&AiSessionSnapshot> for AiSessionMonitorStatus {
-    fn from(snapshot: &AiSessionSnapshot) -> Self {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AiSessionMonitorSnapshot {
+    display: AiSessionSnapshot,
+    source_sessions: Vec<AiSession>,
+}
+
+impl From<&AiSessionMonitorSnapshot> for AiSessionMonitorStatus {
+    fn from(snapshot: &AiSessionMonitorSnapshot) -> Self {
         Self {
-            last_refreshed_at: snapshot.last_refreshed_at,
-            waiting_session_count: snapshot.waiting_session_count,
-            waiting_terminal_tab_ids: snapshot.waiting_terminal_tab_ids.clone(),
+            revision: snapshot.display.revision.clone(),
+            last_refreshed_at: snapshot.display.last_refreshed_at,
+            waiting_session_count: snapshot.display.waiting_session_count,
+            waiting_terminal_tab_ids: snapshot.display.waiting_terminal_tab_ids.clone(),
         }
     }
 }
@@ -98,7 +125,7 @@ struct AiSessionMonitorRuntime {
     window_foreground: bool,
     requested_generation: u64,
     completed_generation: u64,
-    latest: Option<AiSessionSnapshot>,
+    latest: Option<AiSessionMonitorSnapshot>,
     last_error: Option<String>,
 }
 
@@ -115,7 +142,7 @@ impl AiSessionMonitorHandle {
         ))
     }
 
-    fn request_refresh(&self) -> Result<AiSessionSnapshot, String> {
+    fn request_refresh(&self) -> Result<AiSessionMonitorSnapshot, String> {
         let (lock, wake) = &*self.shared;
         let mut runtime = lock.lock().map_err(db_error)?;
         runtime.requested_generation = runtime.requested_generation.saturating_add(1);
@@ -133,7 +160,7 @@ impl AiSessionMonitorHandle {
         }
     }
 
-    fn latest_or_refresh(&self) -> Result<AiSessionSnapshot, String> {
+    fn latest_or_refresh(&self) -> Result<AiSessionMonitorSnapshot, String> {
         let latest = {
             let (lock, _) = &*self.shared;
             lock.lock().map_err(db_error)?.latest.clone()
@@ -159,6 +186,19 @@ impl AiSessionMonitorHandle {
                 .request_refresh()
                 .map(|snapshot| AiSessionMonitorStatus::from(&snapshot)),
         }
+    }
+
+    pub(crate) fn latest_session_cwd(
+        &self,
+        provider: &str,
+        session_id: &str,
+    ) -> Result<Option<String>, String> {
+        self.latest_or_refresh()?
+            .source_sessions
+            .iter()
+            .find(|session| session.provider == provider && session.id == session_id)
+            .map(|session| session.cwd.clone())
+            .ok_or_else(|| "AI session was not found in the latest native scan.".to_string())
     }
 
     pub(crate) fn update_settings(&self, settings: AiSessionSettings) {
@@ -228,6 +268,55 @@ fn waiting_terminal_session_keys(sessions: &[AiSession]) -> Vec<(String, String)
         collect(session, &mut keys);
     }
     keys.into_iter().collect()
+}
+
+fn ai_session_display_state(session: &AiSession, now: i64, done_duration_seconds: u64) -> String {
+    if session.waiting_for_input {
+        "waiting"
+    } else if session.running {
+        "running"
+    } else if session.completed_at.is_some_and(|completed_at| {
+        now.saturating_sub(completed_at)
+            <= i64::try_from(done_duration_seconds.saturating_mul(1_000)).unwrap_or(i64::MAX)
+    }) {
+        "done"
+    } else {
+        "idle"
+    }
+    .to_string()
+}
+
+fn display_session(session: &AiSession, now: i64, done_duration_seconds: u64) -> AiSessionDisplay {
+    AiSessionDisplay {
+        id: session.id.clone(),
+        provider: session.provider.clone(),
+        origin: session.origin.clone(),
+        title: session.title.clone(),
+        cwd: session.cwd.clone(),
+        updated_at: session.updated_at,
+        state: ai_session_display_state(session, now, done_duration_seconds),
+        completed_at: session.completed_at,
+        archived_at: session.archived_at,
+        archive_scope: session.archive_scope.clone(),
+        open_targets: session.open_targets.clone(),
+        children: session
+            .children
+            .iter()
+            .map(|child| display_session(child, now, done_duration_seconds))
+            .collect(),
+    }
+}
+
+fn display_revision(
+    sessions: &[AiSessionDisplay],
+    archived_sessions: &[AiSessionDisplay],
+    warnings: &[AiSessionProviderWarning],
+) -> String {
+    let mut hasher = DefaultHasher::new();
+    sessions.hash(&mut hasher);
+    archived_sessions.hash(&mut hasher);
+    warnings.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 pub fn init_database(db: &Connection) -> rusqlite::Result<()> {
@@ -475,7 +564,11 @@ fn codex_database(home: &Path) -> Option<PathBuf> {
     .max_by_key(|path| file_millis(path))
 }
 
-fn read_codex_database(path: &Path, since: i64) -> Result<Vec<AiSession>, String> {
+fn read_codex_database(
+    path: &Path,
+    since: i64,
+    cache: &mut CodexDiscoveryCache,
+) -> Result<Vec<AiSession>, String> {
     let db = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -494,7 +587,9 @@ fn read_codex_database(path: &Path, since: i64) -> Result<Vec<AiSession>, String
             let rollout_path = row.get::<_, String>(6).unwrap_or_default();
             let updated_at = millis(row.get(2)?);
             let state = if updated_at >= since {
-                codex_session_state(Path::new(&rollout_path))
+                read_codex_transcript_state_cached(Path::new(&rollout_path), cache)
+                    .map(|state| state.lifecycle)
+                    .unwrap_or_default()
             } else {
                 CodexSessionState::default()
             };
@@ -612,7 +707,7 @@ fn codex_origin(source: &str, rollout_path: &Path) -> String {
     "unknown".to_string()
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 struct CodexSessionState {
     pending_inputs: HashSet<String>,
     pending_approvals: HashSet<String>,
@@ -836,6 +931,193 @@ fn update_codex_session_state(value: &Value, state: &mut CodexSessionState) {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct CodexTranscriptState {
+    id: Option<String>,
+    cwd: Option<String>,
+    created_at: i64,
+    title: Option<String>,
+    origin: String,
+    lifecycle: CodexSessionState,
+}
+
+impl CodexTranscriptState {
+    fn apply(&mut self, value: &Value) {
+        update_codex_session_state(value, &mut self.lifecycle);
+        let timestamp = timestamp_millis(value.get("timestamp").and_then(Value::as_str));
+        if value.get("type").and_then(Value::as_str) == Some("session_meta") {
+            let Some(payload) = value.get("payload") else {
+                return;
+            };
+            self.id = payload
+                .get("id")
+                .or_else(|| payload.get("session_id"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            self.cwd = payload
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            self.created_at =
+                timestamp_millis(payload.get("timestamp").and_then(Value::as_str)).max(timestamp);
+            let source = payload.get("source").and_then(Value::as_str).unwrap_or("");
+            let originator = payload
+                .get("originator")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            self.origin = if source.eq_ignore_ascii_case("cli") {
+                "cli".to_string()
+            } else if originator.eq_ignore_ascii_case("Codex Desktop") {
+                "desktop".to_string()
+            } else {
+                "unknown".to_string()
+            };
+        } else if self.title.is_none()
+            && value.get("type").and_then(Value::as_str) == Some("response_item")
+            && value.pointer("/payload/role").and_then(Value::as_str) == Some("user")
+        {
+            self.title = value
+                .pointer("/payload/content")
+                .and_then(content_text)
+                .map(|text| concise_title(&text, "Codex session"));
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CodexTranscriptCacheEntry {
+    file_len: u64,
+    modified_at: i64,
+    created_at: i64,
+    prefix_len: usize,
+    prefix_hash: u64,
+    complete_len: u64,
+    state: CodexTranscriptState,
+}
+
+#[derive(Debug, Default)]
+struct CodexDiscoveryCache {
+    transcripts: HashMap<PathBuf, CodexTranscriptCacheEntry>,
+    #[cfg(test)]
+    full_reads: usize,
+    #[cfg(test)]
+    incremental_reads: usize,
+}
+
+fn file_prefix_hash(path: &Path, prefix_len: usize) -> Option<u64> {
+    let mut file = fs::File::open(path).ok()?;
+    let mut prefix = [0_u8; 4096];
+    let read = file.read(&mut prefix[..prefix_len.min(4096)]).ok()?;
+    let mut hasher = DefaultHasher::new();
+    prefix[..read].hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+fn read_complete_codex_lines<R: BufRead>(
+    reader: &mut R,
+    state: &mut CodexTranscriptState,
+    start: u64,
+) -> u64 {
+    let mut complete_len = start;
+    loop {
+        let mut line = String::new();
+        let Ok(bytes_read) = reader.read_line(&mut line) else {
+            break;
+        };
+        if bytes_read == 0 {
+            break;
+        }
+        let parsed = serde_json::from_str::<Value>(&line);
+        if !line.ends_with('\n') && parsed.is_err() {
+            break;
+        }
+        complete_len = complete_len.saturating_add(bytes_read as u64);
+        if let Ok(value) = parsed {
+            state.apply(&value);
+        }
+    }
+    complete_len
+}
+
+fn read_codex_transcript_state_cached(
+    path: &Path,
+    cache: &mut CodexDiscoveryCache,
+) -> Option<CodexTranscriptState> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            cache.transcripts.remove(path);
+            return None;
+        }
+    };
+    let file_len = metadata.len();
+    let modified_at = file_millis(path);
+    let created_at = file_created_millis(&metadata);
+    let prefix_len = cache
+        .transcripts
+        .get(path)
+        .map(|entry| entry.prefix_len)
+        .unwrap_or_else(|| file_len.min(4096) as usize);
+    let prefix_hash = file_prefix_hash(path, prefix_len)?;
+    if let Some(entry) = cache.transcripts.get(path) {
+        if entry.file_len == file_len
+            && entry.modified_at == modified_at
+            && entry.created_at == created_at
+            && entry.prefix_hash == prefix_hash
+        {
+            return Some(entry.state.clone());
+        }
+    }
+    let can_append = cache.transcripts.get(path).is_some_and(|entry| {
+        file_len > entry.file_len
+            && prefix_hash == entry.prefix_hash
+            && (created_at == 0 || entry.created_at == 0 || created_at == entry.created_at)
+    });
+    let (mut state, complete_len) = if can_append {
+        let entry = cache.transcripts.get(path)?;
+        let mut state = entry.state.clone();
+        let mut file = fs::File::open(path).ok()?;
+        file.seek(SeekFrom::Start(entry.complete_len)).ok()?;
+        let mut reader = BufReader::new(file);
+        let complete_len = read_complete_codex_lines(&mut reader, &mut state, entry.complete_len);
+        #[cfg(test)]
+        {
+            cache.incremental_reads += 1;
+        }
+        (state, complete_len)
+    } else {
+        let mut state = CodexTranscriptState {
+            origin: "unknown".to_string(),
+            ..CodexTranscriptState::default()
+        };
+        let file = fs::File::open(path).ok()?;
+        let mut reader = BufReader::new(file);
+        let complete_len = read_complete_codex_lines(&mut reader, &mut state, 0);
+        #[cfg(test)]
+        {
+            cache.full_reads += 1;
+        }
+        (state, complete_len)
+    };
+    if state.origin.is_empty() {
+        state.origin = "unknown".to_string();
+    }
+    cache.transcripts.insert(
+        path.to_path_buf(),
+        CodexTranscriptCacheEntry {
+            file_len,
+            modified_at,
+            created_at,
+            prefix_len,
+            prefix_hash,
+            complete_len,
+            state: state.clone(),
+        },
+    );
+    Some(state)
+}
+
+#[cfg(test)]
 fn codex_session_state(path: &Path) -> CodexSessionState {
     let Ok(file) = fs::File::open(path) else {
         return CodexSessionState::default();
@@ -856,6 +1138,7 @@ fn codex_session_state(path: &Path) -> CodexSessionState {
     state
 }
 
+#[cfg(test)]
 fn read_codex_transcript(path: &Path) -> Option<AiSession> {
     let file = fs::File::open(path).ok()?;
     let mut id = None;
@@ -931,11 +1214,11 @@ fn read_codex_transcript(path: &Path) -> Option<AiSession> {
     })
 }
 
-fn discover_codex(since: i64) -> Result<Vec<AiSession>, String> {
+fn discover_codex(since: i64, cache: &mut CodexDiscoveryCache) -> Result<Vec<AiSession>, String> {
     let home =
         codex_home().ok_or_else(|| "Could not determine the Codex data directory.".to_string())?;
     if let Some(database) = codex_database(&home) {
-        if let Ok(sessions) = read_codex_database(&database, since) {
+        if let Ok(sessions) = read_codex_database(&database, since, cache) {
             return Ok(sessions);
         }
     }
@@ -949,9 +1232,38 @@ fn discover_codex(since: i64) -> Result<Vec<AiSession>, String> {
         &|path| path.extension().is_some_and(|value| value == "jsonl"),
         &mut files,
     );
-    Ok(files
+    let selected = files.into_iter().collect::<HashSet<_>>();
+    cache.transcripts.retain(|path, _| selected.contains(path));
+    Ok(selected
         .iter()
-        .filter_map(|path| read_codex_transcript(path))
+        .filter_map(|path| {
+            let state = read_codex_transcript_state_cached(path, cache)?;
+            let mut lifecycle = state.lifecycle;
+            if lifecycle.completed_at == Some(0) {
+                lifecycle.completed_at = match file_millis(path) {
+                    0 => None,
+                    value => Some(value),
+                };
+            }
+            Some(AiSession {
+                id: state.id?,
+                provider: "codex".to_string(),
+                title: state.title.unwrap_or_else(|| "Codex session".to_string()),
+                cwd: state.cwd,
+                created_at: state.created_at,
+                updated_at: file_millis(path).max(state.created_at),
+                parent_id: None,
+                kind: "session".to_string(),
+                origin: state.origin,
+                waiting_for_input: lifecycle.waiting_for_input(),
+                running: lifecycle.running,
+                completed_at: lifecycle.completed_at,
+                archived_at: None,
+                archive_scope: None,
+                open_targets: open_targets("codex"),
+                children: Vec::new(),
+            })
+        })
         .collect())
 }
 
@@ -1144,15 +1456,6 @@ fn read_complete_claude_lines<R: BufRead>(
     complete_len
 }
 
-fn claude_prefix_hash(path: &Path, prefix_len: usize) -> Option<u64> {
-    let mut file = fs::File::open(path).ok()?;
-    let mut prefix = [0_u8; 4096];
-    let read = file.read(&mut prefix[..prefix_len.min(4096)]).ok()?;
-    let mut hasher = DefaultHasher::new();
-    prefix[..read].hash(&mut hasher);
-    Some(hasher.finish())
-}
-
 fn claude_session_from_state(
     path: &Path,
     projects_root: &Path,
@@ -1220,7 +1523,7 @@ fn read_claude_transcript_cached(
         .get(path)
         .map(|entry| entry.prefix_len)
         .unwrap_or_else(|| file_len.min(4096) as usize);
-    let prefix_hash = claude_prefix_hash(path, prefix_len)?;
+    let prefix_hash = file_prefix_hash(path, prefix_len)?;
     if let Some(entry) = cache.transcripts.get(path) {
         if entry.file_len == file_len
             && entry.modified_at == modified_at
@@ -1502,6 +1805,21 @@ fn validate_archivable_session(session: &AiSession) -> Result<(), String> {
     Ok(())
 }
 
+fn authoritative_archivable_session(
+    snapshot: &AiSessionMonitorSnapshot,
+    provider: &str,
+    session_id: &str,
+) -> Result<AiSession, String> {
+    let session = snapshot
+        .source_sessions
+        .iter()
+        .find(|session| session.provider == provider && session.id == session_id)
+        .cloned()
+        .ok_or_else(|| "AI session was not found in the latest native scan.".to_string())?;
+    validate_archivable_session(&session)?;
+    Ok(session)
+}
+
 fn archive_session_in_db(
     db: &Connection,
     session: &AiSession,
@@ -1683,13 +2001,16 @@ fn scan_ai_sessions(
     state: &AppState,
     since: i64,
     settings: AiSessionSettings,
+    codex_cache: &mut CodexDiscoveryCache,
     claude_cache: &mut ClaudeDiscoveryCache,
 ) -> Result<AiSessionList, String> {
     let mut sessions = Vec::new();
     let mut warnings = Vec::new();
     let mut providers = Vec::new();
     if settings.codex_cli || settings.codex_desktop {
-        providers.push(("codex", discover_codex(since)));
+        providers.push(("codex", discover_codex(since, codex_cache)));
+    } else {
+        codex_cache.transcripts.clear();
     }
     if settings.claude_cli || settings.claude_desktop {
         providers.push(("claude", discover_claude(since, claude_cache)));
@@ -1718,12 +2039,13 @@ fn scan_ai_sessions(
 fn scan_ai_session_snapshot(
     app: &tauri::AppHandle,
     settings: AiSessionSettings,
+    codex_cache: &mut CodexDiscoveryCache,
     claude_cache: &mut ClaudeDiscoveryCache,
-) -> Result<AiSessionSnapshot, String> {
+) -> Result<AiSessionMonitorSnapshot, String> {
     let requested_at = now_millis();
     let since = requested_at - AI_SESSION_MONITOR_WINDOW_HOURS * 3_600_000;
     let state = app.state::<AppState>();
-    let result = scan_ai_sessions(state.inner(), since, settings, claude_cache)?;
+    let result = scan_ai_sessions(state.inner(), since, settings, codex_cache, claude_cache)?;
     let refreshed_at = now_millis();
     let waiting_session_count = waiting_session_count(&result.sessions);
     let waiting_terminal_sessions = waiting_terminal_session_keys(&result.sessions);
@@ -1732,30 +2054,42 @@ fn scan_ai_session_snapshot(
         terminal_state.inner(),
         &waiting_terminal_sessions,
     );
-    Ok(AiSessionSnapshot {
-        sessions: result.sessions,
-        archived_sessions: result.archived_sessions,
-        warnings: result.warnings,
-        loaded_at: refreshed_at,
-        last_refreshed_at: refreshed_at,
-        waiting_session_count,
-        waiting_terminal_tab_ids,
+    let sessions = result
+        .sessions
+        .iter()
+        .map(|session| display_session(session, refreshed_at, settings.done_state_duration_seconds))
+        .collect::<Vec<_>>();
+    let archived_sessions = result
+        .archived_sessions
+        .iter()
+        .map(|session| display_session(session, refreshed_at, settings.done_state_duration_seconds))
+        .collect::<Vec<_>>();
+    let revision = display_revision(&sessions, &archived_sessions, &result.warnings);
+    Ok(AiSessionMonitorSnapshot {
+        display: AiSessionSnapshot {
+            sessions,
+            archived_sessions,
+            warnings: result.warnings,
+            revision,
+            loaded_at: refreshed_at,
+            last_refreshed_at: refreshed_at,
+            waiting_session_count,
+            waiting_terminal_tab_ids,
+        },
+        source_sessions: result.sessions,
     })
 }
 
-fn publish_snapshot(app: &tauri::AppHandle, snapshot: &AiSessionSnapshot, include_sessions: bool) {
-    if let Err(error) = set_ai_session_dock_badge(app.clone(), snapshot.waiting_session_count) {
+fn publish_snapshot(app: &tauri::AppHandle, snapshot: &AiSessionMonitorSnapshot) {
+    if let Err(error) =
+        set_ai_session_dock_badge(app.clone(), snapshot.display.waiting_session_count)
+    {
         eprintln!("Could not update AI session dock badge: {error}");
     }
-    let emitted = if include_sessions {
-        app.emit(AI_SESSION_MONITOR_UPDATED_EVENT, snapshot)
-    } else {
-        app.emit(
-            AI_SESSION_MONITOR_UPDATED_EVENT,
-            AiSessionMonitorStatus::from(snapshot),
-        )
-    };
-    if let Err(error) = emitted {
+    if let Err(error) = app.emit(
+        AI_SESSION_MONITOR_UPDATED_EVENT,
+        AiSessionMonitorStatus::from(snapshot),
+    ) {
         eprintln!("Could not publish AI session monitor update: {error}");
     }
 }
@@ -1763,8 +2097,8 @@ fn publish_snapshot(app: &tauri::AppHandle, snapshot: &AiSessionSnapshot, includ
 fn complete_monitor_attempt(
     runtime: &mut AiSessionMonitorRuntime,
     completed_generation: u64,
-    result: Result<AiSessionSnapshot, String>,
-) -> Option<AiSessionSnapshot> {
+    result: Result<AiSessionMonitorSnapshot, String>,
+) -> Option<AiSessionMonitorSnapshot> {
     runtime.completed_generation = completed_generation;
     match result {
         Ok(snapshot) => {
@@ -1781,6 +2115,7 @@ fn complete_monitor_attempt(
 
 fn run_monitor(app: tauri::AppHandle, handle: AiSessionMonitorHandle) {
     let mut last_attempt_at: Option<Instant> = None;
+    let mut codex_cache = CodexDiscoveryCache::default();
     let mut claude_cache = ClaudeDiscoveryCache::default();
     loop {
         let (settings, started_generation) = {
@@ -1817,7 +2152,7 @@ fn run_monitor(app: tauri::AppHandle, handle: AiSessionMonitorHandle) {
             }
         };
 
-        let result = scan_ai_session_snapshot(&app, settings, &mut claude_cache);
+        let result = scan_ai_session_snapshot(&app, settings, &mut codex_cache, &mut claude_cache);
         last_attempt_at = Some(Instant::now());
         {
             let (lock, wake) = &*handle.shared;
@@ -1828,7 +2163,6 @@ fn run_monitor(app: tauri::AppHandle, handle: AiSessionMonitorHandle) {
                     return;
                 }
             };
-            let include_sessions = runtime.view_active;
             let published = if runtime.settings == settings {
                 if let Err(error) = &result {
                     eprintln!("Could not refresh AI sessions in the background: {error}");
@@ -1842,7 +2176,7 @@ fn run_monitor(app: tauri::AppHandle, handle: AiSessionMonitorHandle) {
             wake.notify_all();
             drop(runtime);
             if let Some(snapshot) = published {
-                publish_snapshot(&app, &snapshot, include_sessions);
+                publish_snapshot(&app, &snapshot);
             }
         }
     }
@@ -1898,13 +2232,7 @@ pub fn setup_monitor_window_events(app: &tauri::AppHandle) -> Result<(), String>
         .ok()
         .and_then(|runtime| runtime.latest.clone());
     if let Some(snapshot) = latest {
-        let include_sessions = monitor
-            .shared
-            .0
-            .lock()
-            .map(|runtime| runtime.view_active)
-            .unwrap_or(false);
-        publish_snapshot(app, &snapshot, include_sessions);
+        publish_snapshot(app, &snapshot);
     }
     let observed_window = window.clone();
     window.on_window_event(move |event| {
@@ -1929,9 +2257,11 @@ pub async fn latest_ai_sessions(
     monitor: tauri::State<'_, AiSessionMonitorHandle>,
 ) -> Result<AiSessionSnapshot, String> {
     let monitor = monitor.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || monitor.latest_or_refresh())
-        .await
-        .map_err(db_error)?
+    tauri::async_runtime::spawn_blocking(move || {
+        monitor.latest_or_refresh().map(|snapshot| snapshot.display)
+    })
+    .await
+    .map_err(db_error)?
 }
 
 #[tauri::command]
@@ -1949,9 +2279,11 @@ pub async fn refresh_ai_sessions(
     monitor: tauri::State<'_, AiSessionMonitorHandle>,
 ) -> Result<AiSessionSnapshot, String> {
     let monitor = monitor.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || monitor.request_refresh())
-        .await
-        .map_err(db_error)?
+    tauri::async_runtime::spawn_blocking(move || {
+        monitor.request_refresh().map(|snapshot| snapshot.display)
+    })
+    .await
+    .map_err(db_error)?
 }
 
 #[tauri::command]
@@ -1963,12 +2295,26 @@ pub fn set_ai_session_monitor_view_active(
 }
 
 #[tauri::command]
-pub fn archive_ai_session(
+pub async fn archive_ai_session(
     state: tauri::State<'_, AppState>,
-    session: AiSession,
-) -> Result<AiSession, String> {
+    monitor: tauri::State<'_, AiSessionMonitorHandle>,
+    provider: String,
+    session_id: String,
+) -> Result<(), String> {
+    if !matches!(provider.as_str(), "codex" | "claude") {
+        return Err("Unsupported AI session provider.".to_string());
+    }
+    if !valid_session_id(&session_id) {
+        return Err("Invalid AI session identifier.".to_string());
+    }
+    let monitor = monitor.inner().clone();
+    let snapshot = tauri::async_runtime::spawn_blocking(move || monitor.request_refresh())
+        .await
+        .map_err(db_error)??;
+    let session = authoritative_archivable_session(&snapshot, &provider, &session_id)?;
     let db = state.db.lock().map_err(db_error)?;
-    archive_session_with_sync(&db, &session, now_millis(), run_codex_archive_action)
+    archive_session_with_sync(&db, &session, now_millis(), run_codex_archive_action)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -2051,15 +2397,24 @@ mod tests {
         }
     }
 
-    fn snapshot(sessions: Vec<AiSession>, refreshed_at: i64) -> AiSessionSnapshot {
-        AiSessionSnapshot {
-            waiting_session_count: waiting_session_count(&sessions),
-            waiting_terminal_tab_ids: vec![],
-            sessions,
-            archived_sessions: vec![],
-            warnings: vec![],
-            loaded_at: refreshed_at,
-            last_refreshed_at: refreshed_at,
+    fn snapshot(sessions: Vec<AiSession>, refreshed_at: i64) -> AiSessionMonitorSnapshot {
+        let display_sessions = sessions
+            .iter()
+            .map(|session| display_session(session, refreshed_at, 10_800))
+            .collect::<Vec<_>>();
+        let revision = display_revision(&display_sessions, &[], &[]);
+        AiSessionMonitorSnapshot {
+            display: AiSessionSnapshot {
+                waiting_session_count: waiting_session_count(&sessions),
+                waiting_terminal_tab_ids: vec![],
+                sessions: display_sessions,
+                archived_sessions: vec![],
+                warnings: vec![],
+                revision,
+                loaded_at: refreshed_at,
+                last_refreshed_at: refreshed_at,
+            },
+            source_sessions: sessions,
         }
     }
 
@@ -2111,6 +2466,89 @@ mod tests {
         let idle = session("idle", 100, None);
         assert_eq!(waiting_session_count(&[waiting_parent, idle]), 1);
         assert_eq!(waiting_session_count(&[]), 0);
+    }
+
+    #[test]
+    fn derives_display_state_in_rust_with_expected_precedence_and_done_boundary() {
+        let now = 20_000_000;
+        let mut candidate = session("state", now, None);
+        candidate.completed_at = Some(now - 60_000);
+        assert_eq!(ai_session_display_state(&candidate, now, 60), "done");
+        candidate.completed_at = Some(now - 60_001);
+        assert_eq!(ai_session_display_state(&candidate, now, 60), "idle");
+        candidate.running = true;
+        assert_eq!(ai_session_display_state(&candidate, now, 60), "running");
+        candidate.waiting_for_input = true;
+        assert_eq!(ai_session_display_state(&candidate, now, 60), "waiting");
+    }
+
+    #[test]
+    fn display_dto_excludes_internal_lifecycle_and_transcript_fields() {
+        let mut source = session("display", 100, None);
+        source.running = true;
+        let serialized = serde_json::to_value(display_session(&source, 100, 10_800)).unwrap();
+        let object = serialized.as_object().unwrap();
+        assert_eq!(object.get("state").and_then(Value::as_str), Some("running"));
+        for internal in [
+            "createdAt",
+            "parentId",
+            "kind",
+            "running",
+            "waitingForInput",
+            "pendingInputs",
+            "transcript",
+        ] {
+            assert!(
+                !object.contains_key(internal),
+                "unexpected field {internal}"
+            );
+        }
+    }
+
+    #[test]
+    fn display_revision_changes_only_for_meaningful_display_content() {
+        let source = session("revision", 100, None);
+        let first = vec![display_session(&source, 100, 10_800)];
+        let same = vec![display_session(&source, 200, 10_800)];
+        assert_eq!(
+            display_revision(&first, &[], &[]),
+            display_revision(&same, &[], &[])
+        );
+
+        let mut changed_source = source;
+        changed_source.title = "Changed".to_string();
+        let changed = vec![display_session(&changed_source, 200, 10_800)];
+        assert_ne!(
+            display_revision(&first, &[], &[]),
+            display_revision(&changed, &[], &[])
+        );
+    }
+
+    #[test]
+    fn authoritative_archive_lookup_rejects_missing_children_and_active_sessions() {
+        let mut parent = session("parent", 100, None);
+        parent.children.push(session("child", 100, Some("parent")));
+        let parent_snapshot = snapshot(vec![parent], 100);
+        assert!(authoritative_archivable_session(&parent_snapshot, "codex", "parent").is_ok());
+        assert!(
+            authoritative_archivable_session(&parent_snapshot, "codex", "child")
+                .unwrap_err()
+                .contains("not found")
+        );
+        assert!(
+            authoritative_archivable_session(&parent_snapshot, "codex", "missing")
+                .unwrap_err()
+                .contains("not found")
+        );
+
+        let mut running = session("running", 100, None);
+        running.running = true;
+        let snapshot = snapshot(vec![running], 100);
+        assert!(
+            authoritative_archivable_session(&snapshot, "codex", "running")
+                .unwrap_err()
+                .contains("cannot be archived")
+        );
     }
 
     #[test]
@@ -2193,6 +2631,77 @@ mod tests {
             open_targets_with(true, true),
             vec!["terminal".to_string(), "desktop".to_string()]
         );
+    }
+
+    #[test]
+    fn codex_cache_reuses_appends_rereads_and_forgets_deleted_transcripts() {
+        let directory = fixture_dir("codex-cache");
+        let path = directory.join("rollout.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"session_meta\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"payload\":{\"id\":\"cached\",\"cwd\":\"/work\",\"source\":\"cli\"}}\n",
+                "{\"type\":\"event_msg\",\"timestamp\":\"2026-01-01T00:00:01Z\",\"payload\":{\"type\":\"task_started\"}}\n",
+            ),
+        )
+        .unwrap();
+        let mut cache = CodexDiscoveryCache::default();
+        assert!(
+            read_codex_transcript_state_cached(&path, &mut cache)
+                .unwrap()
+                .lifecycle
+                .running
+        );
+        assert_eq!((cache.full_reads, cache.incremental_reads), (1, 0));
+
+        assert!(read_codex_transcript_state_cached(&path, &mut cache).is_some());
+        assert_eq!((cache.full_reads, cache.incremental_reads), (1, 0));
+
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        std::io::Write::write_all(
+            &mut file,
+            b"{\"type\":\"event_msg\",\"timestamp\":\"2026-01-01T00:00:02Z\",\"payload\":{\"type\":\"task_complete\"}}\n",
+        )
+        .unwrap();
+        drop(file);
+        assert!(
+            !read_codex_transcript_state_cached(&path, &mut cache)
+                .unwrap()
+                .lifecycle
+                .running
+        );
+        assert_eq!(cache.incremental_reads, 1);
+
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        std::io::Write::write_all(&mut file, b"{\"type\":").unwrap();
+        drop(file);
+        assert!(read_codex_transcript_state_cached(&path, &mut cache).is_some());
+        assert!(
+            cache.transcripts.get(&path).unwrap().complete_len < fs::metadata(&path).unwrap().len()
+        );
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        std::io::Write::write_all(&mut file, b"\"ignored\"}\n").unwrap();
+        drop(file);
+        assert!(read_codex_transcript_state_cached(&path, &mut cache).is_some());
+
+        fs::write(
+            &path,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"replacement\",\"source\":\"cli\"}}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_codex_transcript_state_cached(&path, &mut cache)
+                .unwrap()
+                .id
+                .as_deref(),
+            Some("replacement")
+        );
+        assert_eq!(cache.full_reads, 2);
+
+        fs::remove_file(&path).unwrap();
+        assert!(read_codex_transcript_state_cached(&path, &mut cache).is_none());
+        assert!(!cache.transcripts.contains_key(&path));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -3033,7 +3542,8 @@ mod tests {
         .unwrap();
         drop(db);
 
-        let sessions = read_codex_database(&path, 50_000).unwrap();
+        let sessions =
+            read_codex_database(&path, 50_000, &mut CodexDiscoveryCache::default()).unwrap();
         assert!(
             sessions
                 .iter()
@@ -3142,7 +3652,7 @@ mod tests {
         .unwrap();
         drop(db);
 
-        let sessions = read_codex_database(&path, 0).unwrap();
+        let sessions = read_codex_database(&path, 0, &mut CodexDiscoveryCache::default()).unwrap();
         assert_eq!(sessions.len(), 2);
         assert!(!sessions.iter().any(|session| session.id == "archived"));
         let child = sessions

@@ -54,7 +54,7 @@ test("filters overlay agents by source, rolling 24 hours, and search", () => {
 test("sorts waiting agents before more recently updated agents", () => {
   const sessions = [
     session("recent", { updatedAt: NOW }),
-    session("waiting", { updatedAt: NOW - 3_600_000, waitingForInput: true }),
+    session("waiting", { updatedAt: NOW - 3_600_000, state: "waiting" }),
   ];
   assert.deepEqual(
     smartOverlayAgentSessions(sessions, settings, "", NOW).map(({ id }) => id),

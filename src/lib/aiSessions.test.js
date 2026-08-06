@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  AI_SESSION_DONE_WINDOW_MS,
   aiSessionDoneWindowMs,
   aiSessionArchiveActionLabel,
   aiSessionCanArchive,
@@ -60,15 +59,15 @@ test("sorts parents using their latest child activity", () => {
 
 test("prioritizes waiting session trees while preserving activity order", () => {
   const sessions = sortAiSessions([
-    { id: "recent", updatedAt: 300, waitingForInput: false, children: [] },
-    { id: "waiting-old", updatedAt: 100, waitingForInput: true, children: [] },
+    { id: "recent", updatedAt: 300, state: "idle", children: [] },
+    { id: "waiting-old", updatedAt: 100, state: "waiting", children: [] },
     {
       id: "waiting-child",
       updatedAt: 50,
-      waitingForInput: false,
-      children: [{ updatedAt: 200, waitingForInput: true }],
+      state: "idle",
+      children: [{ updatedAt: 200, state: "waiting" }],
     },
-    { id: "waiting-new", updatedAt: 250, waitingForInput: true, children: [] },
+    { id: "waiting-new", updatedAt: 250, state: "waiting", children: [] },
   ]);
 
   assert.deepEqual(sessions.map(({ id }) => id), [
@@ -138,78 +137,61 @@ test("styles source badges with provider identity colors", () => {
   assert.match(aiSessionProviderBadgeClass("unknown"), /muted/);
 });
 
-test("derives individual and rolled-up session states with waiting and running precedence", () => {
-  const now = 20_000_000;
-  const recentCompletion = now - AI_SESSION_DONE_WINDOW_MS;
-  const expiredCompletion = recentCompletion - 1;
-  assert.equal(aiSessionState({ waitingForInput: true, running: true, completedAt: recentCompletion }, now), "waiting");
-  assert.equal(aiSessionState({ waitingForInput: false, running: true, completedAt: recentCompletion }, now), "running");
-  assert.equal(aiSessionState({ waitingForInput: false, running: false, completedAt: recentCompletion }, now), "done");
-  assert.equal(aiSessionState({ waitingForInput: false, running: false, completedAt: expiredCompletion }, now), "idle");
-  assert.equal(aiSessionState({ waitingForInput: false, running: false }, now), "idle");
+test("uses native individual states and rolls up child state precedence", () => {
+  assert.equal(aiSessionState({ state: "waiting" }), "waiting");
+  assert.equal(aiSessionState({ state: "running" }), "running");
+  assert.equal(aiSessionState({ state: "done" }), "done");
+  assert.equal(aiSessionState({ state: "idle" }), "idle");
+  assert.equal(aiSessionState({ state: "invalid" }), "idle");
 
   assert.equal(aiSessionTreeState({
-    waitingForInput: false,
-    running: false,
-    children: [{ waitingForInput: false, running: true, completedAt: recentCompletion }],
-  }, now), "running");
+    state: "idle",
+    children: [{ state: "running" }],
+  }), "running");
   assert.equal(aiSessionTreeState({
-    waitingForInput: false,
-    running: true,
-    children: [{ waitingForInput: true, running: false, completedAt: recentCompletion }],
-  }, now), "waiting");
+    state: "running",
+    children: [{ state: "waiting" }],
+  }), "waiting");
   assert.equal(aiSessionTreeState({
-    waitingForInput: false,
-    running: false,
-    children: [{ waitingForInput: false, running: false, completedAt: recentCompletion }],
-  }, now), "done");
+    state: "idle",
+    children: [{ state: "done" }],
+  }), "done");
   assert.equal(aiSessionTreeState({
-    waitingForInput: false,
-    running: false,
-    children: [{ waitingForInput: false, running: false }],
-  }, now), "idle");
+    state: "idle",
+    children: [{ state: "idle" }],
+  }), "idle");
 });
 
-test("uses the configured Done duration and formats detailed state tooltips", () => {
+test("normalizes the configured Done duration and formats native state tooltips", () => {
   const now = 20_000_000;
-  const session = {
-    running: false,
-    waitingForInput: false,
+  const doneSession = {
+    state: "done",
     completedAt: now - 7_200_000,
     updatedAt: now - 7_000_000,
   };
   assert.equal(normalizeAiSessionDoneDuration(21_600), 21_600);
   assert.equal(normalizeAiSessionDoneDuration(30), 10_800);
   assert.equal(aiSessionDoneWindowMs({ doneStateDurationSeconds: 21_600 }), 21_600_000);
-  assert.equal(aiSessionState(session, now, 3_600_000), "idle");
-  assert.equal(aiSessionState(session, now, 10_800_000), "done");
   assert.equal(
-    aiSessionStateTooltip(session, { now, doneWindowMs: 10_800_000 }),
+    aiSessionStateTooltip(doneSession, { now }),
     "Done — completed 2h ago",
   );
   assert.equal(
-    aiSessionStateTooltip(session, { now, doneWindowMs: 3_600_000 }),
+    aiSessionStateTooltip({ ...doneSession, state: "idle" }, { now }),
     "Idle — last activity 1h ago",
   );
-  assert.equal(aiSessionStateTooltip({ running: true }, { now }), "Running");
-  assert.equal(aiSessionStateTooltip({ waitingForInput: true }, { now }), "Waiting for you");
+  assert.equal(aiSessionStateTooltip({ state: "running" }, { now }), "Running");
+  assert.equal(aiSessionStateTooltip({ state: "waiting" }, { now }), "Waiting for you");
 });
 
 test("allows archiving only done or idle session trees", () => {
-  const now = 20_000_000;
-  assert.equal(aiSessionCanArchive({ running: false, waitingForInput: false, children: [] }, now), true);
+  assert.equal(aiSessionCanArchive({ state: "idle", children: [] }), true);
+  assert.equal(aiSessionCanArchive({ state: "done", children: [] }), true);
+  assert.equal(aiSessionCanArchive({ state: "running", children: [] }), false);
   assert.equal(aiSessionCanArchive({
-    running: false,
-    waitingForInput: false,
-    completedAt: now,
-    children: [],
-  }, now), true);
-  assert.equal(aiSessionCanArchive({ running: true, waitingForInput: false, children: [] }, now), false);
-  assert.equal(aiSessionCanArchive({
-    running: false,
-    waitingForInput: false,
-    children: [{ running: false, waitingForInput: true }],
-  }, now), false);
+    state: "idle",
+    children: [{ state: "waiting" }],
+  }), false);
 });
 
 test("labels provider-synced and Station-only archive actions", () => {
@@ -284,35 +266,35 @@ test("migrates legacy refresh settings and detects waiting child sessions", () =
     doneStateDurationSeconds: 10_800,
   });
   assert.equal(aiSessionsWaitingForInput([
-    { waitingForInput: false, children: [{ waitingForInput: true }] },
+    { state: "idle", children: [{ state: "waiting" }] },
   ]), true);
   assert.equal(aiSessionsWaitingForInput([
-    { waitingForInput: false, children: [{ waitingForInput: false }] },
+    { state: "idle", children: [{ state: "idle" }] },
   ]), false);
 });
 
 test("counts waiting top-level AI session groups", () => {
   assert.equal(aiSessionsWaitingForInputCount([]), 0);
   assert.equal(aiSessionsWaitingForInputCount([
-    { waitingForInput: true, children: [] },
-    { waitingForInput: false, children: [] },
+    { state: "waiting", children: [] },
+    { state: "idle", children: [] },
   ]), 1);
   assert.equal(aiSessionsWaitingForInputCount([
-    { waitingForInput: true, children: [] },
-    { waitingForInput: false, children: [{ waitingForInput: true }] },
+    { state: "waiting", children: [] },
+    { state: "idle", children: [{ state: "waiting" }] },
   ]), 2);
   assert.equal(aiSessionsWaitingForInputCount([
     {
-      waitingForInput: false,
+      state: "idle",
       children: [
-        { waitingForInput: true },
-        { waitingForInput: true },
+        { state: "waiting" },
+        { state: "waiting" },
       ],
     },
   ]), 1);
   assert.equal(aiSessionsWaitingForInputCount([
-    { waitingForInput: true, archivedAt: Date.now(), children: [] },
-    { waitingForInput: false, children: [{ waitingForInput: false }] },
+    { state: "waiting", archivedAt: Date.now(), children: [] },
+    { state: "idle", children: [{ state: "idle" }] },
   ]), 0);
 });
 

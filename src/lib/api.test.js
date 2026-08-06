@@ -366,61 +366,28 @@ test("local fallback stores AI session source settings and fills missing default
   });
 });
 
-test("local fallback archives, upserts, lists, validates, and restores AI sessions", async () => {
+test("local fallback keeps AI session actions identifier-only and desktop-gated", async () => {
   let stored = "";
   global.localStorage = {
     getItem: () => stored,
     setItem: (_key, value) => { stored = value; },
   };
-  const session = {
-    id: "session-1",
-    provider: "codex",
-    title: "Finished work",
-    cwd: "/work/app",
-    createdAt: 10,
-    updatedAt: 20,
-    parentId: null,
-    kind: "session",
-    origin: "cli",
-    waitingForInput: false,
-    running: false,
-    completedAt: 20,
-    openTargets: ["terminal"],
-    children: [{ id: "child-1", running: false, waitingForInput: false }],
-  };
-
-  const archived = await api.archiveAiSession({ session });
-  assert.equal(archived.archivedAt > 0, true);
-  assert.equal(archived.archiveScope, "station");
-  assert.deepEqual((await api.listAiSessions({
-    since: 0,
-    settings: {},
-  })).archivedSessions.map(({ id }) => id), ["session-1"]);
-
-  await api.archiveAiSession({ session: { ...session, title: "Updated" } });
-  const listed = await api.listAiSessions({ since: 0, settings: {} });
-  assert.equal(listed.archivedSessions.length, 1);
-  assert.equal(listed.archivedSessions[0].title, "Updated");
-  assert.equal(listed.archivedSessions[0].archiveScope, "station");
-  assert.deepEqual(
-    (await api.latestAiSessions()).archivedSessions.map(({ id }) => id),
-    ["session-1"],
-  );
+  assert.deepEqual((await api.latestAiSessions()).archivedSessions, []);
   const monitorStatus = await api.latestAiSessionStatus();
+  assert.equal(monitorStatus.revision, "browser-empty");
   assert.equal(monitorStatus.lastRefreshedAt > 0, true);
   assert.equal(monitorStatus.waitingSessionCount, 0);
   assert.deepEqual(monitorStatus.waitingTerminalTabIds, []);
   assert.equal(await api.setAiSessionMonitorViewActive({ active: true }), null);
 
-  await assert.rejects(api.archiveAiSession({
-    session: { ...session, id: "bad;id" },
-  }), /Invalid/);
-  await assert.rejects(api.archiveAiSession({
-    session: { ...session, children: [{ id: "bad;child" }] },
-  }), /Invalid/);
-  await assert.rejects(api.archiveAiSession({
-    session: { ...session, running: true },
-  }), /cannot be archived/);
+  await assert.rejects(
+    api.archiveAiSession({ provider: "codex", sessionId: "bad;id" }),
+    /Invalid/,
+  );
+  await assert.rejects(
+    api.archiveAiSession({ provider: "codex", sessionId: "session-1" }),
+    /requires the desktop app/,
+  );
 
   await api.restoreAiSession({ provider: "codex", sessionId: "session-1" });
   assert.deepEqual((await api.listAiSessions({

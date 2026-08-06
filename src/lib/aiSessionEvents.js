@@ -1,16 +1,14 @@
-import { aiSessionsWaitingForInputCount } from "./aiSessions.js";
-
 export const AI_SESSION_MONITOR_UPDATED_EVENT = "ai-session-monitor-updated";
 
-export function aiSessionPayloadIncludesSessions(payload) {
-  return Array.isArray(payload?.sessions);
+export function aiSessionRevisionFromPayload(payload) {
+  return typeof payload?.revision === "string" ? payload.revision : "";
 }
 
 export function aiSessionWaitingStatusFromPayload(payload) {
   if (Number.isFinite(Number(payload?.waitingSessionCount))) {
     return Number(payload.waitingSessionCount) > 0;
   }
-  return aiSessionsWaitingForInputCount(payload?.sessions) > 0;
+  return false;
 }
 
 export function aiSessionWaitingTerminalTabIdsFromPayload(payload) {
@@ -28,11 +26,12 @@ export function normalizeAiSessionSnapshot(payload, now = Date.now()) {
     sessions,
     archivedSessions: Array.isArray(payload?.archivedSessions) ? payload.archivedSessions : [],
     warnings: Array.isArray(payload?.warnings) ? payload.warnings : [],
+    revision: aiSessionRevisionFromPayload(payload),
     loadedAt: Number.isFinite(loadedAt) && loadedAt > 0 ? loadedAt : now,
     lastRefreshedAt: Number.isFinite(refreshedAt) && refreshedAt > 0 ? refreshedAt : now,
     waitingSessionCount: Number.isFinite(Number(payload?.waitingSessionCount))
       ? Math.max(0, Number(payload.waitingSessionCount))
-      : aiSessionsWaitingForInputCount(sessions),
+      : 0,
     waitingTerminalTabIds: aiSessionWaitingTerminalTabIdsFromPayload(payload),
   };
 }

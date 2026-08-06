@@ -14,7 +14,7 @@ use tauri::{
 };
 use tauri_plugin_opener::OpenerExt;
 
-use super::{db_error, get_app_setting, now_millis, set_app_setting, AppState};
+use super::{ai_sessions, db_error, get_app_setting, now_millis, set_app_setting, AppState};
 
 pub const MAIN_TAB_ID: &str = "main";
 const MAIN_WEBVIEW_LABEL: &str = "main-content";
@@ -1436,9 +1436,9 @@ pub async fn open_ai_session_terminal(
     app: tauri::AppHandle,
     webview: Webview,
     state: tauri::State<'_, TerminalTabsState>,
+    monitor: tauri::State<'_, ai_sessions::AiSessionMonitorHandle>,
     provider: String,
     session_id: String,
-    cwd: Option<String>,
 ) -> Result<WorkspaceTabsSnapshot, String> {
     if !ai_session_terminal_label_allowed(webview.label()) {
         return Err("This webview cannot open AI sessions in a terminal.".to_string());
@@ -1450,6 +1450,14 @@ pub async fn open_ai_session_terminal(
             return Ok(snapshot);
         }
     }
+    let monitor = monitor.inner().clone();
+    let lookup_provider = provider.clone();
+    let lookup_session_id = session_id.clone();
+    let cwd = tauri::async_runtime::spawn_blocking(move || {
+        monitor.latest_session_cwd(&lookup_provider, &lookup_session_id)
+    })
+    .await
+    .map_err(db_error)??;
     let snapshot = create_terminal_tab_inner(&app, &state, true, cwd)?;
     complete_terminal_startup_input_inner(&app, &state, &snapshot.active_tab_id, command)?;
     show_and_focus_workspace_window(&app)?;

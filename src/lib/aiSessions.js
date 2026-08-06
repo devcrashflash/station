@@ -257,8 +257,8 @@ export function archivedAiSessionWindowCounts(sessions, filters, now = Date.now(
 }
 
 export function aiSessionTreeWaitingForInput(session) {
-  return session?.waitingForInput === true
-    || (session?.children || []).some((child) => child.waitingForInput === true);
+  return session?.state === "waiting"
+    || (session?.children || []).some((child) => child.state === "waiting");
 }
 
 export function aiSessionsWaitingForInput(sessions) {
@@ -271,28 +271,16 @@ export function aiSessionsWaitingForInputCount(sessions) {
   )).length;
 }
 
-export function aiSessionState(session, now = Date.now(), doneWindowMs = AI_SESSION_DONE_WINDOW_MS) {
-  if (session?.waitingForInput === true) return "waiting";
-  if (session?.running === true) return "running";
-  const completedAt = Number(session?.completedAt || 0);
-  if (
-    Number.isFinite(completedAt)
-    && completedAt > 0
-    && Math.max(0, Number(now) - completedAt) <= doneWindowMs
-  ) {
-    return "done";
-  }
-  return "idle";
+export function aiSessionState(session) {
+  return ["waiting", "running", "done", "idle"].includes(session?.state)
+    ? session.state
+    : "idle";
 }
 
-export function aiSessionTreeState(
-  session,
-  now = Date.now(),
-  doneWindowMs = AI_SESSION_DONE_WINDOW_MS,
-) {
+export function aiSessionTreeState(session) {
   const states = [
-    aiSessionState(session, now, doneWindowMs),
-    ...(session?.children || []).map((child) => aiSessionState(child, now, doneWindowMs)),
+    aiSessionState(session),
+    ...(session?.children || []).map((child) => aiSessionState(child)),
   ];
   if (states.includes("waiting")) return "waiting";
   if (states.includes("running")) return "running";
@@ -302,26 +290,22 @@ export function aiSessionTreeState(
 
 export function aiSessionCanArchive(
   session,
-  now = Date.now(),
-  doneWindowMs = AI_SESSION_DONE_WINDOW_MS,
 ) {
-  return ["done", "idle"].includes(aiSessionTreeState(session, now, doneWindowMs));
+  return ["done", "idle"].includes(aiSessionTreeState(session));
 }
 
 export function aiSessionStateTooltip(
   session,
-  { now = Date.now(), doneWindowMs = AI_SESSION_DONE_WINDOW_MS, tree = false } = {},
+  { now = Date.now(), tree = false } = {},
 ) {
-  const state = tree
-    ? aiSessionTreeState(session, now, doneWindowMs)
-    : aiSessionState(session, now, doneWindowMs);
+  const state = tree ? aiSessionTreeState(session) : aiSessionState(session);
   if (state === "waiting") return "Waiting for you";
   if (state === "running") return "Running";
 
   const sessions = tree ? [session, ...(session?.children || [])] : [session];
   if (state === "done") {
     const completedAt = Math.max(0, ...sessions
-      .filter((item) => aiSessionState(item, now, doneWindowMs) === "done")
+      .filter((item) => aiSessionState(item) === "done")
       .map((item) => Number(item?.completedAt || 0)));
     return completedAt > 0
       ? `Done — completed ${aiSessionRelativeTime(completedAt, now)}`

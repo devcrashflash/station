@@ -40,7 +40,6 @@ import {
   AI_SESSION_WINDOWS,
   aiSessionArchiveActionLabel,
   aiSessionCanArchive,
-  aiSessionDoneWindowMs,
   aiSessionProviderBadgeClass,
   aiSessionProviderFilterEnabled,
   aiSessionProviderLabel,
@@ -72,7 +71,6 @@ async function openSessionInTerminal(session) {
   await api.openAiSessionTerminal({
     provider: session.provider,
     sessionId: session.id,
-    cwd: session.cwd || null,
   });
 }
 
@@ -94,7 +92,6 @@ export function AiAgentsView({
   const searchInputRef = useRef(null);
   const shortcutKey = shortcutModifier();
   const normalizedSettings = useMemo(() => normalizeAiSessionSettings(settings), [settings]);
-  const doneWindowMs = aiSessionDoneWindowMs(normalizedSettings);
 
   useEffect(() => {
     setSourceFilters(aiSessionViewFilters(settings));
@@ -211,7 +208,7 @@ export function AiAgentsView({
     const key = `${session.provider}:${session.id}`;
     setBusySessionKey(key);
     try {
-      await api.archiveAiSession({ session });
+      await api.archiveAiSession({ provider: session.provider, sessionId: session.id });
       await onRefresh({ quiet: true });
     } catch (error) {
       onNotice(error?.message || String(error));
@@ -321,7 +318,6 @@ export function AiAgentsView({
                     key={`${session.provider}:${session.id}`}
                     session={session}
                     now={displayNow}
-                    doneWindowMs={doneWindowMs}
                     expanded={expanded.has(session.id)}
                     archived={sessionView === "archived"}
                     busy={busySessionKey === `${session.provider}:${session.id}`}
@@ -411,7 +407,6 @@ function AiSessionFilters({ settings, filters, onChange }) {
 function SessionRow({
   session,
   now,
-  doneWindowMs,
   expanded,
   archived,
   busy,
@@ -422,8 +417,8 @@ function SessionRow({
 }) {
   const hasChildren = session.children?.length > 0;
   const waitingForInput = aiSessionTreeWaitingForInput(session);
-  const state = aiSessionTreeState(session, now, doneWindowMs);
-  const stateLabel = aiSessionStateTooltip(session, { now, doneWindowMs, tree: true });
+  const state = aiSessionTreeState(session);
+  const stateLabel = aiSessionStateTooltip(session, { now, tree: true });
   const providerSyncedArchive = session.archiveScope === "provider";
   const actionLabel = aiSessionArchiveActionLabel(session, archived);
   const preferredOpenTarget = aiSessionPreferredOpenTarget(session);
@@ -484,7 +479,7 @@ function SessionRow({
               </TooltipTrigger>
               <TooltipContent>{actionLabel}</TooltipContent>
             </Tooltip>
-          ) : aiSessionCanArchive(session, now, doneWindowMs) ? (
+          ) : aiSessionCanArchive(session) ? (
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -549,14 +544,14 @@ function SessionRow({
           {session.children.map((child) => (
             <div key={child.id} className="flex min-w-0 items-center gap-3 border-b py-3 last:border-b-0">
               <AiSessionStateIcon
-                state={aiSessionState(child, now, doneWindowMs)}
-                label={aiSessionStateTooltip(child, { now, doneWindowMs })}
+                state={aiSessionState(child)}
+                label={aiSessionStateTooltip(child, { now })}
                 className="size-4"
               />
               <div className="min-w-0 flex-1">
                 <div className="flex min-w-0 items-center gap-2">
                   <p className="truncate text-sm font-medium">{child.title}</p>
-                  {child.waitingForInput && <WaitingForInputBadge />}
+                  {child.state === "waiting" && <WaitingForInputBadge />}
                 </div>
                 <p className="truncate text-xs text-muted-foreground">Subagent · {aiSessionRelativeTime(child.updatedAt)}</p>
               </div>

@@ -2,25 +2,23 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  aiSessionPayloadIncludesSessions,
+  aiSessionRevisionFromPayload,
   aiSessionWaitingTerminalTabIdsFromPayload,
   aiSessionWaitingStatusFromPayload,
   newerAiSessionSnapshot,
   normalizeAiSessionSnapshot,
 } from "./aiSessionEvents.js";
 
-test("distinguishes full snapshots from compact monitor status", () => {
-  assert.equal(aiSessionPayloadIncludesSessions({ sessions: [] }), true);
-  assert.equal(aiSessionPayloadIncludesSessions({ waitingSessionCount: 2 }), false);
-  assert.equal(aiSessionPayloadIncludesSessions(null), false);
+test("reads revisions from full snapshots and compact monitor status", () => {
+  assert.equal(aiSessionRevisionFromPayload({ revision: "abc" }), "abc");
+  assert.equal(aiSessionRevisionFromPayload({ revision: 123 }), "");
+  assert.equal(aiSessionRevisionFromPayload(null), "");
 });
 
 test("derives waiting status from native snapshots", () => {
   assert.equal(aiSessionWaitingStatusFromPayload({ waitingSessionCount: 2 }), true);
   assert.equal(aiSessionWaitingStatusFromPayload({ waitingSessionCount: 0 }), false);
-  assert.equal(aiSessionWaitingStatusFromPayload({
-    sessions: [{ waitingForInput: false, children: [{ waitingForInput: true }] }],
-  }), true);
+  assert.equal(aiSessionWaitingStatusFromPayload({ sessions: [{ state: "waiting" }] }), false);
   assert.equal(aiSessionWaitingStatusFromPayload(null), false);
 });
 
@@ -41,16 +39,18 @@ test("normalizes waiting terminal tab ids independently from global waiting stat
 
 test("normalizes native and browser AI session snapshots", () => {
   assert.deepEqual(normalizeAiSessionSnapshot({
-    sessions: [{ waitingForInput: true, children: [] }],
+    revision: "revision-1",
+    sessions: [{ state: "waiting", children: [] }],
     archivedSessions: "invalid",
     warnings: null,
   }, 123), {
-    sessions: [{ waitingForInput: true, children: [] }],
+    sessions: [{ state: "waiting", children: [] }],
     archivedSessions: [],
     warnings: [],
+    revision: "revision-1",
     loadedAt: 123,
     lastRefreshedAt: 123,
-    waitingSessionCount: 1,
+    waitingSessionCount: 0,
     waitingTerminalTabIds: [],
   });
 });

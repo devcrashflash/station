@@ -9,7 +9,7 @@ import {
 } from "@/lib/aiSessions";
 import {
   AI_SESSION_MONITOR_UPDATED_EVENT,
-  aiSessionPayloadIncludesSessions,
+  aiSessionRevisionFromPayload,
   newerAiSessionSnapshot,
   normalizeAiSessionSnapshot,
 } from "@/lib/aiSessionEvents";
@@ -19,6 +19,7 @@ const EMPTY_RESULT = {
   sessions: [],
   archivedSessions: [],
   warnings: [],
+  revision: "",
   loadedAt: Date.now(),
   lastRefreshedAt: null,
   waitingSessionCount: 0,
@@ -39,12 +40,17 @@ export function useAiSessionMonitor({
   const [waitingAiSessionCount, setWaitingAiSessionCount] = useState(0);
   const [loading, setLoading] = useState(false);
   const activeRun = useRef(0);
+  const resultRevision = useRef("");
   const started = useRef(false);
   const hasWaitingAiSession = waitingAiSessionCount > 0;
 
   const applyResult = useCallback((next) => {
     const normalized = normalizeAiSessionSnapshot(next);
-    setResult((current) => newerAiSessionSnapshot(current, normalized));
+    setResult((current) => {
+      const selected = newerAiSessionSnapshot(current, normalized);
+      resultRevision.current = selected.revision;
+      return selected;
+    });
     setWaitingAiSessionCount((current) => (
       current === normalized.waitingSessionCount ? current : normalized.waitingSessionCount
     ));
@@ -53,9 +59,18 @@ export function useAiSessionMonitor({
 
   const applyStatus = useCallback((next) => {
     const count = Number(next?.waitingSessionCount);
-    if (!Number.isFinite(count)) return;
-    const normalized = Math.max(0, count);
-    setWaitingAiSessionCount((current) => (current === normalized ? current : normalized));
+    if (Number.isFinite(count)) {
+      const normalized = Math.max(0, count);
+      setWaitingAiSessionCount((current) => (current === normalized ? current : normalized));
+    }
+    const refreshedAt = Number(next?.lastRefreshedAt);
+    const revision = aiSessionRevisionFromPayload(next);
+    if (!Number.isFinite(refreshedAt) || refreshedAt <= 0 || !revision) return;
+    setResult((current) => revision === current.revision ? {
+      ...current,
+      loadedAt: refreshedAt,
+      lastRefreshedAt: refreshedAt,
+    } : current);
   }, []);
 
   const refresh = useCallback(async ({ quiet = false } = {}) => {
@@ -108,10 +123,22 @@ export function useAiSessionMonitor({
     if (!settingsReady || !isDesktopApp()) return undefined;
     let disposed = false;
     let unlisten = null;
+    let requestedRevision = "";
     listen(AI_SESSION_MONITOR_UPDATED_EVENT, ({ payload }) => {
       if (disposed) return;
-      if (aiSessionPayloadIncludesSessions(payload)) applyResult(payload);
-      else applyStatus(payload);
+      applyStatus(payload);
+      const revision = aiSessionRevisionFromPayload(payload);
+      if (!foreground || !revision || revision === resultRevision.current || revision === requestedRevision) {
+        return;
+      }
+      requestedRevision = revision;
+      api.latestAiSessions().then((next) => {
+        if (!disposed) applyResult(next);
+      }).catch((error) => {
+        if (!disposed) onNotice(error?.message || String(error));
+      }).finally(() => {
+        if (requestedRevision === revision) requestedRevision = "";
+      });
     }).then((cleanup) => {
       if (disposed) cleanup();
       else {
@@ -127,7 +154,7 @@ export function useAiSessionMonitor({
       disposed = true;
       unlisten?.();
     };
-  }, [applyResult, applyStatus, onNotice, settingsReady]);
+  }, [applyResult, applyStatus, foreground, onNotice, settingsReady]);
 
   useEffect(() => {
     if (!settingsReady || !foreground || !isDesktopApp()) return undefined;

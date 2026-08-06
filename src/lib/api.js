@@ -4,7 +4,6 @@ import { formatLocalDate, localDayBounds, sortActivities } from "./activity.js";
 import { EMAIL_DESKTOP_REQUIRED_MESSAGE, OCR_DESKTOP_REQUIRED_MESSAGE } from "./ocr.js";
 import { AI_PROMPT_ICON_IDS } from "./aiPromptIcons.js";
 import {
-  aiSessionCanArchive,
   DEFAULT_AI_SESSION_SETTINGS,
   normalizeAiSessionSettings,
   sortArchivedAiSessions,
@@ -121,22 +120,25 @@ export const api = {
     })),
   latestAiSessionStatus: () =>
     call("latest_ai_session_status", {}, () => ({
+      revision: "browser-empty",
       lastRefreshedAt: Date.now(),
       waitingSessionCount: 0,
       waitingTerminalTabIds: [],
     })),
   setAiSessionMonitorViewActive: ({ active }) =>
     call("set_ai_session_monitor_view_active", { active }, () => null),
-  archiveAiSession: ({ session }) =>
-    call("archive_ai_session", { session }, () => local.archiveAiSession(session)),
+  archiveAiSession: ({ provider, sessionId }) =>
+    call("archive_ai_session", { provider, sessionId }, () => (
+      local.archiveAiSession(provider, sessionId)
+    )),
   restoreAiSession: ({ provider, sessionId }) =>
     call("restore_ai_session", { provider, sessionId }, () => local.restoreAiSession(provider, sessionId)),
   openAiSessionDesktop: ({ provider, sessionId }) =>
     call("open_ai_session_desktop", { provider, sessionId }, () => {
       throw new Error("Opening AI sessions requires the desktop app.");
     }),
-  openAiSessionTerminal: ({ provider, sessionId, cwd }) =>
-    call("open_ai_session_terminal", { provider, sessionId, cwd }, () => {
+  openAiSessionTerminal: ({ provider, sessionId }) =>
+    call("open_ai_session_terminal", { provider, sessionId }, () => {
       throw new Error("Opening AI sessions requires the desktop app.");
     }),
   listProjects: () => call("list_projects", {}, local.listProjects),
@@ -811,35 +813,14 @@ const local = {
     };
   },
 
-  archiveAiSession(session) {
-    const validTreeIds = (candidate) => (
-      /^[A-Za-z0-9_-]{1,128}$/.test(candidate?.id || "")
-      && (candidate.children || []).every(validTreeIds)
-    );
-    if (!["codex", "claude"].includes(session?.provider)) {
+  archiveAiSession(provider, sessionId) {
+    if (!["codex", "claude"].includes(provider)) {
       throw new Error("Unsupported AI session provider.");
     }
-    if (!validTreeIds(session)) {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(sessionId || "")) {
       throw new Error("Invalid AI session identifier.");
     }
-    if (session?.parentId || session?.kind !== "session") {
-      throw new Error("Only top-level AI sessions can be archived.");
-    }
-    if (!aiSessionCanArchive(session)) {
-      throw new Error("Running sessions and sessions waiting for input cannot be archived.");
-    }
-    const state = readState();
-    const archived = JSON.parse(JSON.stringify({
-      ...session,
-      archivedAt: now(),
-      archiveScope: "station",
-    }));
-    state.aiSessionArchives = (state.aiSessionArchives || []).filter((candidate) => (
-      candidate.provider !== archived.provider || candidate.id !== archived.id
-    ));
-    state.aiSessionArchives.push(archived);
-    writeState(state);
-    return archived;
+    throw new Error("Archiving discovered AI sessions requires the desktop app.");
   },
 
   restoreAiSession(provider, sessionId) {
