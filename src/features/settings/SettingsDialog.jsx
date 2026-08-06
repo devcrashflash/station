@@ -12,17 +12,19 @@ import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { Textarea } from "@/components/ui/textarea";
 import { aiPromptIconFor, aiPromptIconOptions } from "@/lib/aiPromptIcons";
-import { AI_PROMPT_MODE_OPTIONS, aiPromptModeLabel, defaultAiPromptMode } from "@/lib/aiPromptMode";
 import {
   AI_SESSION_BACKGROUND_REFRESH_INTERVALS,
+  AI_SESSION_MAX_DONE_DURATION_SECONDS,
+  AI_SESSION_MIN_DONE_DURATION_SECONDS,
   AI_SESSION_REFRESH_INTERVALS,
   AI_SESSION_SOURCE_OPTIONS,
   aiSessionProviderLabel,
   normalizeAiSessionSettings,
 } from "@/lib/aiSessions";
 import { calendarWarnings } from "@/lib/calendar";
-import { formatShortcut, shortcutFromKeyboardEvent } from "@/lib/keyboardShortcut";
-import { quickCaptureStatus } from "@/lib/quickCaptureSettings";
+import { api } from "@/lib/api";
+import { formatShortcut, shortcutFromKeyboardEvent, shortcutPreviewFromKeyboardEvent } from "@/lib/keyboardShortcut";
+import { quickCaptureShortcutConflict, quickCaptureStatus } from "@/lib/quickCaptureSettings";
 import { terminalFontFamily, terminalFontOptions, terminalFontStyle, terminalFontStyleOptions } from "@/lib/terminalFonts";
 import {
   DEFAULT_TERMINAL_SHORTCUTS,
@@ -62,6 +64,20 @@ const aiAgentTypeOptions = [
   { value: "codex", label: "Codex", icon: SquareTerminal },
   { value: "claude", label: "Claude", icon: Bot },
 ];
+
+const aiSessionDoneDurationUnits = [
+  { value: "minutes", label: "Minutes", seconds: 60 },
+  { value: "hours", label: "Hours", seconds: 3_600 },
+  { value: "days", label: "Days", seconds: 86_400 },
+];
+
+function aiSessionDoneDurationInput(seconds) {
+  const unit = [...aiSessionDoneDurationUnits]
+    .reverse()
+    .find((option) => seconds % option.seconds === 0)
+    || aiSessionDoneDurationUnits[0];
+  return { value: String(seconds / unit.seconds), unit: unit.value };
+}
 
 const themeOptions = [
   { value: "system", label: "System" },
@@ -160,7 +176,6 @@ export function SettingsDialog({
   const [aiPromptAgentType, setAiPromptAgentType] = useState("codex");
   const [aiPromptName, setAiPromptName] = useState("");
   const [aiPromptIcon, setAiPromptIcon] = useState("sparkles");
-  const [aiPromptMode, setAiPromptMode] = useState("plan");
   const [aiPromptText, setAiPromptText] = useState("");
   const [editingAiPromptId, setEditingAiPromptId] = useState(null);
   const [aiPromptEditorMode, setAiPromptEditorMode] = useState(null);
@@ -178,7 +193,6 @@ export function SettingsDialog({
     setAiPromptAgentType("codex");
     setAiPromptName("");
     setAiPromptIcon("sparkles");
-    setAiPromptMode("plan");
     setAiPromptText("");
     setEditingAiPromptId(null);
     setAiPromptEditorMode(null);
@@ -188,7 +202,6 @@ export function SettingsDialog({
     setAiPromptAgentType(agentType);
     setAiPromptName("");
     setAiPromptIcon("sparkles");
-    setAiPromptMode(defaultAiPromptMode(agentType));
     setAiPromptText("");
     setEditingAiPromptId(null);
     setAiPromptEditorMode("create");
@@ -198,7 +211,6 @@ export function SettingsDialog({
     setAiPromptAgentType(prompt.agentType);
     setAiPromptName(prompt.name);
     setAiPromptIcon(prompt.icon || "sparkles");
-    setAiPromptMode(prompt.mode || defaultAiPromptMode(prompt.agentType));
     setAiPromptText(prompt.promptText || "");
     setEditingAiPromptId(prompt.id);
     setAiPromptEditorMode("edit");
@@ -212,7 +224,6 @@ export function SettingsDialog({
         agentType: aiPromptAgentType,
         name: aiPromptName,
         icon: aiPromptIcon,
-        mode: aiPromptMode,
         promptText: aiPromptText,
       });
       resetAiPromptForm();
@@ -305,32 +316,14 @@ export function SettingsDialog({
                               : "Configure reusable instructions for this provider."}
                           </p>
                         </div>
-                        <div
-                          className={cn(
-                            "grid gap-3",
-                            (aiPromptEditorMode === "edit" || aiPromptAgentType === "codex") && "sm:grid-cols-2",
-                          )}
-                        >
+                        <div className={cn("grid gap-3", aiPromptEditorMode === "edit" && "sm:grid-cols-2")}>
                           {aiPromptEditorMode === "edit" && (
                             <Field>
                               <FieldLabel>AI Agent</FieldLabel>
                               <SelectControl
                                 value={aiPromptAgentType}
-                                onValueChange={(agentType) => {
-                                  setAiPromptAgentType(agentType);
-                                  if (agentType === "claude") setAiPromptMode("agent");
-                                }}
+                                onValueChange={setAiPromptAgentType}
                                 options={aiAgentTypeOptions}
-                              />
-                            </Field>
-                          )}
-                          {aiPromptAgentType === "codex" && (
-                            <Field>
-                              <FieldLabel>AI mode</FieldLabel>
-                              <SelectControl
-                                value={aiPromptMode}
-                                onValueChange={setAiPromptMode}
-                                options={AI_PROMPT_MODE_OPTIONS}
                               />
                             </Field>
                           )}
@@ -382,8 +375,6 @@ export function SettingsDialog({
                             <p className="truncate font-medium">{prompt.name}</p>
                             <p className="text-xs text-muted-foreground">
                               {aiAgentTypeOptions.find((option) => option.value === prompt.agentType)?.label || prompt.agentType}
-                              {" · "}
-                              {aiPromptModeLabel(prompt.mode)}
                             </p>
                             {prompt.promptText && (
                               <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{prompt.promptText}</p>
@@ -501,6 +492,7 @@ export function SettingsDialog({
             {activeTab === "quick-capture" && (
               <QuickCaptureSettingsTab
                 settings={quickCaptureSettings}
+                terminalShortcuts={terminalSettings?.shortcuts}
                 onSave={onSaveQuickCaptureSettings}
               />
             )}
@@ -583,19 +575,36 @@ function CommandInternalsSettings({ settings, onSave }) {
 
 function AiSessionSettingsTab({ settings, onSave }) {
   const [candidate, setCandidate] = useState(() => normalizeAiSessionSettings(settings));
+  const [doneDuration, setDoneDuration] = useState(() => (
+    aiSessionDoneDurationInput(normalizeAiSessionSettings(settings).doneStateDurationSeconds)
+  ));
   const [notice, setNotice] = useState("");
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
-    setCandidate(normalizeAiSessionSettings(settings));
+    const normalized = normalizeAiSessionSettings(settings);
+    setCandidate(normalized);
+    setDoneDuration(aiSessionDoneDurationInput(normalized.doneStateDurationSeconds));
   }, [settings]);
 
   async function save() {
     setNotice("");
+    const unit = aiSessionDoneDurationUnits.find(({ value }) => value === doneDuration.unit);
+    const doneStateDurationSeconds = Math.round(Number(doneDuration.value) * unit.seconds);
+    if (
+      !Number.isFinite(doneStateDurationSeconds)
+      || doneStateDurationSeconds < AI_SESSION_MIN_DONE_DURATION_SECONDS
+      || doneStateDurationSeconds > AI_SESSION_MAX_DONE_DURATION_SECONDS
+    ) {
+      setNotice("Done duration must be between 1 minute and 7 days.");
+      return;
+    }
     setIsSaving(true);
     try {
-      const next = await onSave(candidate);
-      setCandidate(normalizeAiSessionSettings(next));
+      const next = await onSave({ ...candidate, doneStateDurationSeconds });
+      const normalized = normalizeAiSessionSettings(next);
+      setCandidate(normalized);
+      setDoneDuration(aiSessionDoneDurationInput(normalized.doneStateDurationSeconds));
       setNotice("AI session settings saved.");
     } catch (error) {
       setNotice(error?.message || String(error));
@@ -656,6 +665,50 @@ function AiSessionSettingsTab({ settings, onSave }) {
       </FieldSet>
 
       <FieldSet className="gap-4 rounded-lg border p-4">
+        <FieldLegend className="mb-0 px-1">Session states</FieldLegend>
+        <p className="text-xs text-muted-foreground">
+          Choose how long a completed AI task remains marked as Done before it becomes Idle.
+        </p>
+
+        <Field>
+          <FieldLabel>Done duration</FieldLabel>
+          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_160px]">
+            <Input
+              type="number"
+              min={AI_SESSION_MIN_DONE_DURATION_SECONDS / (aiSessionDoneDurationUnits.find(({ value }) => value === doneDuration.unit)?.seconds || 60)}
+              max={AI_SESSION_MAX_DONE_DURATION_SECONDS / (aiSessionDoneDurationUnits.find(({ value }) => value === doneDuration.unit)?.seconds || 60)}
+              step="any"
+              value={doneDuration.value}
+              aria-label="Done duration value"
+              disabled={isSaving}
+              onChange={(event) => setDoneDuration((current) => ({
+                ...current,
+                value: event.target.value,
+              }))}
+            />
+            <SelectControl
+              value={doneDuration.unit}
+              onValueChange={(value) => setDoneDuration((current) => {
+                const currentUnit = aiSessionDoneDurationUnits.find((option) => option.value === current.unit);
+                const nextUnit = aiSessionDoneDurationUnits.find((option) => option.value === value);
+                const seconds = Number(current.value) * currentUnit.seconds;
+                return {
+                  value: Number.isFinite(seconds) ? String(seconds / nextUnit.seconds) : current.value,
+                  unit: value,
+                };
+              })}
+              options={aiSessionDoneDurationUnits}
+              triggerClassName="w-full"
+              disabled={isSaving}
+            />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Enter any duration from 1 minute to 7 days. The default is 3 hours.
+          </p>
+        </Field>
+      </FieldSet>
+
+      <FieldSet className="gap-4 rounded-lg border p-4">
         <FieldLegend className="mb-0 px-1">Refresh rate</FieldLegend>
         <p className="text-xs text-muted-foreground">
           Control how often Station checks AI runners for session updates.
@@ -698,7 +751,7 @@ function AiSessionSettingsTab({ settings, onSave }) {
               disabled={isSaving}
             />
             <p className="text-xs text-muted-foreground">
-              Used everywhere else so waiting sessions can notify you.
+              Used whenever AI Agents is not foreground. Monitoring continues while Station runs.
             </p>
           </Field>
         </div>
@@ -715,14 +768,21 @@ function AiSessionSettingsTab({ settings, onSave }) {
   );
 }
 
-function QuickCaptureSettingsTab({ settings, onSave }) {
+function QuickCaptureSettingsTab({ settings, terminalShortcuts, onSave }) {
   const [candidate, setCandidate] = useState(settings?.shortcut || "CommandOrControl+Shift+Space");
   const [isRecording, setIsRecording] = useState(false);
+  const [isStartingRecording, setIsStartingRecording] = useState(false);
+  const [recordingPreview, setRecordingPreview] = useState(null);
   const [notice, setNotice] = useState(settings?.error || "");
   const [noticeIsError, setNoticeIsError] = useState(Boolean(settings?.error));
   const [isSaving, setIsSaving] = useState(false);
+  const recorderMountedRef = useRef(true);
+  const nativeRecordingRequestedRef = useRef(false);
   const supported = settings?.supported === true;
   const status = quickCaptureStatus(settings);
+  const shortcutConflict = candidate !== settings?.shortcut
+    ? quickCaptureShortcutConflict(candidate, terminalShortcuts)
+    : null;
 
   useEffect(() => {
     setCandidate(settings?.shortcut || settings?.defaultShortcut || "CommandOrControl+Shift+Space");
@@ -730,33 +790,131 @@ function QuickCaptureSettingsTab({ settings, onSave }) {
     setNoticeIsError(Boolean(settings?.error));
   }, [settings]);
 
-  function handleRecorderKeyDown(event) {
-    if (!isRecording) return;
-    event.preventDefault();
-    event.stopPropagation();
+  useEffect(() => {
+    recorderMountedRef.current = true;
+    return () => {
+      recorderMountedRef.current = false;
+      setTerminalShortcutRecording(false);
+      if (nativeRecordingRequestedRef.current) {
+        api.setQuickCaptureShortcutRecording(false).catch(console.error);
+      }
+    };
+  }, []);
 
-    const result = shortcutFromKeyboardEvent(event);
-    if (result.status === "cancel") {
-      setIsRecording(false);
-      setNotice("Recording cancelled.");
-      setNoticeIsError(false);
-      return;
-    }
-    if (result.status === "recording") {
-      setNotice("Press a non-modifier key to finish the shortcut.");
-      setNoticeIsError(false);
-      return;
-    }
-    if (result.status === "error") {
-      setNotice(result.error);
-      setNoticeIsError(true);
-      return;
+  useEffect(() => {
+    if (!isRecording) return undefined;
+    setTerminalShortcutRecording(true);
+    let active = true;
+    let pendingFinish = null;
+
+    async function finishRecording(result) {
+      try {
+        await api.setQuickCaptureShortcutRecording(false);
+        nativeRecordingRequestedRef.current = false;
+        if (!active) return;
+        setIsRecording(false);
+        setRecordingPreview(null);
+        if (result.status === "cancel") {
+          setNotice("Recording cancelled.");
+        } else {
+          setNotice("Shortcut recorded. Save to activate it.");
+        }
+        setNoticeIsError(false);
+      } catch (error) {
+        if (!active) return;
+        setIsRecording(false);
+        setRecordingPreview(null);
+        setNotice(error?.message || String(error));
+        setNoticeIsError(true);
+      }
     }
 
-    setCandidate(result.shortcut);
-    setIsRecording(false);
-    setNotice("Shortcut recorded. Save to activate it.");
+    function handleRecorderKeyDown(event) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.repeat || pendingFinish) return;
+
+      const result = shortcutFromKeyboardEvent(event);
+      if (result.status === "cancel") {
+        pendingFinish = { result, code: event.code };
+        setNotice("Release Escape to cancel recording.");
+        setNoticeIsError(false);
+        return;
+      }
+      if (result.status === "recording") {
+        setRecordingPreview(shortcutPreviewFromKeyboardEvent(event));
+        setNotice("Press a non-modifier key to finish the shortcut.");
+        setNoticeIsError(false);
+        return;
+      }
+      if (result.status === "error") {
+        setRecordingPreview("");
+        setNotice(result.error);
+        setNoticeIsError(true);
+        return;
+      }
+
+      setCandidate(result.shortcut);
+      setRecordingPreview(result.shortcut);
+      pendingFinish = { result, code: event.code };
+      setNotice("Shortcut recorded. Release the key to finish.");
+      setNoticeIsError(false);
+    }
+
+    function handleRecorderKeyUp(event) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (!pendingFinish) {
+        setRecordingPreview(shortcutPreviewFromKeyboardEvent(event, { includeKey: false }));
+        return;
+      }
+      if (event.code !== pendingFinish.code) return;
+      const { result } = pendingFinish;
+      pendingFinish = null;
+      finishRecording(result);
+    }
+
+    window.addEventListener("keydown", handleRecorderKeyDown, true);
+    window.addEventListener("keyup", handleRecorderKeyUp, true);
+    return () => {
+      active = false;
+      window.removeEventListener("keydown", handleRecorderKeyDown, true);
+      window.removeEventListener("keyup", handleRecorderKeyUp, true);
+      setTerminalShortcutRecording(false);
+      if (nativeRecordingRequestedRef.current) {
+        api.setQuickCaptureShortcutRecording(false)
+          .then(() => { nativeRecordingRequestedRef.current = false; })
+          .catch(console.error);
+      }
+    };
+  }, [isRecording]);
+
+  async function startRecording() {
+    setIsStartingRecording(true);
+    setNotice("Preparing shortcut recording…");
     setNoticeIsError(false);
+    nativeRecordingRequestedRef.current = true;
+    try {
+      await api.setQuickCaptureShortcutRecording(true);
+      if (!recorderMountedRef.current) {
+        await api.setQuickCaptureShortcutRecording(false);
+        nativeRecordingRequestedRef.current = false;
+        return;
+      }
+      setTerminalShortcutRecording(true);
+      setRecordingPreview("");
+      setIsRecording(true);
+      setNotice("Press the new shortcut. Escape cancels.");
+    } catch (error) {
+      nativeRecordingRequestedRef.current = false;
+      setTerminalShortcutRecording(false);
+      setRecordingPreview(null);
+      if (!recorderMountedRef.current) return;
+      setNotice(error?.message || String(error));
+      setNoticeIsError(true);
+    } finally {
+      if (recorderMountedRef.current) setIsStartingRecording(false);
+    }
   }
 
   async function save(shortcut) {
@@ -814,7 +972,7 @@ function QuickCaptureSettingsTab({ settings, onSave }) {
           <label className="flex items-start gap-3 rounded-lg border bg-muted/20 p-4">
             <Checkbox
               checked={settings.enabled}
-              disabled={isSaving || isRecording}
+              disabled={isSaving || isRecording || isStartingRecording}
               onCheckedChange={(checked) => toggleEnabled(checked === true)}
             />
             <span className="grid gap-1">
@@ -847,26 +1005,28 @@ function QuickCaptureSettingsTab({ settings, onSave }) {
               </div>
               <div className="grid justify-items-end gap-1">
                 <span className="text-xs text-muted-foreground">New shortcut</span>
-                <Kbd className="h-7 px-2 text-sm">{formatShortcut(candidate)}</Kbd>
+                <Kbd className="h-7 px-2 text-sm">
+                  {formatShortcut(isRecording ? recordingPreview : candidate) || "—"}
+                </Kbd>
               </div>
             </div>
 
             <Button
               type="button"
               variant={isRecording ? "secondary" : "outline"}
-              disabled={isSaving}
-              onClick={() => {
-                setIsRecording(true);
-                setNotice("Press the new shortcut. Escape cancels.");
-                setNoticeIsError(false);
-              }}
-              onKeyDown={handleRecorderKeyDown}
-              onBlur={() => setIsRecording(false)}
+              disabled={isSaving || isStartingRecording}
+              onClick={startRecording}
             >
-              <Keyboard />
-              {isRecording ? "Press shortcut…" : "Record shortcut"}
+              {isStartingRecording ? <LoaderCircle className="animate-spin" /> : <Keyboard />}
+              {isStartingRecording ? "Preparing…" : isRecording ? "Press shortcut…" : "Record shortcut"}
             </Button>
           </FieldSet>
+
+          {shortcutConflict && (
+            <p className="text-sm text-amber-700 dark:text-amber-300" role="status">
+              This shortcut is also assigned to {shortcutConflict.label}. Saving it confirms that Smart Overlay may override that action.
+            </p>
+          )}
 
           {notice && (
             <p className={cn("text-sm text-muted-foreground", noticeIsError && "text-destructive")} role="status">
@@ -875,11 +1035,11 @@ function QuickCaptureSettingsTab({ settings, onSave }) {
           )}
 
           <div className="flex flex-wrap gap-2">
-            <Button type="button" disabled={isSaving || isRecording} onClick={() => save(candidate)}>
+            <Button type="button" disabled={isSaving || isRecording || isStartingRecording} onClick={() => save(candidate)}>
               {isSaving && <LoaderCircle className="animate-spin" />}
               Save shortcut
             </Button>
-            <Button type="button" variant="outline" disabled={isSaving || isRecording} onClick={() => save(settings.defaultShortcut)}>
+            <Button type="button" variant="outline" disabled={isSaving || isRecording || isStartingRecording} onClick={() => save(settings.defaultShortcut)}>
               <RotateCcw />
               Restore default
             </Button>

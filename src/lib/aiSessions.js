@@ -8,7 +8,10 @@ export const AI_SESSION_MAX_WINDOW_HOURS = Math.max(
   ...AI_SESSION_WINDOWS.map(({ value }) => value),
 );
 
-export const AI_SESSION_DONE_WINDOW_MS = 3 * 60 * 60 * 1000;
+export const AI_SESSION_DEFAULT_DONE_DURATION_SECONDS = 3 * 60 * 60;
+export const AI_SESSION_MIN_DONE_DURATION_SECONDS = 60;
+export const AI_SESSION_MAX_DONE_DURATION_SECONDS = 7 * 24 * 60 * 60;
+export const AI_SESSION_DONE_WINDOW_MS = AI_SESSION_DEFAULT_DONE_DURATION_SECONDS * 1000;
 
 export const AI_SESSION_REFRESH_INTERVALS = [
   { value: 0, label: "Off" },
@@ -59,20 +62,34 @@ export const DEFAULT_AI_SESSION_SETTINGS = {
   codexDesktop: true,
   claudeCli: true,
   claudeDesktop: true,
-  foregroundRefreshIntervalSeconds: 30,
-  backgroundRefreshIntervalSeconds: 60,
+  foregroundRefreshIntervalSeconds: 5,
+  backgroundRefreshIntervalSeconds: 5,
+  doneStateDurationSeconds: AI_SESSION_DEFAULT_DONE_DURATION_SECONDS,
 };
+
+export function normalizeAiSessionDoneDuration(value) {
+  const numeric = Number(value);
+  return Number.isInteger(numeric)
+    && numeric >= AI_SESSION_MIN_DONE_DURATION_SECONDS
+    && numeric <= AI_SESSION_MAX_DONE_DURATION_SECONDS
+    ? numeric
+    : AI_SESSION_DEFAULT_DONE_DURATION_SECONDS;
+}
+
+export function aiSessionDoneWindowMs(settings) {
+  return normalizeAiSessionDoneDuration(settings?.doneStateDurationSeconds) * 1000;
+}
 
 export function normalizeAiSessionForegroundRefreshInterval(value) {
   const numeric = Number(value);
-  return AI_SESSION_REFRESH_INTERVALS.some((option) => option.value === numeric) ? numeric : 30;
+  return AI_SESSION_REFRESH_INTERVALS.some((option) => option.value === numeric) ? numeric : 5;
 }
 
 export function normalizeAiSessionBackgroundRefreshInterval(value) {
   const numeric = Number(value);
   return AI_SESSION_BACKGROUND_REFRESH_INTERVALS.some((option) => option.value === numeric)
     ? numeric
-    : 60;
+    : 5;
 }
 
 export function aiSessionPollingIntervalMs(settings, foreground) {
@@ -98,6 +115,9 @@ export function normalizeAiSessionSettings(settings) {
     ),
     backgroundRefreshIntervalSeconds: normalizeAiSessionBackgroundRefreshInterval(
       settings?.backgroundRefreshIntervalSeconds,
+    ),
+    doneStateDurationSeconds: normalizeAiSessionDoneDuration(
+      settings?.doneStateDurationSeconds,
     ),
   };
 }
@@ -251,24 +271,28 @@ export function aiSessionsWaitingForInputCount(sessions) {
   )).length;
 }
 
-export function aiSessionState(session, now = Date.now()) {
+export function aiSessionState(session, now = Date.now(), doneWindowMs = AI_SESSION_DONE_WINDOW_MS) {
   if (session?.waitingForInput === true) return "waiting";
   if (session?.running === true) return "running";
   const completedAt = Number(session?.completedAt || 0);
   if (
     Number.isFinite(completedAt)
     && completedAt > 0
-    && Math.max(0, Number(now) - completedAt) <= AI_SESSION_DONE_WINDOW_MS
+    && Math.max(0, Number(now) - completedAt) <= doneWindowMs
   ) {
     return "done";
   }
   return "idle";
 }
 
-export function aiSessionTreeState(session, now = Date.now()) {
+export function aiSessionTreeState(
+  session,
+  now = Date.now(),
+  doneWindowMs = AI_SESSION_DONE_WINDOW_MS,
+) {
   const states = [
-    aiSessionState(session, now),
-    ...(session?.children || []).map((child) => aiSessionState(child, now)),
+    aiSessionState(session, now, doneWindowMs),
+    ...(session?.children || []).map((child) => aiSessionState(child, now, doneWindowMs)),
   ];
   if (states.includes("waiting")) return "waiting";
   if (states.includes("running")) return "running";
@@ -276,8 +300,38 @@ export function aiSessionTreeState(session, now = Date.now()) {
   return "idle";
 }
 
-export function aiSessionCanArchive(session, now = Date.now()) {
-  return ["done", "idle"].includes(aiSessionTreeState(session, now));
+export function aiSessionCanArchive(
+  session,
+  now = Date.now(),
+  doneWindowMs = AI_SESSION_DONE_WINDOW_MS,
+) {
+  return ["done", "idle"].includes(aiSessionTreeState(session, now, doneWindowMs));
+}
+
+export function aiSessionStateTooltip(
+  session,
+  { now = Date.now(), doneWindowMs = AI_SESSION_DONE_WINDOW_MS, tree = false } = {},
+) {
+  const state = tree
+    ? aiSessionTreeState(session, now, doneWindowMs)
+    : aiSessionState(session, now, doneWindowMs);
+  if (state === "waiting") return "Waiting for you";
+  if (state === "running") return "Running";
+
+  const sessions = tree ? [session, ...(session?.children || [])] : [session];
+  if (state === "done") {
+    const completedAt = Math.max(0, ...sessions
+      .filter((item) => aiSessionState(item, now, doneWindowMs) === "done")
+      .map((item) => Number(item?.completedAt || 0)));
+    return completedAt > 0
+      ? `Done — completed ${aiSessionRelativeTime(completedAt, now)}`
+      : "Done — completed recently";
+  }
+
+  const updatedAt = Math.max(0, ...sessions.map((item) => Number(item?.updatedAt || 0)));
+  return updatedAt > 0
+    ? `Idle — last activity ${aiSessionRelativeTime(updatedAt, now)}`
+    : "Idle — not currently running";
 }
 
 export function aiSessionArchiveActionLabel(session, archived = false) {

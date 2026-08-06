@@ -39,6 +39,21 @@ const MODIFIER_CODES = new Set([
   "ShiftRight",
 ]);
 
+export function shortcutPreviewFromKeyboardEvent(event, { includeKey = true } = {}) {
+  const modifiers = [];
+  if (event.ctrlKey) modifiers.push("Control");
+  if (event.altKey) modifiers.push("Alt");
+  if (event.shiftKey) modifiers.push("Shift");
+  if (event.metaKey) modifiers.push("Super");
+
+  const usableKey = includeKey
+    && event.key !== "Escape"
+    && event.code
+    && event.code !== "Unidentified"
+    && !MODIFIER_CODES.has(event.code);
+  return [...modifiers, usableKey ? event.code : null].filter(Boolean).join("+");
+}
+
 export function shortcutFromKeyboardEvent(event) {
   if (event.key === "Escape") return { status: "cancel" };
   if (MODIFIER_CODES.has(event.code)) return { status: "recording" };
@@ -52,14 +67,9 @@ export function shortcutFromKeyboardEvent(event) {
     };
   }
 
-  const modifiers = [];
-  if (event.ctrlKey) modifiers.push("Control");
-  if (event.altKey) modifiers.push("Alt");
-  if (event.shiftKey) modifiers.push("Shift");
-  if (event.metaKey) modifiers.push("Super");
   return {
     status: "complete",
-    shortcut: [...modifiers, event.code].join("+"),
+    shortcut: shortcutPreviewFromKeyboardEvent(event),
   };
 }
 

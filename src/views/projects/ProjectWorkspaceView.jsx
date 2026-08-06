@@ -17,6 +17,7 @@ import { filterTasksByTitle, preserveTaskOrder } from "@/lib/taskSearch";
 
 export function ProjectWorkspaceView({
   project,
+  taskSearchFocusRequestKey = 0,
   tasks,
   resources,
   localResources,
@@ -55,6 +56,15 @@ export function ProjectWorkspaceView({
   useEffect(() => {
     setTaskSearchQuery("");
   }, [project.id]);
+
+  useEffect(() => {
+    if (taskSearchFocusRequestKey <= 0) return undefined;
+
+    const animationFrameId = window.requestAnimationFrame(() => {
+      taskSearchInputRef.current?.focus();
+    });
+    return () => window.cancelAnimationFrame(animationFrameId);
+  }, [taskSearchFocusRequestKey]);
 
   useEffect(() => {
     if (isEditorOpen) return undefined;

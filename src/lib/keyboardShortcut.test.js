@@ -5,6 +5,7 @@ import {
   formatShortcut,
   isPrimarySearchShortcut,
   shortcutFromKeyboardEvent,
+  shortcutPreviewFromKeyboardEvent,
 } from "./keyboardShortcut.js";
 
 function keyEvent(overrides = {}) {
@@ -31,6 +32,47 @@ test("records a modified key using Tauri accelerator names", () => {
   });
 });
 
+test("builds live shortcut previews from pressed modifiers and keys", () => {
+  assert.equal(shortcutPreviewFromKeyboardEvent(keyEvent({
+    key: "Control",
+    code: "ControlLeft",
+    ctrlKey: true,
+  })), "Control");
+  assert.equal(shortcutPreviewFromKeyboardEvent(keyEvent({
+    key: "Alt",
+    code: "AltLeft",
+    altKey: true,
+  })), "Alt");
+  assert.equal(shortcutPreviewFromKeyboardEvent(keyEvent({
+    key: "Shift",
+    code: "ShiftLeft",
+    shiftKey: true,
+  })), "Shift");
+  assert.equal(shortcutPreviewFromKeyboardEvent(keyEvent({
+    key: "Meta",
+    code: "MetaLeft",
+    metaKey: true,
+  })), "Super");
+  assert.equal(shortcutPreviewFromKeyboardEvent(keyEvent({
+    ctrlKey: true,
+    altKey: true,
+    shiftKey: true,
+    metaKey: true,
+  })), "Control+Alt+Shift+Super+KeyK");
+});
+
+test("removes the released key from an incomplete shortcut preview", () => {
+  assert.equal(shortcutPreviewFromKeyboardEvent(keyEvent({
+    key: "Control",
+    code: "ControlLeft",
+  }), { includeKey: false }), "");
+  assert.equal(shortcutPreviewFromKeyboardEvent(keyEvent({
+    key: "Shift",
+    code: "ShiftLeft",
+    ctrlKey: true,
+  }), { includeKey: false }), "Control");
+});
+
 test("rejects bare keys and ignores modifier-only presses", () => {
   assert.equal(shortcutFromKeyboardEvent(keyEvent()).status, "error");
   assert.deepEqual(shortcutFromKeyboardEvent(keyEvent({
@@ -50,6 +92,9 @@ test("formats default and normalized shortcuts for each platform", () => {
   assert.equal(formatShortcut("CommandOrControl+Shift+Space", "MacIntel"), "⌘⇧Space");
   assert.equal(formatShortcut("shift+super+KeyK", "MacIntel"), "⌘⇧K");
   assert.equal(formatShortcut("shift+control+Space", "Win32"), "Ctrl+Shift+Space");
+  assert.equal(formatShortcut("CommandOrControl+KeyT", "MacIntel"), "⌘T");
+  assert.equal(formatShortcut("CommandOrControl+KeyT", "Win32"), "Ctrl+T");
+  assert.equal(formatShortcut("CommandOrControl+KeyT", "Linux x86_64"), "Ctrl+T");
 });
 
 const commandF = {

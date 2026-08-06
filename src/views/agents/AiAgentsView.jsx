@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
 import {
   Archive,
   ArchiveRestore,
@@ -40,8 +39,8 @@ import {
   AI_SESSION_SOURCE_OPTIONS,
   AI_SESSION_WINDOWS,
   aiSessionArchiveActionLabel,
-  aiSessionCommand,
   aiSessionCanArchive,
+  aiSessionDoneWindowMs,
   aiSessionProviderBadgeClass,
   aiSessionProviderFilterEnabled,
   aiSessionProviderLabel,
@@ -49,6 +48,7 @@ import {
   aiSessionRelativeTime,
   aiSessionSourceLabel,
   aiSessionState,
+  aiSessionStateTooltip,
   aiSessionSourcesDisabled,
   aiSessionTreeState,
   aiSessionTreeWaitingForInput,
@@ -66,27 +66,14 @@ import {
   sortAiSessions,
 } from "@/lib/aiSessions";
 import { isPrimarySearchShortcut, shortcutModifier } from "@/lib/keyboardShortcut";
-import { workspaceTabsApi } from "@/lib/workspaceTabs";
 import { cn } from "@/lib/utils";
 
 async function openSessionInTerminal(session) {
-  let createdTabId = null;
-  const readyTabs = new Set();
-  let markReady;
-  const ready = new Promise((resolve) => { markReady = resolve; });
-  const unlisten = await listen("terminal-startup-ready", ({ payload }) => {
-    readyTabs.add(payload.tabId);
-    if (payload.tabId === createdTabId) markReady();
+  await api.openAiSessionTerminal({
+    provider: session.provider,
+    sessionId: session.id,
+    cwd: session.cwd || null,
   });
-  try {
-    const snapshot = await workspaceTabsApi.createTerminal(true, session.cwd || null);
-    createdTabId = snapshot.activeTabId;
-    if (readyTabs.has(createdTabId)) markReady();
-    await ready;
-    await workspaceTabsApi.completeTerminalStartupInput(createdTabId, aiSessionCommand(session));
-  } finally {
-    unlisten();
-  }
 }
 
 export function AiAgentsView({
@@ -107,6 +94,7 @@ export function AiAgentsView({
   const searchInputRef = useRef(null);
   const shortcutKey = shortcutModifier();
   const normalizedSettings = useMemo(() => normalizeAiSessionSettings(settings), [settings]);
+  const doneWindowMs = aiSessionDoneWindowMs(normalizedSettings);
 
   useEffect(() => {
     setSourceFilters(aiSessionViewFilters(settings));
@@ -333,6 +321,7 @@ export function AiAgentsView({
                     key={`${session.provider}:${session.id}`}
                     session={session}
                     now={displayNow}
+                    doneWindowMs={doneWindowMs}
                     expanded={expanded.has(session.id)}
                     archived={sessionView === "archived"}
                     busy={busySessionKey === `${session.provider}:${session.id}`}
@@ -422,6 +411,7 @@ function AiSessionFilters({ settings, filters, onChange }) {
 function SessionRow({
   session,
   now,
+  doneWindowMs,
   expanded,
   archived,
   busy,
@@ -432,7 +422,8 @@ function SessionRow({
 }) {
   const hasChildren = session.children?.length > 0;
   const waitingForInput = aiSessionTreeWaitingForInput(session);
-  const state = aiSessionTreeState(session, now);
+  const state = aiSessionTreeState(session, now, doneWindowMs);
+  const stateLabel = aiSessionStateTooltip(session, { now, doneWindowMs, tree: true });
   const providerSyncedArchive = session.archiveScope === "provider";
   const actionLabel = aiSessionArchiveActionLabel(session, archived);
   const preferredOpenTarget = aiSessionPreferredOpenTarget(session);
@@ -453,7 +444,7 @@ function SessionRow({
             {expanded ? <ChevronDown /> : <ChevronRight />}
           </Button>
         )}
-        <AiSessionStateIcon state={state} className="size-5" />
+        <AiSessionStateIcon state={state} label={stateLabel} className="size-5" />
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2">
             <p className="truncate font-medium">{session.title}</p>
@@ -493,7 +484,7 @@ function SessionRow({
               </TooltipTrigger>
               <TooltipContent>{actionLabel}</TooltipContent>
             </Tooltip>
-          ) : aiSessionCanArchive(session, now) ? (
+          ) : aiSessionCanArchive(session, now, doneWindowMs) ? (
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -557,7 +548,11 @@ function SessionRow({
         <div className="border-t bg-muted/20 py-1 pl-12 pr-4">
           {session.children.map((child) => (
             <div key={child.id} className="flex min-w-0 items-center gap-3 border-b py-3 last:border-b-0">
-              <AiSessionStateIcon state={aiSessionState(child, now)} className="size-4" />
+              <AiSessionStateIcon
+                state={aiSessionState(child, now, doneWindowMs)}
+                label={aiSessionStateTooltip(child, { now, doneWindowMs })}
+                className="size-4"
+              />
               <div className="min-w-0 flex-1">
                 <div className="flex min-w-0 items-center gap-2">
                   <p className="truncate text-sm font-medium">{child.title}</p>

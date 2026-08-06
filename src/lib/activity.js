@@ -62,9 +62,12 @@ export function formatActivityLastSyncText(value, now = new Date()) {
 }
 
 export function shouldAutoSyncActivity(dateValue, syncRuns = [], now = Date.now(), today = formatLocalDate()) {
-  if (dateValue !== today) return false;
+  if (!dateValue || dateValue > today) return false;
   const latestSyncAt = latestActivitySyncAt(syncRuns);
-  return !latestSyncAt || now - latestSyncAt > ACTIVITY_AUTO_SYNC_STALE_MS;
+  if (dateValue === today) {
+    return !latestSyncAt || now - latestSyncAt > ACTIVITY_AUTO_SYNC_STALE_MS;
+  }
+  return !latestSyncAt || latestSyncAt < localDayBounds(dateValue).endAt;
 }
 
 export function sortActivities(activities) {

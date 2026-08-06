@@ -14,6 +14,7 @@ import {
   copyableTerminalSelection,
   flattenPaneLayout,
   nextTerminalFontZoomOffset,
+  paneHasHorizontalSplitBelow,
   paneIds,
   parseOsc7Cwd,
   terminalFontSizeWithZoom,
@@ -91,6 +92,13 @@ function bytesFromChannel(payload) {
 
 function percent(value) {
   return `${value * 100}%`;
+}
+
+function syncTerminalScrollbackState(terminal) {
+  terminal.element?.classList.toggle(
+    "terminal-has-scrollback",
+    terminal.buffer.active.baseY > 0,
+  );
 }
 
 async function copyTextToClipboard(text) {
@@ -178,6 +186,7 @@ function TerminalPane({
   active,
   focused,
   titled,
+  splitBelow,
   bounds,
   dragging,
   onMoveStart,
@@ -367,6 +376,7 @@ function TerminalPane({
         event.preventDefault();
         event.stopPropagation();
         terminal.clear();
+        syncTerminalScrollbackState(terminal);
         terminal.focus();
         return false;
       }
@@ -391,6 +401,9 @@ function TerminalPane({
       );
       if (selection !== null) void copyTextToClipboard(selection);
     });
+    const writeParsedDisposable = terminal.onWriteParsed(() => {
+      syncTerminalScrollbackState(terminal);
+    });
     const cwdDisposable = terminal.parser.registerOscHandler(7, (data) => {
       const cwd = parseOsc7Cwd(data);
       if (!cwd) return false;
@@ -399,6 +412,7 @@ function TerminalPane({
     });
     const resizeObserver = new ResizeObserver(() => {
       fit.fit();
+      syncTerminalScrollbackState(terminal);
       invoke("terminal_resize", {
         tabId,
         paneId: pane.paneId,
@@ -414,10 +428,14 @@ function TerminalPane({
       dataDisposable.dispose();
       titleDisposable.dispose();
       selectionDisposable.dispose();
+      writeParsedDisposable.dispose();
       cwdDisposable.dispose();
       fileLinksDisposable.dispose();
       linkModifier.dispose();
+      terminal.element?.classList.remove("terminal-has-scrollback");
     };
+
+    syncTerminalScrollbackState(terminal);
 
     if (searchOpenRef.current && searchQueryRef.current) {
       searchAddon.findNext(searchQueryRef.current, { ...TERMINAL_SEARCH_OPTIONS, incremental: true });
@@ -530,6 +548,7 @@ function TerminalPane({
     );
     terminal.options.letterSpacing = terminalCellLetterSpacing(characterWidth, horizontalSpacing);
     fit.fit();
+    syncTerminalScrollbackState(terminal);
     terminal.refresh(0, terminal.rows - 1);
     invoke("terminal_resize", {
       tabId,
@@ -537,7 +556,7 @@ function TerminalPane({
       cols: terminal.cols,
       rows: terminal.rows,
     }).catch(() => {});
-  }, [fontFamily, fontWeight, fontStyle, fontSize, lineHeight, horizontalSpacing, scrollbackLines, pane.paneId, tabId]);
+  }, [fontFamily, fontWeight, fontStyle, fontSize, lineHeight, horizontalSpacing, scrollbackLines, splitBelow, pane.paneId, tabId]);
 
   useEffect(() => {
     if (!focused) return;
@@ -572,13 +591,14 @@ function TerminalPane({
     const terminal = terminalRef.current;
     const fit = fitRef.current;
     terminal?.clear();
+    if (terminal) syncTerminalScrollbackState(terminal);
     await attach(terminal, fit, "restart_terminal");
     focus();
   }
 
   return (
     <section
-      className={`terminal-pane ${titled ? "terminal-pane-titled" : ""} ${focused ? "terminal-pane-focused" : ""} ${dragging ? "terminal-pane-drag-source" : ""}`}
+      className={`terminal-pane ${titled ? "terminal-pane-titled" : ""} ${splitBelow ? "terminal-pane-split-below" : ""} ${focused ? "terminal-pane-focused" : ""} ${dragging ? "terminal-pane-drag-source" : ""}`}
       onPointerDown={focus}
       data-pane-id={pane.paneId}
       style={{
@@ -943,6 +963,7 @@ function TerminalTabSurface({
           bounds={bounds}
           focused={active && pane.paneId === layout.focusedPaneId}
           titled={panesAreSplit}
+          splitBelow={paneHasHorizontalSplitBelow(bounds, flattened.splits)}
           dragging={pane.paneId === paneDrag?.sourcePaneId}
           onMoveStart={startPaneMove}
           searchOpen={searchTarget?.tabId === tabId && searchTarget?.paneId === pane.paneId}

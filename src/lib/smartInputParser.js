@@ -106,6 +106,18 @@ export function parseSmartInput(value) {
   };
 }
 
+export function parseSmartInboxTodo(todo) {
+  const input = String(todo?.rawText || todo?.title || "");
+  const parsed = parseSmartInput(input);
+
+  if (parsed.kind !== "text") return parsed;
+
+  return {
+    ...parsed,
+    title: normalizeWhitespace(todo?.title) || parsed.title,
+  };
+}
+
 export function plainTextTaskBody(input, title) {
   const trimmedInput = String(input || "").trim();
   if (!trimmedInput) return "";

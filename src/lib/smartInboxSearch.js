@@ -55,3 +55,12 @@ export function filterSmartInboxItems(tab, items = [], query = "", projects = []
     itemSearchText(tab, item, projects).includes(normalizedQuery)
   ));
 }
+
+export function filterAllSmartInboxItems(items = [], query = "", projects = []) {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  if (!normalizedQuery) return items;
+
+  return items.filter(({ category, item }) => (
+    itemSearchText(category, item, projects).includes(normalizedQuery)
+  ));
+}

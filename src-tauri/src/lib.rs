@@ -13,7 +13,6 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
-#[cfg(target_os = "macos")]
 use tauri::Emitter;
 use tauri::Manager;
 #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
@@ -186,6 +185,8 @@ struct QuickCaptureRuntime {
     enabled: bool,
     shortcut: String,
     registered: bool,
+    shortcut_recording: bool,
+    shortcut_registration_suspended: bool,
     error: Option<String>,
 }
 
@@ -224,6 +225,82 @@ fn quick_capture_settings(
 ) -> Result<QuickCaptureSettings, String> {
     let runtime = state.quick_capture_settings.lock().map_err(db_error)?;
     Ok(quick_capture_settings_from_runtime(&runtime))
+}
+
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+fn apply_quick_capture_shortcut_recording(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    active: bool,
+) -> Result<(), String> {
+    let mut runtime = state.quick_capture_settings.lock().map_err(db_error)?;
+
+    if active {
+        if runtime.shortcut_recording {
+            return Ok(());
+        }
+        runtime.shortcut_recording = true;
+        if runtime.enabled && runtime.registered {
+            if let Err(error) = app.global_shortcut().unregister(runtime.shortcut.as_str()) {
+                runtime.shortcut_recording = false;
+                return Err(format!("Could not prepare shortcut recording: {error}"));
+            }
+            runtime.registered = false;
+            runtime.shortcut_registration_suspended = true;
+        }
+        return Ok(());
+    }
+
+    if runtime.shortcut_registration_suspended {
+        if let Err(error) = app.global_shortcut().register(runtime.shortcut.as_str()) {
+            runtime.shortcut_recording = false;
+            runtime.shortcut_registration_suspended = false;
+            runtime.error = Some(format!("Could not restore the current shortcut: {error}"));
+            return Err(format!("Could not restore the current shortcut: {error}"));
+        }
+        runtime.registered = true;
+        runtime.shortcut_registration_suspended = false;
+        runtime.error = None;
+    }
+    runtime.shortcut_recording = false;
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_quick_capture_shortcut_recording(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    active: bool,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = &state;
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let app_handle = app.clone();
+        app.run_on_main_thread(move || {
+            let state = app_handle.state::<AppState>();
+            let result = apply_quick_capture_shortcut_recording(&app_handle, state.inner(), active);
+            let _ = sender.send(result);
+        })
+        .map_err(|error| format!("Could not schedule shortcut recording: {error}"))?;
+        return receiver
+            .recv()
+            .map_err(|error| format!("Could not finish shortcut recording: {error}"))?;
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    return apply_quick_capture_shortcut_recording(&app, state.inner(), active);
+
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+    {
+        let _ = (app, state, active);
+        Err("Quick capture is available in the desktop app only.".to_string())
+    }
+}
+
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+fn quick_capture_shortcut_should_toggle(state: ShortcutState, shortcut_recording: bool) -> bool {
+    state == ShortcutState::Pressed && !shortcut_recording
 }
 
 fn centered_origin(
@@ -591,7 +668,6 @@ struct AiPromptRecord {
     agent_type: String,
     name: String,
     icon: String,
-    mode: String,
     prompt_text: String,
     created_at: i64,
     updated_at: i64,
@@ -1163,18 +1239,23 @@ struct AiSessionSettings {
     foreground_refresh_interval_seconds: u64,
     #[serde(default = "default_ai_session_background_refresh_interval")]
     background_refresh_interval_seconds: u64,
+    #[serde(default = "default_ai_session_done_state_duration")]
+    done_state_duration_seconds: u64,
 }
 
 fn default_ai_session_foreground_refresh_interval() -> u64 {
-    30
+    5
 }
 
 fn default_ai_session_background_refresh_interval() -> u64 {
-    60
+    5
 }
 
-#[tauri::command]
-fn set_ai_session_dock_badge(app: tauri::AppHandle, count: u32) -> Result<(), String> {
+fn default_ai_session_done_state_duration() -> u64 {
+    3 * 60 * 60
+}
+
+pub(crate) fn set_ai_session_dock_badge(app: tauri::AppHandle, count: u32) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         let window = app
@@ -1206,6 +1287,14 @@ fn normalize_ai_session_background_refresh_interval(value: u64) -> u64 {
     }
 }
 
+fn normalize_ai_session_done_state_duration(value: u64) -> u64 {
+    if (60..=7 * 24 * 60 * 60).contains(&value) {
+        value
+    } else {
+        default_ai_session_done_state_duration()
+    }
+}
+
 impl Default for AiSessionSettings {
     fn default() -> Self {
         Self {
@@ -1215,6 +1304,7 @@ impl Default for AiSessionSettings {
             claude_desktop: true,
             foreground_refresh_interval_seconds: default_ai_session_foreground_refresh_interval(),
             background_refresh_interval_seconds: default_ai_session_background_refresh_interval(),
+            done_state_duration_seconds: default_ai_session_done_state_duration(),
         }
     }
 }
@@ -1275,7 +1365,6 @@ struct AiPromptInput {
     agent_type: String,
     name: String,
     icon: String,
-    mode: String,
     prompt_text: String,
 }
 
@@ -1415,7 +1504,17 @@ pub fn run() {
             app.handle().plugin(
                 tauri_plugin_global_shortcut::Builder::new()
                     .with_handler(|app, _shortcut, event| {
-                        if event.state() == ShortcutState::Pressed {
+                        let shortcut_recording = app
+                            .try_state::<AppState>()
+                            .and_then(|state| {
+                                state
+                                    .quick_capture_settings
+                                    .lock()
+                                    .ok()
+                                    .map(|runtime| runtime.shortcut_recording)
+                            })
+                            .unwrap_or(true);
+                        if quick_capture_shortcut_should_toggle(event.state(), shortcut_recording) {
                             #[cfg(target_os = "macos")]
                             {
                                 let app_handle = app.clone();
@@ -1465,6 +1564,8 @@ pub fn run() {
                     enabled,
                     shortcut,
                     registered: enabled && error.is_none(),
+                    shortcut_recording: false,
+                    shortcut_registration_suspended: false,
                     error,
                 }
             };
@@ -1473,6 +1574,8 @@ pub fn run() {
                 enabled: false,
                 shortcut: DEFAULT_QUICK_CAPTURE_SHORTCUT.to_string(),
                 registered: false,
+                shortcut_recording: false,
+                shortcut_registration_suspended: false,
                 error: Some("Quick capture is available in the desktop app only.".to_string()),
             };
 
@@ -1484,9 +1587,22 @@ pub fn run() {
             });
             app.manage(programs::ProgramCatalog::default());
             app.manage(terminal_tabs_state);
+            let ai_session_settings = {
+                let state = app.state::<AppState>();
+                let db = state
+                    .db
+                    .lock()
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                load_ai_session_settings(&db).map_err(std::io::Error::other)?
+            };
+            let ai_session_monitor =
+                ai_sessions::start_monitor(app.handle().clone(), ai_session_settings);
+            app.manage(ai_session_monitor);
             #[cfg(target_os = "macos")]
             install_workspace_menu(app)?;
             terminal_tabs::setup_workspace_window(app)?;
+            ai_sessions::setup_monitor_window_events(app.handle())
+                .map_err(std::io::Error::other)?;
             #[cfg(not(target_os = "macos"))]
             let app_handle = app.handle().clone();
             #[cfg(not(target_os = "macos"))]
@@ -1501,14 +1617,17 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             open_blank_browser_tab,
             quick_capture_settings,
+            set_quick_capture_shortcut_recording,
             save_quick_capture_settings,
             hide_quick_capture,
             resize_quick_capture,
             programs::list_programs,
             programs::program_icon,
             programs::launch_program,
-            ai_sessions::list_ai_sessions,
-            set_ai_session_dock_badge,
+            ai_sessions::latest_ai_sessions,
+            ai_sessions::latest_ai_session_status,
+            ai_sessions::refresh_ai_sessions,
+            ai_sessions::set_ai_session_monitor_view_active,
             ai_sessions::archive_ai_session,
             ai_sessions::restore_ai_session,
             ai_sessions::open_ai_session_desktop,
@@ -1751,7 +1870,7 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL COLLATE NOCASE UNIQUE,
             agent_type TEXT NOT NULL,
-            mode TEXT NOT NULL DEFAULT 'plan' CHECK(mode IN ('agent', 'plan')),
+            mode TEXT NOT NULL DEFAULT 'agent' CHECK(mode IN ('agent', 'plan')),
             icon TEXT NOT NULL DEFAULT 'sparkles',
             prompt_text TEXT NOT NULL DEFAULT '',
             created_at INTEGER NOT NULL,
@@ -2078,7 +2197,7 @@ fn migrate_ai_agents_to_prompts(db: &SqliteConnection) -> rusqlite::Result<()> {
         BEGIN IMMEDIATE;
         INSERT OR IGNORE INTO ai_prompts
             (id, name, agent_type, mode, prompt_text, created_at, updated_at)
-        SELECT id, name, type, CASE WHEN type = 'codex' THEN 'plan' ELSE 'agent' END, '', created_at, updated_at
+        SELECT id, name, type, 'agent', '', created_at, updated_at
         FROM ai_agents;
         DROP TABLE ai_agents;
         COMMIT;
@@ -2092,16 +2211,14 @@ fn migrate_ai_prompt_modes(db: &SqliteConnection) -> rusqlite::Result<()> {
     let columns = statement
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<Result<HashSet<_>, _>>()?;
-    if columns.contains("mode") {
-        return Ok(());
+    if !columns.contains("mode") {
+        db.execute(
+            "ALTER TABLE ai_prompts ADD COLUMN mode TEXT NOT NULL DEFAULT 'agent' CHECK(mode IN ('agent', 'plan'))",
+            [],
+        )?;
     }
-
     db.execute(
-        "ALTER TABLE ai_prompts ADD COLUMN mode TEXT NOT NULL DEFAULT 'plan' CHECK(mode IN ('agent', 'plan'))",
-        [],
-    )?;
-    db.execute(
-        "UPDATE ai_prompts SET mode = 'agent' WHERE agent_type = 'claude'",
+        "UPDATE ai_prompts SET mode = 'agent' WHERE mode != 'agent'",
         [],
     )?;
     Ok(())
@@ -2301,6 +2418,8 @@ fn load_ai_session_settings(db: &SqliteConnection) -> Result<AiSessionSettings, 
                 normalize_ai_session_background_refresh_interval(
                     settings.background_refresh_interval_seconds,
                 );
+            settings.done_state_duration_seconds =
+                normalize_ai_session_done_state_duration(settings.done_state_duration_seconds);
             Ok(settings)
         }
         Err(_) => {
@@ -2321,15 +2440,21 @@ fn list_ai_session_settings(
 #[tauri::command]
 fn save_ai_session_settings(
     state: tauri::State<'_, AppState>,
+    monitor: tauri::State<'_, ai_sessions::AiSessionMonitorHandle>,
     mut input: AiSessionSettings,
 ) -> Result<AiSessionSettings, String> {
     input.foreground_refresh_interval_seconds =
         normalize_ai_session_foreground_refresh_interval(input.foreground_refresh_interval_seconds);
     input.background_refresh_interval_seconds =
         normalize_ai_session_background_refresh_interval(input.background_refresh_interval_seconds);
+    input.done_state_duration_seconds =
+        normalize_ai_session_done_state_duration(input.done_state_duration_seconds);
     let value = serde_json::to_string(&input).map_err(db_error)?;
-    let db = state.db.lock().map_err(db_error)?;
-    set_app_setting(&db, AI_SESSION_SETTINGS_KEY, Some(&value)).map_err(db_error)?;
+    {
+        let db = state.db.lock().map_err(db_error)?;
+        set_app_setting(&db, AI_SESSION_SETTINGS_KEY, Some(&value)).map_err(db_error)?;
+    }
+    monitor.update_settings(input);
     Ok(input)
 }
 
@@ -2488,6 +2613,8 @@ fn apply_quick_capture_settings(
         enabled: input.enabled,
         shortcut: next_shortcut,
         registered: input.enabled,
+        shortcut_recording: false,
+        shortcut_registration_suspended: false,
         error: None,
     };
     Ok(quick_capture_settings_from_runtime(&runtime))
@@ -2555,10 +2682,9 @@ fn row_to_ai_prompt(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiPromptRecord>
         name: row.get(1)?,
         icon: row.get(2)?,
         agent_type: row.get(3)?,
-        mode: row.get(4)?,
-        prompt_text: row.get(5)?,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
+        prompt_text: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
     })
 }
 
@@ -4884,7 +5010,7 @@ fn save_connection_in_db(
 fn list_ai_prompts_in_db(db: &SqliteConnection) -> Result<Vec<AiPromptRecord>, String> {
     let mut statement = db
         .prepare(
-            "SELECT id, name, icon, agent_type, mode, prompt_text, created_at, updated_at
+            "SELECT id, name, icon, agent_type, prompt_text, created_at, updated_at
              FROM ai_prompts ORDER BY name COLLATE NOCASE ASC, id ASC",
         )
         .map_err(db_error)?;
@@ -4898,7 +5024,7 @@ fn list_ai_prompts_in_db(db: &SqliteConnection) -> Result<Vec<AiPromptRecord>, S
 
 fn get_ai_prompt_in_db(db: &SqliteConnection, id: &str) -> Result<Option<AiPromptRecord>, String> {
     db.query_row(
-        "SELECT id, name, icon, agent_type, mode, prompt_text, created_at, updated_at FROM ai_prompts WHERE id = ?1",
+        "SELECT id, name, icon, agent_type, prompt_text, created_at, updated_at FROM ai_prompts WHERE id = ?1",
         params![id],
         row_to_ai_prompt,
     )
@@ -4930,14 +5056,6 @@ fn save_ai_prompt_in_db(
     ) {
         return Err("AI Prompt icon is not supported.".to_string());
     }
-    let mode = input.mode.trim().to_string();
-    if !matches!(mode.as_str(), "agent" | "plan") {
-        return Err("AI Prompt mode must be Agent or Plan.".to_string());
-    }
-    if agent_type == "claude" && mode != "agent" {
-        return Err("Claude AI Prompts only support Agent mode.".to_string());
-    }
-
     let name = input.name.trim().to_string();
     if name.is_empty() {
         return Err("AI Prompt name is required.".to_string());
@@ -4970,21 +5088,21 @@ fn save_ai_prompt_in_db(
 
     if exists {
         db.execute(
-            "UPDATE ai_prompts SET name = ?1, icon = ?2, agent_type = ?3, mode = ?4, prompt_text = ?5, updated_at = ?6 WHERE id = ?7",
-            params![name, icon, agent_type, mode, prompt_text, timestamp, id],
+            "UPDATE ai_prompts SET name = ?1, icon = ?2, agent_type = ?3, mode = 'agent', prompt_text = ?4, updated_at = ?5 WHERE id = ?6",
+            params![name, icon, agent_type, prompt_text, timestamp, id],
         )
         .map_err(db_error)?;
     } else {
         db.execute(
             "INSERT INTO ai_prompts (id, name, icon, agent_type, mode, prompt_text, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![id, name, icon, agent_type, mode, prompt_text, timestamp, timestamp],
+             VALUES (?1, ?2, ?3, ?4, 'agent', ?5, ?6, ?7)",
+            params![id, name, icon, agent_type, prompt_text, timestamp, timestamp],
         )
         .map_err(db_error)?;
     }
 
     db.query_row(
-        "SELECT id, name, icon, agent_type, mode, prompt_text, created_at, updated_at FROM ai_prompts WHERE id = ?1",
+        "SELECT id, name, icon, agent_type, prompt_text, created_at, updated_at FROM ai_prompts WHERE id = ?1",
         params![id],
         row_to_ai_prompt,
     )
@@ -5034,12 +5152,7 @@ fn ai_prompt_with_task_context(prompt_name: &str, prompt_text: &str, task: &Task
     composed
 }
 
-fn ai_prompt_deep_link(
-    agent_type: &str,
-    mode: &str,
-    prompt: &str,
-    path: &str,
-) -> Result<String, String> {
+fn ai_prompt_deep_link(agent_type: &str, prompt: &str, path: &str) -> Result<String, String> {
     let base_url = match agent_type {
         "codex" => "codex://threads/new",
         "claude" => "claude://code/new",
@@ -5052,9 +5165,6 @@ fn ai_prompt_deep_link(
             "codex" => {
                 query.append_pair("prompt", prompt);
                 query.append_pair("path", path);
-                if mode == "plan" {
-                    query.append_pair("mode", "plan");
-                }
             }
             "claude" => {
                 query.append_pair("q", prompt);
@@ -5359,7 +5469,6 @@ fn prepare_ai_prompt_thread_in_db(
 
     ai_prompt_deep_link(
         &prompt.agent_type,
-        &prompt.mode,
         &ai_prompt_with_task_context(&prompt.name, &prompt.prompt_text, &task),
         &canonical_path,
     )
@@ -11439,6 +11548,23 @@ mod tests {
 
     #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
     #[test]
+    fn quick_capture_shortcut_toggle_is_suppressed_while_recording() {
+        assert!(quick_capture_shortcut_should_toggle(
+            ShortcutState::Pressed,
+            false
+        ));
+        assert!(!quick_capture_shortcut_should_toggle(
+            ShortcutState::Pressed,
+            true
+        ));
+        assert!(!quick_capture_shortcut_should_toggle(
+            ShortcutState::Released,
+            false
+        ));
+    }
+
+    #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+    #[test]
     fn quick_capture_settings_default_enabled_and_retain_shortcut_while_disabled() {
         let db = memory_db();
         let default = normalize_quick_capture_shortcut(DEFAULT_QUICK_CAPTURE_SHORTCUT)
@@ -12869,20 +12995,14 @@ mod tests {
         assert!(migrated_prompts
             .iter()
             .all(|prompt| prompt.icon == "sparkles"));
-        assert_eq!(
-            migrated_prompts
-                .iter()
-                .find(|prompt| prompt.agent_type == "codex")
-                .map(|prompt| prompt.mode.as_str()),
-            Some("plan")
-        );
-        assert_eq!(
-            migrated_prompts
-                .iter()
-                .find(|prompt| prompt.agent_type == "claude")
-                .map(|prompt| prompt.mode.as_str()),
-            Some("agent")
-        );
+        let non_agent_modes: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM ai_prompts WHERE mode != 'agent'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count non-Agent prompt modes");
+        assert_eq!(non_agent_modes, 0);
         assert!(column_exists(&db, "task_links", "connection_id"));
         assert!(column_exists(&db, "task_links", "external_state_color"));
         assert!(column_exists(&db, "task_links", "target_branch"));
@@ -15622,8 +15742,9 @@ mod tests {
                 codex_desktop: true,
                 claude_cli: false,
                 claude_desktop: true,
-                foreground_refresh_interval_seconds: 30,
-                background_refresh_interval_seconds: 60,
+                foreground_refresh_interval_seconds: 5,
+                background_refresh_interval_seconds: 5,
+                done_state_duration_seconds: 3 * 60 * 60,
             }
         );
 
@@ -15639,7 +15760,7 @@ mod tests {
             load_ai_session_settings(&db)
                 .expect("normalize refresh interval")
                 .foreground_refresh_interval_seconds,
-            30
+            5
         );
 
         set_app_setting(
@@ -15652,7 +15773,8 @@ mod tests {
         .unwrap();
         let migrated = load_ai_session_settings(&db).expect("migrate legacy refresh interval");
         assert_eq!(migrated.foreground_refresh_interval_seconds, 5);
-        assert_eq!(migrated.background_refresh_interval_seconds, 60);
+        assert_eq!(migrated.background_refresh_interval_seconds, 5);
+        assert_eq!(migrated.done_state_duration_seconds, 3 * 60 * 60);
 
         let settings = AiSessionSettings {
             codex_cli: false,
@@ -15661,6 +15783,7 @@ mod tests {
             claude_desktop: false,
             foreground_refresh_interval_seconds: 60,
             background_refresh_interval_seconds: 300,
+            done_state_duration_seconds: 12 * 60 * 60,
         };
         let value = serde_json::to_string(&settings).unwrap();
         set_app_setting(&db, AI_SESSION_SETTINGS_KEY, Some(&value)).unwrap();
@@ -15690,7 +15813,6 @@ mod tests {
                 agent_type: "codex".to_string(),
                 name: " Implement ticket ".to_string(),
                 icon: "hammer".to_string(),
-                mode: "plan".to_string(),
                 prompt_text: " Fix it carefully. ".to_string(),
             },
         )
@@ -15702,7 +15824,6 @@ mod tests {
                 agent_type: "claude".to_string(),
                 name: "Review ticket".to_string(),
                 icon: "review".to_string(),
-                mode: "agent".to_string(),
                 prompt_text: String::new(),
             },
         )
@@ -15710,7 +15831,6 @@ mod tests {
 
         assert_eq!(codex.name, "Implement ticket");
         assert_eq!(codex.icon, "hammer");
-        assert_eq!(codex.mode, "plan");
         assert_eq!(codex.prompt_text, "Fix it carefully.");
         let listed = list_ai_prompts_in_db(&db).expect("list prompts");
         assert_eq!(
@@ -15728,7 +15848,6 @@ mod tests {
                 agent_type: "claude".to_string(),
                 name: "Ship ticket".to_string(),
                 icon: "target".to_string(),
-                mode: "agent".to_string(),
                 prompt_text: String::new(),
             },
         )
@@ -15756,7 +15875,6 @@ mod tests {
                 agent_type: "codex".to_string(),
                 name: "Implement ticket".to_string(),
                 icon: "hammer".to_string(),
-                mode: "plan".to_string(),
                 prompt_text: String::new(),
             },
         )
@@ -15769,7 +15887,6 @@ mod tests {
                 agent_type: "other".to_string(),
                 name: "Other".to_string(),
                 icon: "hammer".to_string(),
-                mode: "agent".to_string(),
                 prompt_text: String::new(),
             },
         )
@@ -15783,43 +15900,11 @@ mod tests {
                 agent_type: "codex".to_string(),
                 name: "Other".to_string(),
                 icon: "other".to_string(),
-                mode: "plan".to_string(),
                 prompt_text: String::new(),
             },
         )
         .unwrap_err();
         assert_eq!(invalid_icon, "AI Prompt icon is not supported.");
-
-        let invalid_mode = save_ai_prompt_in_db(
-            &db,
-            AiPromptInput {
-                id: None,
-                agent_type: "codex".to_string(),
-                name: "Other".to_string(),
-                icon: "hammer".to_string(),
-                mode: "other".to_string(),
-                prompt_text: String::new(),
-            },
-        )
-        .unwrap_err();
-        assert_eq!(invalid_mode, "AI Prompt mode must be Agent or Plan.");
-
-        let unsupported_claude_mode = save_ai_prompt_in_db(
-            &db,
-            AiPromptInput {
-                id: None,
-                agent_type: "claude".to_string(),
-                name: "Other".to_string(),
-                icon: "hammer".to_string(),
-                mode: "plan".to_string(),
-                prompt_text: String::new(),
-            },
-        )
-        .unwrap_err();
-        assert_eq!(
-            unsupported_claude_mode,
-            "Claude AI Prompts only support Agent mode."
-        );
 
         let blank_name = save_ai_prompt_in_db(
             &db,
@@ -15828,7 +15913,6 @@ mod tests {
                 agent_type: "codex".to_string(),
                 name: "  ".to_string(),
                 icon: "hammer".to_string(),
-                mode: "plan".to_string(),
                 prompt_text: String::new(),
             },
         )
@@ -15842,7 +15926,6 @@ mod tests {
                 agent_type: "claude".to_string(),
                 name: "implement ticket".to_string(),
                 icon: "review".to_string(),
-                mode: "agent".to_string(),
                 prompt_text: String::new(),
             },
         )
@@ -15856,7 +15939,6 @@ mod tests {
                 agent_type: "claude".to_string(),
                 name: "IMPLEMENT TICKET".to_string(),
                 icon: "review".to_string(),
-                mode: "agent".to_string(),
                 prompt_text: String::new(),
             },
         )
@@ -15890,7 +15972,6 @@ mod tests {
                 name: "Legacy Codex".to_string(),
                 agent_type: "codex".to_string(),
                 icon: "sparkles".to_string(),
-                mode: "plan".to_string(),
                 prompt_text: String::new(),
                 created_at: 1,
                 updated_at: 2,
@@ -15904,6 +15985,36 @@ mod tests {
             )
             .expect("check legacy table");
         assert!(!legacy_table_exists);
+    }
+
+    #[test]
+    fn normalizes_existing_ai_prompt_modes_to_agent() {
+        let db = memory_db();
+        db.execute(
+            "INSERT INTO ai_prompts
+                (id, name, agent_type, mode, icon, prompt_text, created_at, updated_at)
+             VALUES ('prompt_1', 'Plan prompt', 'codex', 'plan', 'planning', 'Keep this text.', 1, 2)",
+            [],
+        )
+        .expect("insert legacy Plan prompt");
+
+        init_database(&db).expect("normalize AI Prompt modes");
+
+        let stored_mode: String = db
+            .query_row(
+                "SELECT mode FROM ai_prompts WHERE id = 'prompt_1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read normalized mode");
+        assert_eq!(stored_mode, "agent");
+        let prompt = get_ai_prompt_in_db(&db, "prompt_1")
+            .expect("read normalized prompt")
+            .expect("prompt exists");
+        assert_eq!(prompt.name, "Plan prompt");
+        assert_eq!(prompt.prompt_text, "Keep this text.");
+        assert_eq!(prompt.created_at, 1);
+        assert_eq!(prompt.updated_at, 2);
     }
 
     #[test]
@@ -15929,7 +16040,7 @@ mod tests {
         );
 
         let codex = reqwest::Url::parse(
-            &ai_prompt_deep_link("codex", "plan", &prompt, "/work/app").expect("Codex deep link"),
+            &ai_prompt_deep_link("codex", &prompt, "/work/app").expect("Codex deep link"),
         )
         .expect("parse Codex deep link");
         let codex_query = codex.query_pairs().collect::<HashMap<_, _>>();
@@ -15944,21 +16055,10 @@ mod tests {
             codex_query.get("path").map(|value| value.as_ref()),
             Some("/work/app")
         );
-        assert_eq!(
-            codex_query.get("mode").map(|value| value.as_ref()),
-            Some("plan")
-        );
-
-        let codex_agent = reqwest::Url::parse(
-            &ai_prompt_deep_link("codex", "agent", &prompt, "/work/app")
-                .expect("Codex Agent deep link"),
-        )
-        .expect("parse Codex Agent deep link");
-        assert!(!codex_agent.query_pairs().any(|(key, _)| key == "mode"));
+        assert!(!codex.query_pairs().any(|(key, _)| key == "mode"));
 
         let claude = reqwest::Url::parse(
-            &ai_prompt_deep_link("claude", "agent", &prompt, "/work/app")
-                .expect("Claude deep link"),
+            &ai_prompt_deep_link("claude", &prompt, "/work/app").expect("Claude deep link"),
         )
         .expect("parse Claude deep link");
         let claude_query = claude.query_pairs().collect::<HashMap<_, _>>();
@@ -16047,7 +16147,6 @@ mod tests {
                 agent_type: "codex".to_string(),
                 name: "Implement ticket".to_string(),
                 icon: "hammer".to_string(),
-                mode: "plan".to_string(),
                 prompt_text: "Use the project conventions.".to_string(),
             },
         )
@@ -16082,7 +16181,7 @@ mod tests {
             query.get("prompt").map(|value| value.as_ref()),
             Some(expected_prompt.as_str())
         );
-        assert_eq!(query.get("mode").map(|value| value.as_ref()), Some("plan"));
+        assert!(!query.contains_key("mode"));
         assert!(
             get_task(&db, &task.id)
                 .expect("load original task")

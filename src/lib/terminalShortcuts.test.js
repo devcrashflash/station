@@ -5,6 +5,7 @@ import {
   DEFAULT_TERMINAL_SHORTCUTS,
   matchesTerminalShortcut,
   normalizeTerminalShortcuts,
+  shortcutsMatch,
   terminalShortcutConflict,
   terminalZoomDelta,
 } from "./terminalShortcuts.js";
@@ -18,6 +19,14 @@ test("matches shortcuts with exact platform modifiers", () => {
   assert.equal(matchesTerminalShortcut(event({ ctrlKey: true }), "CommandOrControl+KeyD", "Win32"), true);
   assert.equal(matchesTerminalShortcut(event({ metaKey: true, shiftKey: true }), "CommandOrControl+KeyD", "MacIntel"), false);
   assert.equal(matchesTerminalShortcut(event({ metaKey: true, code: "KeyF" }), "CommandOrControl+KeyD", "MacIntel"), false);
+});
+
+test("compares equivalent shortcuts after resolving the platform primary modifier", () => {
+  assert.equal(shortcutsMatch("CommandOrControl+KeyI", "Super+KeyI", "MacIntel"), true);
+  assert.equal(shortcutsMatch("CommandOrControl+KeyI", "Control+KeyI", "Win32"), true);
+  assert.equal(shortcutsMatch("CommandOrControl+KeyI", "Control+KeyI", "Linux x86_64"), true);
+  assert.equal(shortcutsMatch("CommandOrControl+KeyI", "Control+KeyI", "MacIntel"), false);
+  assert.equal(shortcutsMatch("", "Control+KeyI", "Win32"), false);
 });
 
 test("normalizes missing and malformed terminal shortcuts independently", () => {

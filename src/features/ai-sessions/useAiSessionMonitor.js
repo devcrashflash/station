@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { emit, listen } from "@tauri-apps/api/event";
+import { listen } from "@tauri-apps/api/event";
 
 import { api } from "@/lib/api";
 import {
   AI_SESSION_MAX_WINDOW_HOURS,
   aiSessionPollingIntervalMs,
-  aiSessionsWaitingForInputCount,
   normalizeAiSessionSettings,
 } from "@/lib/aiSessions";
 import {
-  AI_SESSION_WAITING_STATUS_EVENT,
-  AI_SESSION_WAITING_STATUS_REQUEST_EVENT,
+  AI_SESSION_MONITOR_UPDATED_EVENT,
+  aiSessionPayloadIncludesSessions,
+  newerAiSessionSnapshot,
+  normalizeAiSessionSnapshot,
 } from "@/lib/aiSessionEvents";
 import { isDesktopApp } from "@/lib/ocr";
 
@@ -20,6 +21,8 @@ const EMPTY_RESULT = {
   warnings: [],
   loadedAt: Date.now(),
   lastRefreshedAt: null,
+  waitingSessionCount: 0,
+  waitingTerminalTabIds: [],
 };
 
 export function useAiSessionMonitor({
@@ -33,16 +36,27 @@ export function useAiSessionMonitor({
     [settings],
   );
   const [result, setResult] = useState(EMPTY_RESULT);
+  const [waitingAiSessionCount, setWaitingAiSessionCount] = useState(0);
   const [loading, setLoading] = useState(false);
   const activeRun = useRef(0);
   const started = useRef(false);
-  const waitingRef = useRef(false);
-  const waitingAiSessionCount = useMemo(
-    () => aiSessionsWaitingForInputCount(result.sessions),
-    [result.sessions],
-  );
   const hasWaitingAiSession = waitingAiSessionCount > 0;
-  waitingRef.current = hasWaitingAiSession;
+
+  const applyResult = useCallback((next) => {
+    const normalized = normalizeAiSessionSnapshot(next);
+    setResult((current) => newerAiSessionSnapshot(current, normalized));
+    setWaitingAiSessionCount((current) => (
+      current === normalized.waitingSessionCount ? current : normalized.waitingSessionCount
+    ));
+    return normalized;
+  }, []);
+
+  const applyStatus = useCallback((next) => {
+    const count = Number(next?.waitingSessionCount);
+    if (!Number.isFinite(count)) return;
+    const normalized = Math.max(0, count);
+    setWaitingAiSessionCount((current) => (current === normalized ? current : normalized));
+  }, []);
 
   const refresh = useCallback(async ({ quiet = false } = {}) => {
     if (!settingsReady) return null;
@@ -56,10 +70,7 @@ export function useAiSessionMonitor({
         settings: normalizedSettings,
       });
       if (activeRun.current !== run) return null;
-      const loadedAt = Date.now();
-      const nextResult = { ...next, loadedAt, lastRefreshedAt: loadedAt };
-      setResult(nextResult);
-      return nextResult;
+      return applyResult(next);
     } catch (error) {
       if (activeRun.current === run && !quiet) {
         onNotice(error?.message || String(error));
@@ -68,51 +79,79 @@ export function useAiSessionMonitor({
     } finally {
       if (activeRun.current === run) setLoading(false);
     }
-  }, [normalizedSettings, onNotice, settingsReady]);
+  }, [applyResult, normalizedSettings, onNotice, settingsReady]);
 
   useEffect(() => {
     if (!settingsReady) return undefined;
-    const quiet = started.current;
+    if (isDesktopApp()) return undefined;
+    let disposed = false;
+    let timeoutId = null;
+    const firstQuiet = started.current;
     started.current = true;
-    refresh({ quiet });
-    const interval = window.setInterval(
-      () => refresh({ quiet: true }),
-      aiSessionPollingIntervalMs(normalizedSettings, foreground),
-    );
-    return () => window.clearInterval(interval);
+    async function poll(quiet) {
+      await refresh({ quiet });
+      if (!disposed) {
+        timeoutId = window.setTimeout(
+          () => poll(true),
+          aiSessionPollingIntervalMs(normalizedSettings, foreground),
+        );
+      }
+    }
+    void poll(firstQuiet);
+    return () => {
+      disposed = true;
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+    };
   }, [foreground, normalizedSettings, refresh, settingsReady]);
 
   useEffect(() => {
-    if (!isDesktopApp() || result.lastRefreshedAt === null) return;
-    api.setAiSessionDockBadgeCount({
-      count: waitingAiSessionCount,
-    }).catch(console.error);
-  }, [result.lastRefreshedAt, waitingAiSessionCount]);
-
-  useEffect(() => {
-    if (!isDesktopApp() || result.lastRefreshedAt === null) return;
-    emit(AI_SESSION_WAITING_STATUS_EVENT, {
-      waitingForInput: hasWaitingAiSession,
-    }).catch(console.error);
-  }, [hasWaitingAiSession, result.lastRefreshedAt]);
-
-  useEffect(() => {
-    if (!isDesktopApp()) return undefined;
-    let active = true;
+    if (!settingsReady || !isDesktopApp()) return undefined;
+    let disposed = false;
     let unlisten = null;
-    listen(AI_SESSION_WAITING_STATUS_REQUEST_EVENT, () => {
-      emit(AI_SESSION_WAITING_STATUS_EVENT, {
-        waitingForInput: waitingRef.current,
-      }).catch(console.error);
+    listen(AI_SESSION_MONITOR_UPDATED_EVENT, ({ payload }) => {
+      if (disposed) return;
+      if (aiSessionPayloadIncludesSessions(payload)) applyResult(payload);
+      else applyStatus(payload);
     }).then((cleanup) => {
-      if (active) unlisten = cleanup;
-      else cleanup();
+      if (disposed) cleanup();
+      else {
+        unlisten = cleanup;
+        api.latestAiSessionStatus().then((next) => {
+          if (!disposed) applyStatus(next);
+        }).catch((error) => {
+          if (!disposed) onNotice(error?.message || String(error));
+        });
+      }
     }).catch(console.error);
     return () => {
-      active = false;
+      disposed = true;
       unlisten?.();
     };
-  }, []);
+  }, [applyResult, applyStatus, onNotice, settingsReady]);
+
+  useEffect(() => {
+    if (!settingsReady || !foreground || !isDesktopApp()) return undefined;
+    let disposed = false;
+    setLoading(true);
+    api.latestAiSessions().then((next) => {
+      if (!disposed) applyResult(next);
+    }).catch((error) => {
+      if (!disposed) onNotice(error?.message || String(error));
+    }).finally(() => {
+      if (!disposed) setLoading(false);
+    });
+    return () => {
+      disposed = true;
+    };
+  }, [applyResult, foreground, onNotice, settingsReady]);
+
+  useEffect(() => {
+    if (!settingsReady || !isDesktopApp()) return;
+    api.setAiSessionMonitorViewActive({ active: foreground }).catch(console.error);
+    return () => {
+      api.setAiSessionMonitorViewActive({ active: false }).catch(console.error);
+    };
+  }, [foreground, settingsReady]);
 
   return {
     result,

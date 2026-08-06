@@ -88,6 +88,21 @@ export function flattenPaneLayout(node, ratioOverrides = {}, bounds = { left: 0,
   };
 }
 
+export function paneHasHorizontalSplitBelow(paneBounds, splits) {
+  if (!paneBounds || !Array.isArray(splits)) return false;
+  const epsilon = 1e-9;
+  const paneBottom = paneBounds.top + paneBounds.height;
+  const paneRight = paneBounds.left + paneBounds.width;
+
+  return splits.some((split) => {
+    if (split.axis !== "rows") return false;
+    const splitBoundary = split.top + split.height * split.ratio;
+    if (Math.abs(paneBottom - splitBoundary) > epsilon) return false;
+    const splitRight = split.left + split.width;
+    return Math.min(paneRight, splitRight) - Math.max(paneBounds.left, split.left) > epsilon;
+  });
+}
+
 export function paneDropPosition(bounds, clientX, clientY) {
   if (!bounds || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
   const { left, top, width, height } = bounds;

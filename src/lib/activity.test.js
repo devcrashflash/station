@@ -65,10 +65,28 @@ test("formats last activity sync time with the day for non-today syncs", () => {
   assert.equal(formatActivityLastSyncText(null, now), "Last sync: never");
 });
 
-test("only auto-syncs today when cached sync is stale", () => {
-  const now = Date.UTC(2026, 6, 10, 12, 0, 0);
+test("auto-syncs incomplete past days and stale today only", () => {
+  const now = new Date(2026, 6, 10, 12, 0, 0).getTime();
+  const pastDayEnd = localDayBounds("2026-07-09").endAt;
 
-  assert.equal(shouldAutoSyncActivity("2026-07-09", [], now, "2026-07-10"), false);
+  assert.equal(shouldAutoSyncActivity("2026-07-09", [], now, "2026-07-10"), true);
+  assert.equal(
+    shouldAutoSyncActivity("2026-07-09", [{ syncedAt: pastDayEnd - 1 }], now, "2026-07-10"),
+    true,
+  );
+  assert.equal(
+    shouldAutoSyncActivity(
+      "2026-07-09",
+      [{ syncedAt: pastDayEnd, status: "failed", warning: "Connection failed." }],
+      now,
+      "2026-07-10",
+    ),
+    false,
+  );
+  assert.equal(
+    shouldAutoSyncActivity("2026-07-09", [{ syncedAt: pastDayEnd + 1 }], now, "2026-07-10"),
+    false,
+  );
   assert.equal(shouldAutoSyncActivity("2026-07-11", [], now, "2026-07-10"), false);
   assert.equal(shouldAutoSyncActivity("2026-07-10", [], now, "2026-07-10"), true);
   assert.equal(

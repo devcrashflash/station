@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   AI_SESSION_DONE_WINDOW_MS,
+  aiSessionDoneWindowMs,
   aiSessionArchiveActionLabel,
   aiSessionCanArchive,
   aiSessionCommand,
@@ -13,6 +14,7 @@ import {
   aiSessionRelativeTime,
   aiSessionSourceLabel,
   aiSessionState,
+  aiSessionStateTooltip,
   aiSessionSourcesDisabled,
   aiSessionTreeState,
   aiSessionTreeWaitingForInput,
@@ -29,6 +31,7 @@ import {
   formatAiSessionLastRefreshed,
   normalizeAiSessionBackgroundRefreshInterval,
   normalizeAiSessionForegroundRefreshInterval,
+  normalizeAiSessionDoneDuration,
   normalizeAiSessionSettings,
   sortAiSessions,
   sortArchivedAiSessions,
@@ -84,8 +87,9 @@ test("normalizes source settings and detects an all-disabled configuration", () 
     codexDesktop: true,
     claudeCli: true,
     claudeDesktop: true,
-    foregroundRefreshIntervalSeconds: 30,
-    backgroundRefreshIntervalSeconds: 60,
+    foregroundRefreshIntervalSeconds: 5,
+    backgroundRefreshIntervalSeconds: 5,
+    doneStateDurationSeconds: 10_800,
   });
   assert.equal(aiSessionSourcesDisabled({
     codexCli: false,
@@ -166,6 +170,31 @@ test("derives individual and rolled-up session states with waiting and running p
   }, now), "idle");
 });
 
+test("uses the configured Done duration and formats detailed state tooltips", () => {
+  const now = 20_000_000;
+  const session = {
+    running: false,
+    waitingForInput: false,
+    completedAt: now - 7_200_000,
+    updatedAt: now - 7_000_000,
+  };
+  assert.equal(normalizeAiSessionDoneDuration(21_600), 21_600);
+  assert.equal(normalizeAiSessionDoneDuration(30), 10_800);
+  assert.equal(aiSessionDoneWindowMs({ doneStateDurationSeconds: 21_600 }), 21_600_000);
+  assert.equal(aiSessionState(session, now, 3_600_000), "idle");
+  assert.equal(aiSessionState(session, now, 10_800_000), "done");
+  assert.equal(
+    aiSessionStateTooltip(session, { now, doneWindowMs: 10_800_000 }),
+    "Done — completed 2h ago",
+  );
+  assert.equal(
+    aiSessionStateTooltip(session, { now, doneWindowMs: 3_600_000 }),
+    "Idle — last activity 1h ago",
+  );
+  assert.equal(aiSessionStateTooltip({ running: true }, { now }), "Running");
+  assert.equal(aiSessionStateTooltip({ waitingForInput: true }, { now }), "Waiting for you");
+});
+
 test("allows archiving only done or idle session trees", () => {
   const now = 20_000_000;
   assert.equal(aiSessionCanArchive({ running: false, waitingForInput: false, children: [] }, now), true);
@@ -224,8 +253,8 @@ test("normalizes supported AI session refresh intervals", () => {
   assert.equal(normalizeAiSessionForegroundRefreshInterval(0), 0);
   assert.equal(normalizeAiSessionForegroundRefreshInterval(5), 5);
   assert.equal(normalizeAiSessionForegroundRefreshInterval("60"), 60);
-  assert.equal(normalizeAiSessionForegroundRefreshInterval(999), 30);
-  assert.equal(normalizeAiSessionBackgroundRefreshInterval(0), 60);
+  assert.equal(normalizeAiSessionForegroundRefreshInterval(999), 5);
+  assert.equal(normalizeAiSessionBackgroundRefreshInterval(0), 5);
   assert.equal(normalizeAiSessionBackgroundRefreshInterval("15"), 15);
   assert.equal(aiSessionPollingIntervalMs({
     foregroundRefreshIntervalSeconds: 15,
@@ -251,7 +280,8 @@ test("migrates legacy refresh settings and detects waiting child sessions", () =
     claudeCli: true,
     claudeDesktop: true,
     foregroundRefreshIntervalSeconds: 5,
-    backgroundRefreshIntervalSeconds: 60,
+    backgroundRefreshIntervalSeconds: 5,
+    doneStateDurationSeconds: 10_800,
   });
   assert.equal(aiSessionsWaitingForInput([
     { waitingForInput: false, children: [{ waitingForInput: true }] },

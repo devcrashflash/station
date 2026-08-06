@@ -1,6 +1,45 @@
-export const AI_SESSION_WAITING_STATUS_EVENT = "ai-session-waiting-status-changed";
-export const AI_SESSION_WAITING_STATUS_REQUEST_EVENT = "ai-session-waiting-status-requested";
+import { aiSessionsWaitingForInputCount } from "./aiSessions.js";
+
+export const AI_SESSION_MONITOR_UPDATED_EVENT = "ai-session-monitor-updated";
+
+export function aiSessionPayloadIncludesSessions(payload) {
+  return Array.isArray(payload?.sessions);
+}
 
 export function aiSessionWaitingStatusFromPayload(payload) {
-  return payload?.waitingForInput === true;
+  if (Number.isFinite(Number(payload?.waitingSessionCount))) {
+    return Number(payload.waitingSessionCount) > 0;
+  }
+  return aiSessionsWaitingForInputCount(payload?.sessions) > 0;
+}
+
+export function aiSessionWaitingTerminalTabIdsFromPayload(payload) {
+  if (!Array.isArray(payload?.waitingTerminalTabIds)) return [];
+  return [...new Set(payload.waitingTerminalTabIds.filter((tabId) => (
+    typeof tabId === "string" && tabId.length > 0
+  )))];
+}
+
+export function normalizeAiSessionSnapshot(payload, now = Date.now()) {
+  const refreshedAt = Number(payload?.lastRefreshedAt);
+  const loadedAt = Number(payload?.loadedAt);
+  const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+  return {
+    sessions,
+    archivedSessions: Array.isArray(payload?.archivedSessions) ? payload.archivedSessions : [],
+    warnings: Array.isArray(payload?.warnings) ? payload.warnings : [],
+    loadedAt: Number.isFinite(loadedAt) && loadedAt > 0 ? loadedAt : now,
+    lastRefreshedAt: Number.isFinite(refreshedAt) && refreshedAt > 0 ? refreshedAt : now,
+    waitingSessionCount: Number.isFinite(Number(payload?.waitingSessionCount))
+      ? Math.max(0, Number(payload.waitingSessionCount))
+      : aiSessionsWaitingForInputCount(sessions),
+    waitingTerminalTabIds: aiSessionWaitingTerminalTabIdsFromPayload(payload),
+  };
+}
+
+export function newerAiSessionSnapshot(current, candidate) {
+  if (!candidate) return current;
+  return Number(candidate.lastRefreshedAt || 0) >= Number(current?.lastRefreshedAt || 0)
+    ? candidate
+    : current;
 }

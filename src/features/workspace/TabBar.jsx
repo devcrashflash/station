@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { emit, listen } from "@tauri-apps/api/event";
+import { listen } from "@tauri-apps/api/event";
 
+import { api } from "@/lib/api";
 import {
-  AI_SESSION_WAITING_STATUS_EVENT,
-  AI_SESSION_WAITING_STATUS_REQUEST_EVENT,
+  AI_SESSION_MONITOR_UPDATED_EVENT,
+  aiSessionWaitingTerminalTabIdsFromPayload,
   aiSessionWaitingStatusFromPayload,
 } from "@/lib/aiSessionEvents";
 import {
@@ -15,15 +16,22 @@ import {
   workspaceNumberForTab,
   workspaceTabsApi,
 } from "@/lib/workspaceTabs";
+import { formatShortcut } from "@/lib/keyboardShortcut";
 import { useSynchronizedTheme } from "@/lib/theme";
 
 const EMPTY_SNAPSHOT = { tabs: [{ id: "main", kind: "main", title: "Inbox", closable: false }], activeTabId: "main" };
 
+function sameIds(left, right) {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
 export function TabBar() {
   useSynchronizedTheme();
+  const newTerminalShortcut = formatShortcut("CommandOrControl+KeyT");
   const [snapshot, setSnapshot] = useState(EMPTY_SNAPSHOT);
   const [tabDrag, setTabDrag] = useState(null);
   const [hasWaitingAiSession, setHasWaitingAiSession] = useState(false);
+  const [waitingTerminalTabIds, setWaitingTerminalTabIds] = useState([]);
   const tabBarItemsRef = useRef(null);
   const suppressActivationRef = useRef(false);
 
@@ -44,9 +52,11 @@ export function TabBar() {
   useEffect(() => {
     let disposed = false;
     let unlisten = null;
-    listen(AI_SESSION_WAITING_STATUS_EVENT, ({ payload }) => {
+    listen(AI_SESSION_MONITOR_UPDATED_EVENT, ({ payload }) => {
       if (!disposed) {
         setHasWaitingAiSession(aiSessionWaitingStatusFromPayload(payload));
+        const nextIds = aiSessionWaitingTerminalTabIdsFromPayload(payload);
+        setWaitingTerminalTabIds((current) => (sameIds(current, nextIds) ? current : nextIds));
       }
     }).then((cleanup) => {
       if (disposed) {
@@ -54,7 +64,13 @@ export function TabBar() {
         return;
       }
       unlisten = cleanup;
-      emit(AI_SESSION_WAITING_STATUS_REQUEST_EVENT).catch(console.error);
+      api.latestAiSessionStatus().then((next) => {
+        if (!disposed) {
+          setHasWaitingAiSession(aiSessionWaitingStatusFromPayload(next));
+          const nextIds = aiSessionWaitingTerminalTabIdsFromPayload(next);
+          setWaitingTerminalTabIds((current) => (sameIds(current, nextIds) ? current : nextIds));
+        }
+      }).catch(console.error);
     }).catch(console.error);
     return () => {
       disposed = true;
@@ -208,6 +224,9 @@ export function TabBar() {
       <div ref={tabBarItemsRef} className="tab-bar-items">
         {snapshot.tabs.map((tab) => {
           const active = tab.id === snapshot.activeTabId;
+          const waitingForAiSession = tab.kind === "main"
+            ? hasWaitingAiSession
+            : waitingTerminalTabIds.includes(tab.id);
           const shortcutNumber = workspaceNumberForTab(snapshot, tab.id);
           return (
             <div
@@ -230,11 +249,11 @@ export function TabBar() {
                   }
                   activate(tab.id);
                 }}
-                title={tab.kind === "main" && hasWaitingAiSession
+                title={waitingForAiSession
                   ? `${tab.title} — AI session waiting for you`
                   : tab.title}
               >
-                {tab.kind === "main" && hasWaitingAiSession && (
+                {waitingForAiSession && (
                   <span
                     className="workspace-tab-waiting-dot"
                     aria-label="AI session waiting for you"
@@ -262,11 +281,12 @@ export function TabBar() {
         <button
           type="button"
           className="workspace-tab-add"
-          title="New terminal (Cmd/Ctrl+T)"
-          aria-label="New terminal"
+          title={`New terminal (${newTerminalShortcut})`}
+          aria-label={`New terminal (${newTerminalShortcut})`}
           onClick={() => window.dispatchEvent(new Event("workspace-create-terminal"))}
         >
-          +
+          <span className="workspace-tab-add-symbol" aria-hidden="true">+</span>
+          <span className="workspace-tab-shortcut" aria-hidden="true">{newTerminalShortcut}</span>
         </button>
       </div>
     </main>

@@ -17,25 +17,31 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { Textarea } from "@/components/ui/textarea";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
 import {
+  aiSessionDoneWindowMs,
   aiSessionPreferredOpenTarget,
   aiSessionProviderBadgeClass,
   aiSessionRelativeTime,
   aiSessionSourceLabel,
   aiSessionSourcesDisabled,
+  aiSessionStateTooltip,
   aiSessionTreeState,
   aiSessionTreeWaitingForInput,
   normalizeAiSessionSettings,
 } from "@/lib/aiSessions";
 import {
-  AI_SESSION_WAITING_STATUS_EVENT,
-  AI_SESSION_WAITING_STATUS_REQUEST_EVENT,
+  AI_SESSION_MONITOR_UPDATED_EVENT,
+  aiSessionPayloadIncludesSessions,
   aiSessionWaitingStatusFromPayload,
+  newerAiSessionSnapshot,
+  normalizeAiSessionSnapshot,
 } from "@/lib/aiSessionEvents";
 import { isWorkspaceShortcut } from "@/lib/workspaceTabs";
 import { shortcutModifier } from "@/lib/keyboardShortcut";
 import { quickCaptureTitle } from "@/lib/quickCapture";
+import { resetQuickCaptureTab } from "@/lib/quickCaptureLifecycle";
 import {
   filterPrograms,
   highlightedProgramId as resolvedHighlightedProgramId,
@@ -106,7 +112,7 @@ export function QuickCapture() {
       });
       if (agentLoadRun.current !== run) return;
       setAgentSettings(settings);
-      setAgentResult({ ...result, loadedAt: Date.now() });
+      setAgentResult(normalizeAiSessionSnapshot(result));
     } catch (loadError) {
       if (agentLoadRun.current === run) setError(loadError?.message || String(loadError));
     } finally {
@@ -161,7 +167,7 @@ export function QuickCapture() {
         window.requestAnimationFrame(focusInput);
         window.setTimeout(focusInput, 50);
       } else {
-        setActiveTab("inbox");
+        resetQuickCaptureTab(setActiveTab);
         setError("");
         agentLoadRun.current += 1;
         programLoadRun.current += 1;
@@ -210,9 +216,13 @@ export function QuickCapture() {
   useEffect(() => {
     let disposed = false;
     let unlisten = null;
-    listen(AI_SESSION_WAITING_STATUS_EVENT, ({ payload }) => {
+    listen(AI_SESSION_MONITOR_UPDATED_EVENT, ({ payload }) => {
       if (!disposed) {
         setHasWaitingAiSession(aiSessionWaitingStatusFromPayload(payload));
+        if (aiSessionPayloadIncludesSessions(payload)) {
+          const next = normalizeAiSessionSnapshot(payload);
+          setAgentResult((current) => newerAiSessionSnapshot(current, next));
+        }
       }
     }).then((cleanup) => {
       if (disposed) {
@@ -220,7 +230,10 @@ export function QuickCapture() {
         return;
       }
       unlisten = cleanup;
-      emit(AI_SESSION_WAITING_STATUS_REQUEST_EVENT).catch(console.error);
+      api.latestAiSessionStatus().then((next) => {
+        if (disposed) return;
+        setHasWaitingAiSession(aiSessionWaitingStatusFromPayload(next));
+      }).catch(console.error);
     }).catch(console.error);
     return () => {
       disposed = true;
@@ -563,9 +576,13 @@ function AgentList({
     return <AgentEmpty>{query ? "No AI agents match your search." : "No AI agents were active in the last 24 hours."}</AgentEmpty>;
   }
 
+  const now = Date.now();
+  const doneWindowMs = aiSessionDoneWindowMs(settings);
+
   return (
-    <div className="overflow-hidden rounded-md border">
-      {sessions.map((session, index) => {
+    <TooltipProvider>
+      <div className="overflow-hidden rounded-md border">
+        {sessions.map((session, index) => {
         const sessionKey = smartOverlaySessionKey(session);
         const highlighted = sessionKey === highlightedId;
         const waiting = aiSessionTreeWaitingForInput(session);
@@ -590,7 +607,13 @@ function AgentList({
           >
             {busyId === sessionKey
               ? <LoaderCircle className="size-5 shrink-0 animate-spin" />
-              : <AiSessionStateIcon state={aiSessionTreeState(session)} className="size-5" />}
+              : (
+                <AiSessionStateIcon
+                  state={aiSessionTreeState(session, now, doneWindowMs)}
+                  label={aiSessionStateTooltip(session, { now, doneWindowMs, tree: true })}
+                  className="size-5"
+                />
+              )}
             <span className="min-w-0 flex-1">
               <span className="flex min-w-0 items-center gap-2">
                 <span className="truncate text-sm font-medium">{session.title}</span>
@@ -607,8 +630,9 @@ function AgentList({
             {index < 9 && <Kbd>{index + 1}</Kbd>}
           </button>
         );
-      })}
-    </div>
+        })}
+      </div>
+    </TooltipProvider>
   );
 }
 

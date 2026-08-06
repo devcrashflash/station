@@ -53,7 +53,7 @@ import {
 } from "@/lib/ocr";
 import { DEFAULT_PROJECT_COLOR } from "@/lib/projectAvatar";
 import { quickCaptureTitle } from "@/lib/quickCapture";
-import { parseSmartInput } from "@/lib/smartInputParser";
+import { parseSmartInboxTodo, parseSmartInput } from "@/lib/smartInputParser";
 import { DEFAULT_TERMINAL_SHORTCUTS } from "@/lib/terminalShortcuts";
 import { useTheme } from "@/lib/theme";
 import { isWorkspaceShortcut, workspaceTabsApi } from "@/lib/workspaceTabs";
@@ -207,6 +207,7 @@ function App() {
   const [showProjectSwitcher, setShowProjectSwitcher] = useState(false);
   const [projectSwitcherCycleRequestKey, setProjectSwitcherCycleRequestKey] = useState(0);
   const [projectSwitcherReturnTabId, setProjectSwitcherReturnTabId] = useState(null);
+  const [taskSearchFocusRequestKey, setTaskSearchFocusRequestKey] = useState(0);
   const [smartInboxFocusRequestKey, setSmartInboxFocusRequestKey] = useState(0);
   const [aiSessionsActiveViewRequestKey, setAiSessionsActiveViewRequestKey] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
@@ -590,6 +591,18 @@ function App() {
     setSmartInboxTodos(await api.listSmartInboxTodos());
   }
 
+  async function refreshAllSmartInboxItems() {
+    const results = await Promise.allSettled([
+      refreshSmartInboxTodos(),
+      api.listTasks({ projectId: null }).then(setTasks),
+      refreshRecentDirectoryFiles(),
+    ]);
+
+    for (const result of results) {
+      if (result.status === "rejected") reportError(result.reason);
+    }
+  }
+
   async function refreshProject(projectId = selectedProjectId) {
     if (!projectId) return;
     const [taskList, resourceList, localResourceList, connectionIds] = await Promise.all([
@@ -696,10 +709,11 @@ function App() {
 
   async function promoteSmartInboxTodo(todo) {
     if (todo.kind !== "file") {
+      const input = todo.rawText || todo.title;
       await submitSmartInput(
-        todo.rawText || todo.title,
+        input,
         null,
-        textParsedPayload(todo.title),
+        toParsedPayload(parseSmartInboxTodo(todo)),
         todo.id,
       );
       return;
@@ -844,6 +858,7 @@ function App() {
 
   function selectProject(projectId) {
     navigateToLocation(projectLocation(projectId));
+    setTaskSearchFocusRequestKey((current) => current + 1);
   }
 
   function closeProjectSwitcher() {
@@ -1049,6 +1064,7 @@ function App() {
       ) : selectedProject ? (
         <ProjectWorkspaceView
           project={selectedProject}
+          taskSearchFocusRequestKey={taskSearchFocusRequestKey}
           tasks={tasks}
           resources={resources}
           localResources={localResources}
@@ -1112,6 +1128,7 @@ function App() {
               ? undefined
               : openRecentDirectoryFile
           }
+          onRefreshAll={refreshAllSmartInboxItems}
           onRefreshRecentFiles={() => refreshRecentDirectoryFiles().catch(reportError)}
           onLoadProviderItems={(provider) => api.listSmartInboxProviderItems({ provider })}
           onSyncProviderItems={(provider) => api.syncSmartInboxProviderItems({ provider })}

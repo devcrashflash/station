@@ -9,6 +9,7 @@ import {
   isTerminalClearShortcut,
   isTerminalSearchShortcut,
   nextTerminalFontZoomOffset,
+  paneHasHorizontalSplitBelow,
   paneDropPosition,
   paneIds,
   parseOsc7Cwd,
@@ -160,6 +161,42 @@ test("walks nested pane layouts in visible order", () => {
     [0.5, 0, 0.5, 0.25],
     [0.5, 0.25, 0.5, 0.75],
   ]);
+  assert.deepEqual(
+    flattened.panes.map((pane) => paneHasHorizontalSplitBelow(pane, flattened.splits)),
+    [false, true, false],
+  );
+});
+
+test("detects only panes directly above horizontal split boundaries", () => {
+  const flattened = flattenPaneLayout({
+    type: "split",
+    splitId: "rows",
+    axis: "rows",
+    ratio: 0.5,
+    first: {
+      type: "split",
+      splitId: "columns",
+      axis: "columns",
+      ratio: 0.4,
+      first: { type: "pane", paneId: "top-left" },
+      second: { type: "pane", paneId: "top-right" },
+    },
+    second: { type: "pane", paneId: "bottom" },
+  });
+
+  assert.deepEqual(
+    flattened.panes.map(({ pane, ...bounds }) => [
+      pane.paneId,
+      paneHasHorizontalSplitBelow(bounds, flattened.splits),
+    ]),
+    [
+      ["top-left", true],
+      ["top-right", true],
+      ["bottom", false],
+    ],
+  );
+  assert.equal(paneHasHorizontalSplitBelow(flattened.panes[0], []), false);
+  assert.equal(paneHasHorizontalSplitBelow(null, flattened.splits), false);
 });
 
 test("chooses a pane drop position from the nearest normalized edge", () => {
