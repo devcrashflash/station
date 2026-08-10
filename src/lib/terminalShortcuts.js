@@ -155,7 +155,8 @@ export function terminalZoomDelta(event, shortcuts, platform) {
       ? event.metaKey && !event.ctrlKey
       : event.ctrlKey && !event.metaKey;
     if (!event.altKey && primary) {
-      if ((event.code === "Equal" && (event.key === "=" || event.key === "+"))
+      if (event.key === "+"
+        || (event.key === "=" && !event.shiftKey)
         || (event.code === "NumpadAdd" && !event.shiftKey)) return 1;
     }
   }
@@ -164,7 +165,10 @@ export function terminalZoomDelta(event, shortcuts, platform) {
     const primary = isMac
       ? event.metaKey && !event.ctrlKey
       : event.ctrlKey && !event.metaKey;
-    if (!event.altKey && !event.shiftKey && primary && event.code === "NumpadSubtract") return -1;
+    if (!event.altKey
+      && !event.shiftKey
+      && primary
+      && (event.key === "-" || event.code === "NumpadSubtract")) return -1;
   }
   return null;
 }

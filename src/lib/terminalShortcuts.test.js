@@ -64,12 +64,40 @@ test("rejects duplicate and reserved terminal shortcuts", () => {
   });
 });
 
-test("preserves historical default zoom aliases and replaces them for custom bindings", () => {
+test("matches default zoom aliases by character across keyboard layouts", () => {
   assert.equal(terminalZoomDelta(event({ code: "Equal", key: "+", metaKey: true, shiftKey: true }), DEFAULT_TERMINAL_SHORTCUTS, "MacIntel"), 1);
+  assert.equal(terminalZoomDelta(event({ code: "BracketRight", key: "+", metaKey: true }), DEFAULT_TERMINAL_SHORTCUTS, "MacIntel"), 1);
+  assert.equal(terminalZoomDelta(event({ code: "Slash", key: "-", metaKey: true }), DEFAULT_TERMINAL_SHORTCUTS, "MacIntel"), -1);
+  assert.equal(terminalZoomDelta(event({ code: "BracketRight", key: "+", ctrlKey: true }), DEFAULT_TERMINAL_SHORTCUTS, "Win32"), 1);
+  assert.equal(terminalZoomDelta(event({ code: "Slash", key: "-", ctrlKey: true }), DEFAULT_TERMINAL_SHORTCUTS, "Win32"), -1);
+  assert.equal(terminalZoomDelta(event({ code: "BracketRight", key: "+", ctrlKey: true }), DEFAULT_TERMINAL_SHORTCUTS, "Linux x86_64"), 1);
+  assert.equal(terminalZoomDelta(event({ code: "Slash", key: "-", ctrlKey: true }), DEFAULT_TERMINAL_SHORTCUTS, "Linux x86_64"), -1);
   assert.equal(terminalZoomDelta(event({ code: "NumpadAdd", key: "+", ctrlKey: true }), DEFAULT_TERMINAL_SHORTCUTS, "Win32"), 1);
   assert.equal(terminalZoomDelta(event({ code: "NumpadSubtract", key: "-", ctrlKey: true }), DEFAULT_TERMINAL_SHORTCUTS, "Win32"), -1);
-  assert.equal(terminalZoomDelta(event({ code: "Equal", key: "+", metaKey: true, shiftKey: true }), {
+});
+
+test("requires exact default zoom modifiers", () => {
+  assert.equal(terminalZoomDelta(event({ code: "BracketRight", key: "+", metaKey: true, ctrlKey: true }), DEFAULT_TERMINAL_SHORTCUTS, "MacIntel"), null);
+  assert.equal(terminalZoomDelta(event({ code: "BracketRight", key: "+", metaKey: true, altKey: true }), DEFAULT_TERMINAL_SHORTCUTS, "MacIntel"), null);
+  assert.equal(terminalZoomDelta(event({ code: "Slash", key: "-", ctrlKey: true, altKey: true }), DEFAULT_TERMINAL_SHORTCUTS, "Win32"), null);
+  assert.equal(terminalZoomDelta(event({ code: "Slash", key: "-", ctrlKey: true, shiftKey: true }), DEFAULT_TERMINAL_SHORTCUTS, "Linux x86_64"), null);
+});
+
+test("uses layout-independent aliases only for unchanged default zoom bindings", () => {
+  assert.equal(terminalZoomDelta(event({ code: "BracketRight", key: "+", metaKey: true }), {
     ...DEFAULT_TERMINAL_SHORTCUTS,
     zoomIn: "Alt+KeyI",
   }, "MacIntel"), null);
+  assert.equal(terminalZoomDelta(event({ code: "Slash", key: "-", ctrlKey: true }), {
+    ...DEFAULT_TERMINAL_SHORTCUTS,
+    zoomOut: "Alt+KeyO",
+  }, "Win32"), null);
+  assert.equal(terminalZoomDelta(event({ code: "Slash", key: "-", metaKey: true }), {
+    ...DEFAULT_TERMINAL_SHORTCUTS,
+    zoomIn: "Alt+KeyI",
+  }, "MacIntel"), -1);
+  assert.equal(terminalZoomDelta(event({ code: "BracketRight", key: "+", ctrlKey: true }), {
+    ...DEFAULT_TERMINAL_SHORTCUTS,
+    zoomOut: "Alt+KeyO",
+  }, "Linux x86_64"), 1);
 });
