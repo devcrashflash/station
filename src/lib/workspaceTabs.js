@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export const MAIN_WORKSPACE_TAB_ID = "main";
+export const TERMINAL_PERSISTENCE_WARNING = "Terminal changes aren’t being saved. Free disk space; persistence will retry with the next terminal change.";
 
 export const workspaceTabsApi = {
   list: () => invoke("list_workspace_tabs"),
@@ -16,6 +17,10 @@ export const workspaceTabsApi = {
 
 export function terminalTabs(snapshot) {
   return (snapshot?.tabs || []).filter((tab) => tab.kind === "terminal");
+}
+
+export function terminalPersistenceWarning(snapshot) {
+  return snapshot?.terminalPersistenceDegraded ? TERMINAL_PERSISTENCE_WARNING : null;
 }
 
 export function reorderTerminalIds(tabs, draggedId, targetId, placement = null) {

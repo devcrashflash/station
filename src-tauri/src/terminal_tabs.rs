@@ -172,6 +172,7 @@ pub struct WorkspaceTab {
 pub struct WorkspaceTabsSnapshot {
     tabs: Vec<WorkspaceTab>,
     active_tab_id: String,
+    terminal_persistence_degraded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -314,11 +315,17 @@ struct ProcessInfo {
 struct TerminalTabsRuntime {
     tabs: Vec<TerminalTab>,
     active_tab_id: String,
+    new_tab_directory: Option<String>,
+    new_pane_directory: Option<String>,
     sessions: HashMap<String, TerminalSession>,
     pending_input: HashMap<String, Vec<u8>>,
     startup_input_gates: HashSet<String>,
     next_generation: u64,
     next_attachment_id: u64,
+    persistence_revision: u64,
+    persisted_revision: u64,
+    persistence_degraded: bool,
+    persistence_worker_running: bool,
 }
 
 pub struct TerminalTabsState {
@@ -656,6 +663,7 @@ fn snapshot_from_runtime(runtime: &TerminalTabsRuntime) -> WorkspaceTabsSnapshot
     WorkspaceTabsSnapshot {
         tabs,
         active_tab_id: runtime.active_tab_id.clone(),
+        terminal_persistence_degraded: runtime.persistence_degraded,
     }
 }
 
@@ -715,11 +723,21 @@ fn load_runtime(db: &SqliteConnection) -> Result<TerminalTabsRuntime, String> {
     Ok(TerminalTabsRuntime {
         tabs,
         active_tab_id: MAIN_TAB_ID.to_string(),
+        new_tab_directory: get_app_setting(db, NEW_TAB_DIRECTORY_SETTING_KEY)
+            .ok()
+            .flatten(),
+        new_pane_directory: get_app_setting(db, NEW_PANE_DIRECTORY_SETTING_KEY)
+            .ok()
+            .flatten(),
         sessions: HashMap::new(),
         pending_input: HashMap::new(),
         startup_input_gates: HashSet::new(),
         next_generation: 1,
         next_attachment_id: 1,
+        persistence_revision: 0,
+        persisted_revision: 0,
+        persistence_degraded: false,
+        persistence_worker_running: false,
     })
 }
 
@@ -885,15 +903,19 @@ fn validate_pane(runtime: &TerminalTabsRuntime, tab_id: &str, pane_id: &str) -> 
     }
 }
 
-fn persist_tabs(app: &tauri::AppHandle, runtime: &TerminalTabsRuntime) -> Result<(), String> {
+fn persist_tab_snapshot(app: &tauri::AppHandle, tabs: &[TerminalTab]) -> Result<(), String> {
     let state = app.state::<AppState>();
     let mut db = state.db.lock().map_err(db_error)?;
+    persist_tabs_to_db(&mut db, tabs)
+}
+
+fn persist_tabs_to_db(db: &mut SqliteConnection, tabs: &[TerminalTab]) -> Result<(), String> {
     let transaction = db.transaction().map_err(db_error)?;
     transaction
         .execute("DELETE FROM terminal_tabs", [])
         .map_err(db_error)?;
     let now = now_millis();
-    for (position, tab) in runtime.tabs.iter().enumerate() {
+    for (position, tab) in tabs.iter().enumerate() {
         let layout_json = serde_json::to_string(&tab.layout()).map_err(db_error)?;
         transaction.execute(
             "INSERT INTO terminal_tabs (id, title, position, created_at, updated_at, layout_json)
@@ -902,6 +924,94 @@ fn persist_tabs(app: &tauri::AppHandle, runtime: &TerminalTabsRuntime) -> Result
         ).map_err(db_error)?;
     }
     transaction.commit().map_err(db_error)
+}
+
+fn mark_terminal_tabs_dirty(runtime: &mut TerminalTabsRuntime) {
+    runtime.persistence_revision = runtime.persistence_revision.saturating_add(1);
+}
+
+fn begin_terminal_persistence(runtime: &mut TerminalTabsRuntime) -> bool {
+    if runtime.persistence_worker_running
+        || runtime.persistence_revision <= runtime.persisted_revision
+    {
+        return false;
+    }
+    runtime.persistence_worker_running = true;
+    true
+}
+
+fn finish_terminal_persistence(
+    runtime: &mut TerminalTabsRuntime,
+    revision: u64,
+    succeeded: bool,
+) -> (bool, bool) {
+    let was_degraded = runtime.persistence_degraded;
+    let retry = if succeeded {
+        runtime.persisted_revision = runtime.persisted_revision.max(revision);
+        let retry = runtime.persistence_revision > revision;
+        if !retry {
+            runtime.persistence_degraded = false;
+            runtime.persistence_worker_running = false;
+        }
+        retry
+    } else {
+        runtime.persistence_degraded = true;
+        let retry = runtime.persistence_revision > revision;
+        if !retry {
+            runtime.persistence_worker_running = false;
+        }
+        retry
+    };
+    (was_degraded != runtime.persistence_degraded, retry)
+}
+
+fn terminal_persistence_payload(
+    state: &TerminalTabsState,
+) -> Result<(u64, Vec<TerminalTab>), String> {
+    let runtime = state.runtime.lock().map_err(db_error)?;
+    Ok((runtime.persistence_revision, runtime.tabs.clone()))
+}
+
+fn persist_terminal_tabs_in_background(app: &tauri::AppHandle) {
+    let state = app.state::<TerminalTabsState>();
+    {
+        let Ok(mut runtime) = state.runtime.lock() else {
+            return;
+        };
+        if !begin_terminal_persistence(&mut runtime) {
+            return;
+        }
+    }
+
+    let worker_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || loop {
+        let (revision, tabs) = {
+            let state = worker_app.state::<TerminalTabsState>();
+            let Ok(payload) = terminal_persistence_payload(state.inner()) else {
+                return;
+            };
+            payload
+        };
+        let result = persist_tab_snapshot(&worker_app, &tabs);
+        let (snapshot, status_changed, retry) = {
+            let state = worker_app.state::<TerminalTabsState>();
+            let Ok(mut runtime) = state.runtime.lock() else {
+                return;
+            };
+            if let Err(ref error) = result {
+                eprintln!("Could not persist terminal tabs: {error}");
+            }
+            let (status_changed, retry) =
+                finish_terminal_persistence(&mut runtime, revision, result.is_ok());
+            (snapshot_from_runtime(&runtime), status_changed, retry)
+        };
+        if status_changed {
+            emit_snapshot(&worker_app, &snapshot);
+        }
+        if !retry {
+            return;
+        }
+    });
 }
 
 fn emit_snapshot(app: &tauri::AppHandle, snapshot: &WorkspaceTabsSnapshot) {
@@ -983,7 +1093,7 @@ fn create_terminal_tab_inner(
     defer_input: bool,
     cwd: Option<String>,
 ) -> Result<WorkspaceTabsSnapshot, String> {
-    let new_tab_directory = if let Some(cwd) = cwd {
+    let requested_directory = if let Some(cwd) = cwd {
         let path = PathBuf::from(&cwd);
         if !path.is_absolute() || !path.is_dir() {
             return Err(
@@ -993,10 +1103,11 @@ fn create_terminal_tab_inner(
         }
         Some(cwd)
     } else {
-        configured_terminal_directories(app)?.0
+        None
     };
     let (tab_id, snapshot) = {
         let mut runtime = state.runtime.lock().map_err(db_error)?;
+        let new_tab_directory = requested_directory.or_else(|| runtime.new_tab_directory.clone());
         let tab_id = super::new_id("terminal_tab");
         runtime.tabs.push(TerminalTab::new_with_cwd(
             tab_id.clone(),
@@ -1007,13 +1118,14 @@ fn create_terminal_tab_inner(
             runtime.startup_input_gates.insert(tab_id.clone());
         }
         runtime.active_tab_id = tab_id.clone();
-        persist_tabs(app, &runtime)?;
+        mark_terminal_tabs_dirty(&mut runtime);
         (tab_id, snapshot_from_runtime(&runtime))
     };
     if !defer_input {
         apply_active_webview(app, &tab_id)?;
     }
     emit_snapshot(app, &snapshot);
+    persist_terminal_tabs_in_background(app);
     Ok(snapshot)
 }
 
@@ -1410,7 +1522,7 @@ fn focus_existing_ai_session(
         }
         runtime.tabs[tab_index].focused_pane_id = found.pane_id;
         runtime.active_tab_id = found.tab_id.clone();
-        persist_tabs(app, &runtime)?;
+        mark_terminal_tabs_dirty(&mut runtime);
         (
             runtime.tabs[tab_index].layout(),
             snapshot_from_runtime(&runtime),
@@ -1419,6 +1531,7 @@ fn focus_existing_ai_session(
     apply_active_webview(app, &found.tab_id)?;
     emit_layout(app, &layout);
     emit_snapshot(app, &snapshot);
+    persist_terminal_tabs_in_background(app);
     Ok(Some(snapshot))
 }
 
@@ -1474,16 +1587,20 @@ pub fn activate_tab(
     validate_management_caller(&webview)?;
     let snapshot = {
         let mut runtime = state.runtime.lock().map_err(db_error)?;
-        if tab_id != MAIN_TAB_ID && !runtime.tabs.iter().any(|tab| tab.id == tab_id) {
-            return Err("Unknown workspace tab.".to_string());
-        }
-        runtime.active_tab_id = tab_id.clone();
-        persist_tabs(&app, &runtime)?;
+        activate_runtime_tab(&mut runtime, &tab_id)?;
         snapshot_from_runtime(&runtime)
     };
     apply_active_webview(&app, &tab_id)?;
     emit_snapshot(&app, &snapshot);
     Ok(snapshot)
+}
+
+fn activate_runtime_tab(runtime: &mut TerminalTabsRuntime, tab_id: &str) -> Result<(), String> {
+    if tab_id != MAIN_TAB_ID && !runtime.tabs.iter().any(|tab| tab.id == tab_id) {
+        return Err("Unknown workspace tab.".to_string());
+    }
+    runtime.active_tab_id = tab_id.to_string();
+    Ok(())
 }
 
 #[tauri::command]
@@ -1497,10 +1614,11 @@ pub fn reorder_tabs(
     let snapshot = {
         let mut runtime = state.runtime.lock().map_err(db_error)?;
         reorder_runtime_tabs(&mut runtime, &tab_ids)?;
-        persist_tabs(&app, &runtime)?;
+        mark_terminal_tabs_dirty(&mut runtime);
         snapshot_from_runtime(&runtime)
     };
     emit_snapshot(&app, &snapshot);
+    persist_terminal_tabs_in_background(&app);
     Ok(snapshot)
 }
 
@@ -1566,7 +1684,7 @@ fn close_terminal_tab_inner(
         if runtime.active_tab_id == tab_id {
             runtime.active_tab_id = active_after_close(&runtime.tabs, index);
         }
-        persist_tabs(app, &runtime)?;
+        mark_terminal_tabs_dirty(&mut runtime);
         (
             runtime.active_tab_id.clone(),
             snapshot_from_runtime(&runtime),
@@ -1574,6 +1692,7 @@ fn close_terminal_tab_inner(
     };
     apply_active_webview(app, &next_active)?;
     emit_snapshot(app, &snapshot);
+    persist_terminal_tabs_in_background(app);
     Ok(snapshot)
 }
 
@@ -1614,11 +1733,12 @@ fn close_terminal_pane_inner(
             .ok_or_else(|| "Cannot remove the final pane without closing its tab.".to_string())?;
         tab.focused_pane_id = next_focus.unwrap_or_else(|| tab.root.first_pane_id().to_string());
         let layout = tab.layout();
-        persist_tabs(app, &runtime)?;
+        mark_terminal_tabs_dirty(&mut runtime);
         (layout, snapshot_from_runtime(&runtime))
     };
     emit_layout(app, &layout);
     emit_snapshot(app, &snapshot);
+    persist_terminal_tabs_in_background(app);
     Ok(snapshot)
 }
 
@@ -1762,12 +1882,12 @@ pub fn split_active_terminal(
 ) -> Result<Option<TerminalLayout>, String> {
     validate_management_caller(&webview)?;
     let axis = parse_split_axis(&axis)?;
-    let new_pane_directory = configured_terminal_directories(&app)?.1;
     let result = {
         let mut runtime = state.runtime.lock().map_err(db_error)?;
         if runtime.active_tab_id == MAIN_TAB_ID {
             None
         } else {
+            let new_pane_directory = runtime.new_pane_directory.clone();
             let active_id = runtime.active_tab_id.clone();
             let focused_pane_id = runtime
                 .tabs
@@ -1808,13 +1928,14 @@ pub fn split_active_terminal(
             }
             tab.focused_pane_id = new_pane_id;
             let layout = tab.layout();
-            persist_tabs(&app, &runtime)?;
+            mark_terminal_tabs_dirty(&mut runtime);
             Some((layout, snapshot_from_runtime(&runtime)))
         }
     };
     if let Some((layout, snapshot)) = result {
         emit_layout(&app, &layout);
         emit_snapshot(&app, &snapshot);
+        persist_terminal_tabs_in_background(&app);
         Ok(Some(layout))
     } else {
         Ok(None)
@@ -1840,11 +1961,12 @@ pub fn focus_terminal_pane(
             .unwrap();
         tab.focused_pane_id = pane_id;
         let layout = tab.layout();
-        persist_tabs(&app, &runtime)?;
+        mark_terminal_tabs_dirty(&mut runtime);
         (layout, snapshot_from_runtime(&runtime))
     };
     emit_layout(&app, &layout);
     emit_snapshot(&app, &snapshot);
+    persist_terminal_tabs_in_background(&app);
     Ok(layout)
 }
 
@@ -1877,10 +1999,11 @@ pub fn resize_terminal_split(
         };
         *stored = ratio.clamp(0.1, 0.9);
         let layout = tab.layout();
-        persist_tabs(&app, &runtime)?;
+        mark_terminal_tabs_dirty(&mut runtime);
         layout
     };
     emit_layout(&app, &layout);
+    persist_terminal_tabs_in_background(&app);
     Ok(layout)
 }
 
@@ -1912,11 +2035,12 @@ pub fn move_terminal_pane(
         )?;
         tab.focused_pane_id = pane_id;
         let layout = tab.layout();
-        persist_tabs(&app, &runtime)?;
+        mark_terminal_tabs_dirty(&mut runtime);
         (layout, snapshot_from_runtime(&runtime))
     };
     emit_layout(&app, &layout);
     emit_snapshot(&app, &snapshot);
+    persist_terminal_tabs_in_background(&app);
     Ok(layout)
 }
 
@@ -1979,17 +2103,6 @@ fn normalize_terminal_directory(
         ));
     }
     Ok(Some(path.to_string_lossy().into_owned()))
-}
-
-fn configured_terminal_directories(
-    app: &tauri::AppHandle,
-) -> Result<(Option<String>, Option<String>), String> {
-    let state = app.state::<AppState>();
-    let db = state.db.lock().map_err(db_error)?;
-    Ok((
-        get_app_setting(&db, NEW_TAB_DIRECTORY_SETTING_KEY).map_err(db_error)?,
-        get_app_setting(&db, NEW_PANE_DIRECTORY_SETTING_KEY).map_err(db_error)?,
-    ))
 }
 
 fn inactive_pane_opacity(db: &SqliteConnection) -> f64 {
@@ -2426,6 +2539,7 @@ pub fn list_terminal_settings(
 pub fn save_terminal_settings(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
+    terminal_state: tauri::State<'_, TerminalTabsState>,
     input: TerminalSettingsInput,
 ) -> Result<TerminalSettings, String> {
     let home = app.path().home_dir().map_err(db_error)?;
@@ -2551,6 +2665,11 @@ pub fn save_terminal_settings(
         .map_err(db_error)?;
         let shortcuts_json = serde_json::to_string(&shortcuts).map_err(db_error)?;
         set_app_setting(&db, SHORTCUTS_SETTING_KEY, Some(&shortcuts_json)).map_err(db_error)?;
+    }
+    {
+        let mut runtime = terminal_state.runtime.lock().map_err(db_error)?;
+        runtime.new_tab_directory = new_tab_directory;
+        runtime.new_pane_directory = new_pane_directory;
     }
     let settings = list_terminal_settings(app.clone(), state)?;
     let _ = app.emit("terminal-settings-changed", &settings);
@@ -3221,11 +3340,12 @@ pub fn terminal_set_title(
         };
         *title = normalized;
         let layout = tab.layout();
-        persist_tabs(&app, &runtime)?;
+        mark_terminal_tabs_dirty(&mut runtime);
         (layout, snapshot_from_runtime(&runtime))
     };
     emit_layout(&app, &layout);
     emit_snapshot(&app, &snapshot);
+    persist_terminal_tabs_in_background(&app);
     Ok(snapshot)
 }
 
@@ -3267,17 +3387,21 @@ pub fn terminal_set_cwd(
         };
         *cwd = Some(path);
         let layout = tab.layout();
-        persist_tabs(&app, &runtime)?;
+        mark_terminal_tabs_dirty(&mut runtime);
         layout
     };
     emit_layout(&app, &layout);
+    persist_terminal_tabs_in_background(&app);
     Ok(layout)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        sync::{Arc, Barrier},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     fn runtime(ids: &[&str], active: &str) -> TerminalTabsRuntime {
         TerminalTabsRuntime {
@@ -3286,12 +3410,155 @@ mod tests {
                 .map(|id| TerminalTab::new((*id).to_string(), (*id).to_string()))
                 .collect(),
             active_tab_id: active.to_string(),
+            new_tab_directory: None,
+            new_pane_directory: None,
             sessions: HashMap::new(),
             pending_input: HashMap::new(),
             startup_input_gates: HashSet::new(),
             next_generation: 1,
             next_attachment_id: 1,
+            persistence_revision: 0,
+            persisted_revision: 0,
+            persistence_degraded: false,
+            persistence_worker_running: false,
         }
+    }
+
+    #[test]
+    fn activating_tabs_is_runtime_only_and_never_marks_persistence_dirty() {
+        let mut runtime = runtime(&["one"], MAIN_TAB_ID);
+
+        activate_runtime_tab(&mut runtime, "one").unwrap();
+
+        assert_eq!(runtime.active_tab_id, "one");
+        assert_eq!(runtime.persistence_revision, 0);
+        assert!(!runtime.persistence_worker_running);
+        assert!(activate_runtime_tab(&mut runtime, "missing").is_err());
+    }
+
+    #[test]
+    fn persistence_failure_degrades_without_discarding_runtime_changes() {
+        let mut runtime = runtime(&["one"], "one");
+        runtime
+            .tabs
+            .push(TerminalTab::new("two".into(), "two".into()));
+        mark_terminal_tabs_dirty(&mut runtime);
+        assert!(begin_terminal_persistence(&mut runtime));
+        let revision = runtime.persistence_revision;
+
+        let (status_changed, retry) = finish_terminal_persistence(&mut runtime, revision, false);
+
+        assert!(status_changed);
+        assert!(!retry);
+        assert!(runtime.persistence_degraded);
+        assert!(!runtime.persistence_worker_running);
+        assert_eq!(runtime.tabs.len(), 2);
+        assert_eq!(snapshot_from_runtime(&runtime).tabs.len(), 3);
+    }
+
+    #[test]
+    fn persistence_coalesces_newer_revisions_and_clears_warning_after_retry() {
+        let mut runtime = runtime(&["one"], "one");
+        mark_terminal_tabs_dirty(&mut runtime);
+        assert!(begin_terminal_persistence(&mut runtime));
+        let first_revision = runtime.persistence_revision;
+        mark_terminal_tabs_dirty(&mut runtime);
+
+        let (status_changed, retry) =
+            finish_terminal_persistence(&mut runtime, first_revision, true);
+        assert!(!status_changed);
+        assert!(retry);
+        assert!(runtime.persistence_worker_running);
+        assert_eq!(runtime.persisted_revision, first_revision);
+
+        let latest_revision = runtime.persistence_revision;
+        let (status_changed, retry) =
+            finish_terminal_persistence(&mut runtime, latest_revision, false);
+        assert!(status_changed);
+        assert!(!retry);
+        assert!(runtime.persistence_degraded);
+
+        mark_terminal_tabs_dirty(&mut runtime);
+        assert!(begin_terminal_persistence(&mut runtime));
+        let retry_revision = runtime.persistence_revision;
+        let (status_changed, retry) =
+            finish_terminal_persistence(&mut runtime, retry_revision, true);
+        assert!(status_changed);
+        assert!(!retry);
+        assert!(!runtime.persistence_degraded);
+        assert_eq!(runtime.persisted_revision, retry_revision);
+    }
+
+    #[test]
+    fn persistence_payload_releases_runtime_before_blocking_io() {
+        let state = Arc::new(TerminalTabsState {
+            runtime: Mutex::new(runtime(&["one"], "one")),
+        });
+        let payload_ready = Arc::new(Barrier::new(2));
+        let release_io = Arc::new(Barrier::new(2));
+        let worker_state = Arc::clone(&state);
+        let worker_ready = Arc::clone(&payload_ready);
+        let worker_release = Arc::clone(&release_io);
+        let worker = thread::spawn(move || {
+            let payload = terminal_persistence_payload(&worker_state).unwrap();
+            worker_ready.wait();
+            worker_release.wait();
+            payload
+        });
+
+        payload_ready.wait();
+        {
+            let mut runtime = state
+                .runtime
+                .try_lock()
+                .expect("terminal input must not wait for persistence I/O");
+            runtime
+                .pending_input
+                .insert("one".into(), b"df -h\r".to_vec());
+        }
+        release_io.wait();
+
+        let (_, tabs) = worker.join().unwrap();
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(
+            state
+                .runtime
+                .lock()
+                .unwrap()
+                .pending_input
+                .get("one")
+                .unwrap(),
+            b"df -h\r"
+        );
+    }
+
+    #[test]
+    fn sqlite_write_failure_leaves_the_last_persisted_layout_intact() {
+        let mut db = SqliteConnection::open_in_memory().unwrap();
+        init_terminal_schema(&db).unwrap();
+        db.execute("INSERT INTO terminal_tabs (id, title, position, created_at, updated_at) VALUES ('saved', 'Saved', 0, 1, 1)", []).unwrap();
+        db.pragma_update(None, "query_only", true).unwrap();
+        let tabs = vec![TerminalTab::new("memory".into(), "Memory".into())];
+
+        assert!(persist_tabs_to_db(&mut db, &tabs).is_err());
+
+        let saved_ids = db
+            .prepare("SELECT id FROM terminal_tabs ORDER BY position")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(saved_ids, vec!["saved"]);
+    }
+
+    #[test]
+    fn workspace_snapshot_serializes_the_degraded_persistence_flag() {
+        let mut runtime = runtime(&["one"], "one");
+        runtime.persistence_degraded = true;
+        let json = serde_json::to_value(snapshot_from_runtime(&runtime)).unwrap();
+
+        assert_eq!(json["terminalPersistenceDegraded"], true);
     }
 
     #[test]

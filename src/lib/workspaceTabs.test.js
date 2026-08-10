@@ -6,6 +6,7 @@ import {
   isWorkspaceShortcut,
   reorderTerminalIds,
   terminalTabDropPlacement,
+  terminalPersistenceWarning,
   terminalTabs,
   workspaceNumberShortcut,
   workspaceNumberForTab,
@@ -13,6 +14,14 @@ import {
   workspaceTabForNumber,
   withTerminalTabOrder,
 } from "./workspaceTabs.js";
+
+test("exposes the terminal persistence warning only for degraded snapshots", () => {
+  assert.equal(terminalPersistenceWarning({ terminalPersistenceDegraded: false }), null);
+  assert.match(
+    terminalPersistenceWarning({ terminalPersistenceDegraded: true }),
+    /Free disk space/,
+  );
+});
 
 const tabs = [
   { id: "main", kind: "main" },

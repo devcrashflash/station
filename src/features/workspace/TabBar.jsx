@@ -10,6 +10,7 @@ import {
 import {
   reorderTerminalIds,
   requestCloseTerminal,
+  terminalPersistenceWarning,
   terminalTabDropPlacement,
   terminalTabs,
   withTerminalTabOrder,
@@ -34,6 +35,7 @@ export function TabBar() {
   const [waitingTerminalTabIds, setWaitingTerminalTabIds] = useState([]);
   const tabBarItemsRef = useRef(null);
   const suppressActivationRef = useRef(false);
+  const persistenceWarning = terminalPersistenceWarning(snapshot);
 
   useEffect(() => {
     let disposed = false;
@@ -289,6 +291,17 @@ export function TabBar() {
           <span className="workspace-tab-shortcut" aria-hidden="true">{newTerminalShortcut}</span>
         </button>
       </div>
+      {persistenceWarning && (
+        <div
+          className="terminal-persistence-warning"
+          role="status"
+          aria-live="polite"
+          title={persistenceWarning}
+        >
+          <span aria-hidden="true">⚠</span>
+          <span>Terminal changes not saved</span>
+        </div>
+      )}
     </main>
   );
 }

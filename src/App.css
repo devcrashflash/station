@@ -257,6 +257,26 @@ body.terminal-window #root {
   overflow: hidden;
 }
 
+.terminal-persistence-warning {
+  display: flex;
+  height: 24px;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  border-left: 1px solid color-mix(in oklch, var(--color-orange-500) 45%, var(--border));
+  background: color-mix(in oklch, var(--color-orange-500) 16%, var(--sidebar));
+  color: color-mix(in oklch, var(--color-orange-500) 72%, var(--foreground));
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+  .terminal-persistence-warning span:last-child {
+    display: none;
+  }
+}
+
 .workspace-tab,
 .workspace-tab-add {
   height: 24px;
