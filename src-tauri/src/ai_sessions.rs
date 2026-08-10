@@ -7,7 +7,7 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::{Arc, Condvar, Mutex},
     thread,
     time::UNIX_EPOCH,
@@ -22,6 +22,8 @@ use crate::{
 
 pub const AI_SESSION_MONITOR_UPDATED_EVENT: &str = "ai-session-monitor-updated";
 const AI_SESSION_MONITOR_WINDOW_HOURS: i64 = 24 * 30;
+const CLAUDE_AGENTS_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
+const MINIMUM_CLAUDE_AGENTS_VERSION: (u64, u64, u64) = (2, 1, 175);
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -445,6 +447,207 @@ fn command_path(command: &str) -> Option<PathBuf> {
     })
 }
 
+fn claude_executable() -> Option<PathBuf> {
+    command_path("claude").or_else(|| {
+        let mut candidates = Vec::new();
+        if let Some(home) = home_dir() {
+            #[cfg(windows)]
+            candidates.extend([
+                home.join(".local/bin/claude.exe"),
+                home.join(".local/bin/claude.cmd"),
+            ]);
+            #[cfg(not(windows))]
+            candidates.push(home.join(".local/bin/claude"));
+        }
+        #[cfg(target_os = "macos")]
+        candidates.extend([
+            PathBuf::from("/opt/homebrew/bin/claude"),
+            PathBuf::from("/usr/local/bin/claude"),
+        ]);
+        #[cfg(target_os = "linux")]
+        candidates.extend([
+            PathBuf::from("/usr/local/bin/claude"),
+            PathBuf::from("/usr/bin/claude"),
+        ]);
+        candidates.into_iter().find(|candidate| candidate.is_file())
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommandResult {
+    success: bool,
+    stdout: Vec<u8>,
+}
+
+fn command_output_with_timeout(
+    executable: &Path,
+    arguments: &[&str],
+    timeout: Duration,
+) -> Option<CommandResult> {
+    let mut child = Command::new(executable)
+        .args(arguments)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    };
+    let reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        stdout.read_to_end(&mut output).ok()?;
+        Some(output)
+    });
+    let started_at = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if started_at.elapsed() < timeout => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let stdout = reader.join().ok().flatten()?;
+    status.map(|status| CommandResult {
+        success: status.success(),
+        stdout,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClaudeExecutableFingerprint {
+    path: PathBuf,
+    modified_at: i64,
+    file_len: u64,
+}
+
+fn executable_fingerprint(path: &Path) -> ClaudeExecutableFingerprint {
+    ClaudeExecutableFingerprint {
+        path: path.to_path_buf(),
+        modified_at: file_millis(path),
+        file_len: fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeLiveLifecycle {
+    Working,
+    NeedsInput,
+    Inactive,
+    Unknown,
+}
+
+impl ClaudeLiveLifecycle {
+    fn precedence(self) -> u8 {
+        match self {
+            Self::Unknown => 0,
+            Self::Inactive => 1,
+            Self::Working => 2,
+            Self::NeedsInput => 3,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ClaudeLiveStateCache {
+    capability: Option<(ClaudeExecutableFingerprint, bool)>,
+}
+
+fn parse_claude_version(value: &str) -> Option<(u64, u64, u64)> {
+    value.split_whitespace().find_map(|field| {
+        let mut parts = field.split('.');
+        let version = (
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+            parts.next()?.parse().ok()?,
+        );
+        parts.next().is_none().then_some(version)
+    })
+}
+
+fn parse_claude_live_states(value: &[u8]) -> Option<HashMap<String, ClaudeLiveLifecycle>> {
+    let entries = serde_json::from_slice::<Value>(value)
+        .ok()?
+        .as_array()?
+        .clone();
+    let mut states = HashMap::new();
+    for entry in entries {
+        let Some(session_id) = entry.get("sessionId").and_then(Value::as_str) else {
+            continue;
+        };
+        let lifecycle = match entry
+            .get("state")
+            .and_then(Value::as_str)
+            .or_else(|| entry.get("status").and_then(Value::as_str))
+        {
+            Some("working") => ClaudeLiveLifecycle::Working,
+            Some("needs_input" | "waiting") => ClaudeLiveLifecycle::NeedsInput,
+            Some("idle" | "completed" | "failed" | "stopped") => ClaudeLiveLifecycle::Inactive,
+            None if entry.get("waitingFor").and_then(Value::as_str).is_some() => {
+                ClaudeLiveLifecycle::NeedsInput
+            }
+            _ => ClaudeLiveLifecycle::Unknown,
+        };
+        states
+            .entry(session_id.to_string())
+            .and_modify(|current: &mut ClaudeLiveLifecycle| {
+                if lifecycle.precedence() > current.precedence() {
+                    *current = lifecycle;
+                }
+            })
+            .or_insert(lifecycle);
+    }
+    Some(states)
+}
+
+fn claude_live_states_with(
+    cache: &mut ClaudeLiveStateCache,
+    executable: Option<PathBuf>,
+    mut run: impl FnMut(&Path, &[&str], Duration) -> Option<CommandResult>,
+) -> Option<HashMap<String, ClaudeLiveLifecycle>> {
+    let executable = executable?;
+    let fingerprint = executable_fingerprint(&executable);
+    let supported = match &cache.capability {
+        Some((cached, supported)) if cached == &fingerprint => *supported,
+        _ => {
+            let output = run(&executable, &["--version"], CLAUDE_AGENTS_COMMAND_TIMEOUT)?;
+            if !output.success {
+                return None;
+            }
+            let version = parse_claude_version(&String::from_utf8_lossy(&output.stdout))?;
+            let supported = version >= MINIMUM_CLAUDE_AGENTS_VERSION;
+            cache.capability = Some((fingerprint, supported));
+            supported
+        }
+    };
+    if !supported {
+        return None;
+    }
+    let output = run(
+        &executable,
+        &["agents", "--json"],
+        CLAUDE_AGENTS_COMMAND_TIMEOUT,
+    )?;
+    output
+        .success
+        .then(|| parse_claude_live_states(&output.stdout))?
+}
+
+fn claude_live_states(
+    cache: &mut ClaudeLiveStateCache,
+) -> Option<HashMap<String, ClaudeLiveLifecycle>> {
+    claude_live_states_with(cache, claude_executable(), command_output_with_timeout)
+}
+
 #[cfg(target_os = "macos")]
 fn bundled_codex_executable() -> Option<PathBuf> {
     let mut roots = vec![PathBuf::from("/Applications")];
@@ -497,6 +700,8 @@ fn codex_cli_executable() -> Option<PathBuf> {
 fn command_available(command: &str) -> bool {
     if command == "codex" {
         codex_cli_executable().is_some()
+    } else if command == "claude" {
+        claude_executable().is_some()
     } else {
         command_path(command).is_some()
     }
@@ -1281,6 +1486,23 @@ struct ClaudeTranscriptState {
     completed_at: Option<i64>,
 }
 
+fn claude_user_event_starts_turn(value: &Value) -> bool {
+    if value.get("type").and_then(Value::as_str) != Some("user") {
+        return false;
+    }
+    let Some(content) = value.pointer("/message/content").and_then(Value::as_str) else {
+        return true;
+    };
+    let content = content.trim_start();
+    ![
+        "<local-command-caveat>",
+        "<command-name>",
+        "<local-command-stdout>",
+    ]
+    .iter()
+    .any(|prefix| content.starts_with(prefix))
+}
+
 impl ClaudeTranscriptState {
     fn apply(&mut self, value: &Value) {
         self.id = self.id.take().or_else(|| {
@@ -1324,7 +1546,8 @@ impl ClaudeTranscriptState {
                 .pointer("/message/content")
                 .and_then(content_text)
                 .is_some_and(|text| text.trim().starts_with("[Request interrupted by user"));
-        if self.first_prompt.is_none() && is_user && !is_interruption {
+        let starts_turn = !is_interruption && claude_user_event_starts_turn(value);
+        if self.first_prompt.is_none() && starts_turn {
             self.first_prompt = value
                 .pointer("/message/content")
                 .and_then(content_text)
@@ -1358,7 +1581,7 @@ impl ClaudeTranscriptState {
             self.running = false;
             self.completed_at = None;
             self.pending_inputs.clear();
-        } else if is_user {
+        } else if starts_turn {
             self.running = true;
             self.completed_at = None;
             for item in value
@@ -1719,6 +1942,37 @@ fn inherit_origins(sessions: &mut [AiSession]) {
     }
 }
 
+fn reconcile_claude_live_states(
+    sessions: &mut [AiSession],
+    live_states: Option<&HashMap<String, ClaudeLiveLifecycle>>,
+) {
+    let Some(live_states) = live_states else {
+        return;
+    };
+    for session in sessions
+        .iter_mut()
+        .filter(|session| session.provider == "claude" && session.parent_id.is_none())
+    {
+        match live_states.get(&session.id) {
+            Some(ClaudeLiveLifecycle::Working) => {
+                session.running = true;
+                session.waiting_for_input = false;
+                session.completed_at = None;
+            }
+            Some(ClaudeLiveLifecycle::NeedsInput) => {
+                session.running = false;
+                session.waiting_for_input = true;
+                session.completed_at = None;
+            }
+            Some(ClaudeLiveLifecycle::Inactive) | None => {
+                session.running = false;
+                session.waiting_for_input = false;
+            }
+            Some(ClaudeLiveLifecycle::Unknown) => {}
+        }
+    }
+}
+
 fn reconcile_child_lifecycle(parent: &AiSession, children: &mut [AiSession]) {
     if parent.provider != "claude" || parent.running || parent.waiting_for_input {
         return;
@@ -2003,6 +2257,7 @@ fn scan_ai_sessions(
     settings: AiSessionSettings,
     codex_cache: &mut CodexDiscoveryCache,
     claude_cache: &mut ClaudeDiscoveryCache,
+    claude_live_cache: &mut ClaudeLiveStateCache,
 ) -> Result<AiSessionList, String> {
     let mut sessions = Vec::new();
     let mut warnings = Vec::new();
@@ -2026,6 +2281,10 @@ fn scan_ai_sessions(
             }),
         }
     }
+    let live_states = (settings.claude_cli || settings.claude_desktop)
+        .then(|| claude_live_states(claude_live_cache))
+        .flatten();
+    reconcile_claude_live_states(&mut sessions, live_states.as_ref());
     let sessions = group_and_filter(sessions, since, &settings);
     let db = state.db.lock().map_err(db_error)?;
     let (sessions, archived_sessions) = reconcile_archived_sessions(&db, sessions)?;
@@ -2041,11 +2300,19 @@ fn scan_ai_session_snapshot(
     settings: AiSessionSettings,
     codex_cache: &mut CodexDiscoveryCache,
     claude_cache: &mut ClaudeDiscoveryCache,
+    claude_live_cache: &mut ClaudeLiveStateCache,
 ) -> Result<AiSessionMonitorSnapshot, String> {
     let requested_at = now_millis();
     let since = requested_at - AI_SESSION_MONITOR_WINDOW_HOURS * 3_600_000;
     let state = app.state::<AppState>();
-    let result = scan_ai_sessions(state.inner(), since, settings, codex_cache, claude_cache)?;
+    let result = scan_ai_sessions(
+        state.inner(),
+        since,
+        settings,
+        codex_cache,
+        claude_cache,
+        claude_live_cache,
+    )?;
     let refreshed_at = now_millis();
     let waiting_session_count = waiting_session_count(&result.sessions);
     let waiting_terminal_sessions = waiting_terminal_session_keys(&result.sessions);
@@ -2117,6 +2384,7 @@ fn run_monitor(app: tauri::AppHandle, handle: AiSessionMonitorHandle) {
     let mut last_attempt_at: Option<Instant> = None;
     let mut codex_cache = CodexDiscoveryCache::default();
     let mut claude_cache = ClaudeDiscoveryCache::default();
+    let mut claude_live_cache = ClaudeLiveStateCache::default();
     loop {
         let (settings, started_generation) = {
             let (lock, wake) = &*handle.shared;
@@ -2152,7 +2420,13 @@ fn run_monitor(app: tauri::AppHandle, handle: AiSessionMonitorHandle) {
             }
         };
 
-        let result = scan_ai_session_snapshot(&app, settings, &mut codex_cache, &mut claude_cache);
+        let result = scan_ai_session_snapshot(
+            &app,
+            settings,
+            &mut codex_cache,
+            &mut claude_cache,
+            &mut claude_live_cache,
+        );
         last_attempt_at = Some(Instant::now());
         {
             let (lock, wake) = &*handle.shared;
@@ -2454,6 +2728,194 @@ mod tests {
             ai_session_polling_interval_seconds(&foreground_off, true),
             60
         );
+    }
+
+    #[test]
+    fn parses_supported_claude_version_and_live_session_states() {
+        assert_eq!(
+            parse_claude_version("2.1.226 (Claude Code)"),
+            Some((2, 1, 226))
+        );
+        assert_eq!(
+            parse_claude_version("Claude Code 2.1.175"),
+            Some((2, 1, 175))
+        );
+        assert_eq!(parse_claude_version("unknown"), None);
+
+        let states = parse_claude_live_states(
+            br#"[
+                {"sessionId":"working","state":"working"},
+                {"sessionId":"waiting","state":"needs_input","waitingFor":"permission prompt"},
+                {"sessionId":"idle","state":"idle"},
+                {"sessionId":"completed","state":"completed"},
+                {"sessionId":"legacy-waiting","status":"waiting","waitingFor":"input needed"},
+                {"sessionId":"waiting-for","waitingFor":"MCP input"},
+                {"sessionId":"unknown","state":"future_state"},
+                {"state":"working"},
+                {"sessionId":"duplicate","state":"idle"},
+                {"sessionId":"duplicate","state":"working"}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(states.get("working"), Some(&ClaudeLiveLifecycle::Working));
+        assert_eq!(
+            states.get("waiting"),
+            Some(&ClaudeLiveLifecycle::NeedsInput)
+        );
+        assert_eq!(states.get("idle"), Some(&ClaudeLiveLifecycle::Inactive));
+        assert_eq!(
+            states.get("completed"),
+            Some(&ClaudeLiveLifecycle::Inactive)
+        );
+        assert_eq!(
+            states.get("legacy-waiting"),
+            Some(&ClaudeLiveLifecycle::NeedsInput)
+        );
+        assert_eq!(
+            states.get("waiting-for"),
+            Some(&ClaudeLiveLifecycle::NeedsInput)
+        );
+        assert_eq!(states.get("unknown"), Some(&ClaudeLiveLifecycle::Unknown));
+        assert_eq!(states.get("duplicate"), Some(&ClaudeLiveLifecycle::Working));
+        assert_eq!(states.len(), 8);
+        assert!(parse_claude_live_states(b"not json").is_none());
+        assert!(parse_claude_live_states(br#"{}"#).is_none());
+    }
+
+    #[test]
+    fn uses_claude_agents_only_when_supported_and_preserves_fallback_on_failures() {
+        let executable = Some(PathBuf::from("/test/claude"));
+        let output = |success: bool, value: &str| CommandResult {
+            success,
+            stdout: value.as_bytes().to_vec(),
+        };
+
+        let mut cache = ClaudeLiveStateCache::default();
+        let mut calls = Vec::new();
+        let states = claude_live_states_with(&mut cache, executable.clone(), |_, arguments, _| {
+            calls.push(arguments.join(" "));
+            match arguments {
+                ["--version"] => Some(output(true, "2.1.226 (Claude Code)")),
+                ["agents", "--json"] => Some(output(true, "[]")),
+                _ => None,
+            }
+        })
+        .unwrap();
+        assert!(states.is_empty());
+        assert_eq!(calls, ["--version", "agents --json"]);
+
+        let mut calls = Vec::new();
+        let states = claude_live_states_with(&mut cache, executable.clone(), |_, arguments, _| {
+            calls.push(arguments.join(" "));
+            Some(output(true, "[]"))
+        })
+        .unwrap();
+        assert!(states.is_empty());
+        assert_eq!(calls, ["agents --json"]);
+
+        for (version, agents) in [
+            (Some(output(true, "2.1.174")), Some(output(true, "[]"))),
+            (None, Some(output(true, "[]"))),
+            (Some(output(false, "2.1.226")), Some(output(true, "[]"))),
+            (Some(output(true, "invalid")), Some(output(true, "[]"))),
+            (Some(output(true, "2.1.226")), Some(output(false, "[]"))),
+            (Some(output(true, "2.1.226")), Some(output(true, "invalid"))),
+        ] {
+            let mut cache = ClaudeLiveStateCache::default();
+            let result =
+                claude_live_states_with(&mut cache, executable.clone(), |_, arguments, _| {
+                    match arguments {
+                        ["--version"] => version.clone(),
+                        ["agents", "--json"] => agents.clone(),
+                        _ => None,
+                    }
+                });
+            assert!(result.is_none());
+        }
+        assert!(claude_live_states_with(
+            &mut ClaudeLiveStateCache::default(),
+            None,
+            |_, _, _| unreachable!(),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn reconciles_transcript_activity_with_authoritative_claude_states() {
+        let mut working = session("working", 100, None);
+        working.provider = "claude".to_string();
+        working.completed_at = Some(90);
+        let mut waiting = session("waiting", 100, None);
+        waiting.provider = "claude".to_string();
+        waiting.running = true;
+        let mut inactive = session("inactive", 100, None);
+        inactive.provider = "claude".to_string();
+        inactive.running = true;
+        inactive.waiting_for_input = true;
+        inactive.completed_at = Some(90);
+        let mut absent = session("absent", 100, None);
+        absent.provider = "claude".to_string();
+        absent.running = true;
+        let mut unknown = session("unknown", 100, None);
+        unknown.provider = "claude".to_string();
+        unknown.running = true;
+        let mut codex = session("codex", 100, None);
+        codex.running = true;
+        let mut sessions = vec![working, waiting, inactive, absent, unknown, codex];
+        let states = HashMap::from([
+            ("working".to_string(), ClaudeLiveLifecycle::Working),
+            ("waiting".to_string(), ClaudeLiveLifecycle::NeedsInput),
+            ("inactive".to_string(), ClaudeLiveLifecycle::Inactive),
+            ("unknown".to_string(), ClaudeLiveLifecycle::Unknown),
+        ]);
+
+        reconcile_claude_live_states(&mut sessions, Some(&states));
+
+        assert!(sessions[0].running);
+        assert!(!sessions[0].waiting_for_input);
+        assert_eq!(sessions[0].completed_at, None);
+        assert!(!sessions[1].running);
+        assert!(sessions[1].waiting_for_input);
+        assert_eq!(sessions[1].completed_at, None);
+        assert!(!sessions[2].running);
+        assert!(!sessions[2].waiting_for_input);
+        assert_eq!(sessions[2].completed_at, Some(90));
+        assert!(!sessions[3].running);
+        assert!(!sessions[3].waiting_for_input);
+        assert!(sessions[4].running);
+        assert!(sessions[5].running);
+    }
+
+    #[test]
+    fn successful_empty_claude_roster_clears_stale_parent_and_child_activity() {
+        let mut parent = session("parent", 200, None);
+        parent.provider = "claude".to_string();
+        parent.running = true;
+        let mut child = session("child", 150, Some("parent"));
+        child.provider = "claude".to_string();
+        child.running = true;
+        child.waiting_for_input = true;
+        let mut sessions = vec![parent, child];
+
+        reconcile_claude_live_states(&mut sessions, Some(&HashMap::new()));
+        let grouped = group_and_filter(sessions, 0, &AiSessionSettings::default());
+
+        assert!(!grouped[0].running);
+        assert!(!grouped[0].children[0].running);
+        assert!(!grouped[0].children[0].waiting_for_input);
+    }
+
+    #[test]
+    fn unavailable_claude_roster_preserves_transcript_activity() {
+        let mut session = session("fallback", 100, None);
+        session.provider = "claude".to_string();
+        session.running = true;
+        session.waiting_for_input = true;
+
+        reconcile_claude_live_states(std::slice::from_mut(&mut session), None);
+
+        assert!(session.running);
+        assert!(session.waiting_for_input);
     }
 
     #[test]
@@ -3746,9 +4208,25 @@ mod tests {
         drop(file);
         let completed = read_claude_transcript_cached(&path, &projects_root, &mut cache).unwrap();
         assert!(!completed.running);
-        assert!(completed.completed_at.is_some());
+        let completed_at = completed.completed_at;
+        assert!(completed_at.is_some());
         assert_eq!(cache.full_reads, 1);
         assert_eq!(cache.incremental_reads, 2);
+
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(
+            file,
+            "{{\"type\":\"user\",\"sessionId\":\"44444444-4444-4444-8444-444444444444\",\"timestamp\":\"2026-08-05T10:02:00Z\",\"message\":{{\"content\":\"<local-command-stdout>output</local-command-stdout>\"}}}}"
+        )
+        .unwrap();
+        drop(file);
+        let local_command =
+            read_claude_transcript_cached(&path, &projects_root, &mut cache).unwrap();
+        assert!(!local_command.running);
+        assert_eq!(local_command.completed_at, completed_at);
+        assert_eq!(local_command.title, completed.title);
+        assert_eq!(cache.full_reads, 1);
+        assert_eq!(cache.incremental_reads, 3);
 
         fs::write(
             &path,
@@ -3991,6 +4469,75 @@ mod tests {
         let restarted = read_claude_transcript(&path, &directory.join("projects")).unwrap();
         assert!(restarted.running);
         assert_eq!(restarted.completed_at, None);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn ignores_claude_local_command_events_for_session_lifecycle_and_title() {
+        let directory = fixture_dir("claude-local-commands");
+        let projects = directory.join("projects/project-a");
+        fs::create_dir_all(&projects).unwrap();
+        let path = projects.join("local-command-session.jsonl");
+        let local_commands = concat!(
+            "{\"type\":\"user\",\"sessionId\":\"local-command-session\",\"timestamp\":\"2026-07-22T10:00:00Z\",\"message\":{\"content\":\"<local-command-caveat>metadata</local-command-caveat>\"}}\n",
+            "{\"type\":\"user\",\"sessionId\":\"local-command-session\",\"timestamp\":\"2026-07-22T10:01:00Z\",\"message\":{\"content\":\"<command-name>/status</command-name>\"}}\n",
+            "{\"type\":\"user\",\"sessionId\":\"local-command-session\",\"timestamp\":\"2026-07-22T10:02:00Z\",\"message\":{\"content\":\"<local-command-stdout>output</local-command-stdout>\"}}\n",
+        );
+        fs::write(&path, local_commands).unwrap();
+        let synthetic_only = read_claude_transcript(&path, &directory.join("projects")).unwrap();
+        assert!(!synthetic_only.running);
+        assert_eq!(synthetic_only.completed_at, None);
+        assert_eq!(synthetic_only.title, "Claude session");
+
+        let prompt = "{\"type\":\"user\",\"sessionId\":\"local-command-session\",\"timestamp\":\"2026-07-22T10:03:00Z\",\"message\":{\"content\":\"Start real work\"}}\n";
+        let complete = "{\"type\":\"assistant\",\"sessionId\":\"local-command-session\",\"timestamp\":\"2026-07-22T10:04:00Z\",\"message\":{\"stop_reason\":\"end_turn\",\"content\":[]}}\n";
+        fs::write(
+            &path,
+            format!("{local_commands}{prompt}{complete}{local_commands}"),
+        )
+        .unwrap();
+        let completed = read_claude_transcript(&path, &directory.join("projects")).unwrap();
+        let completed_at = timestamp_millis(Some("2026-07-22T10:04:00Z"));
+        assert!(!completed.running);
+        assert_eq!(completed.completed_at, Some(completed_at));
+        assert_eq!(completed.title, "Start real work");
+
+        let restart = "{\"type\":\"user\",\"sessionId\":\"local-command-session\",\"timestamp\":\"2026-07-22T10:05:00Z\",\"message\":{\"content\":\"Continue real work\"}}\n";
+        fs::write(
+            &path,
+            format!("{local_commands}{prompt}{complete}{local_commands}{restart}"),
+        )
+        .unwrap();
+        let restarted = read_claude_transcript(&path, &directory.join("projects")).unwrap();
+        assert!(restarted.running);
+        assert_eq!(restarted.completed_at, None);
+        assert_eq!(restarted.title, "Start real work");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn clears_task_notification_activity_when_claude_live_roster_is_empty() {
+        let directory = fixture_dir("claude-stale-task-notification");
+        let projects = directory.join("projects/project-a");
+        fs::create_dir_all(&projects).unwrap();
+        let path = projects.join("task-notification-session.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"user\",\"sessionId\":\"task-notification-session\",\"timestamp\":\"2026-08-10T06:51:05Z\",\"message\":{\"content\":\"Debug tests\"}}\n",
+                "{\"type\":\"assistant\",\"sessionId\":\"task-notification-session\",\"timestamp\":\"2026-08-10T06:51:16Z\",\"message\":{\"stop_reason\":\"end_turn\",\"content\":[]}}\n",
+                "{\"type\":\"user\",\"sessionId\":\"task-notification-session\",\"timestamp\":\"2026-08-10T06:51:46Z\",\"message\":{\"content\":\"<task-notification>background task completed</task-notification>\"}}\n",
+            ),
+        )
+        .unwrap();
+        let mut session = read_claude_transcript(&path, &directory.join("projects")).unwrap();
+        assert!(session.running);
+
+        reconcile_claude_live_states(std::slice::from_mut(&mut session), Some(&HashMap::new()));
+
+        assert!(!session.running);
+        assert!(!session.waiting_for_input);
+        assert_eq!(session.completed_at, None);
         fs::remove_dir_all(directory).unwrap();
     }
 
