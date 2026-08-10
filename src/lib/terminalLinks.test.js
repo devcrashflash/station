@@ -115,6 +115,72 @@ test("shows file link decorations only while the primary modifier is active", as
   controller.dispose();
 });
 
+function mouseEvent(type, button) {
+  const event = new Event(type);
+  Object.defineProperty(event, "button", { value: button });
+  return event;
+}
+
+function fakeEventTarget() {
+  const listeners = new Map();
+  return {
+    addEventListener(type, listener) {
+      const typeListeners = listeners.get(type) || new Set();
+      typeListeners.add(listener);
+      listeners.set(type, typeListeners);
+    },
+    removeEventListener(type, listener) {
+      listeners.get(type)?.delete(listener);
+    },
+    dispatchEvent(event) {
+      listeners.get(event.type)?.forEach((listener) => listener(event));
+    },
+    listenerCount() {
+      return Array.from(listeners.values()).reduce((count, typeListeners) => count + typeListeners.size, 0);
+    },
+  };
+}
+
+test("resolves links only with the primary modifier and no selection drag", () => {
+  const target = fakeEventTarget();
+  const controller = createTerminalLinkModifierController({ target, platform: "MacIntel" });
+  const commandDown = new Event("keydown");
+  Object.defineProperties(commandDown, {
+    metaKey: { value: true },
+    ctrlKey: { value: false },
+    altKey: { value: false },
+    shiftKey: { value: false },
+  });
+  const commandUp = new Event("keyup");
+
+  assert.equal(controller.shouldResolveLinks(), false);
+  target.dispatchEvent(mouseEvent("mousedown", 2));
+  assert.equal(controller.shouldResolveLinks(), false);
+  target.dispatchEvent(commandDown);
+  assert.equal(controller.shouldResolveLinks(), true);
+  target.dispatchEvent(mouseEvent("mousedown", 2));
+  assert.equal(controller.shouldResolveLinks(), true);
+  target.dispatchEvent(mouseEvent("mousedown", 0));
+  assert.equal(controller.shouldResolveLinks(), false);
+  target.dispatchEvent(mouseEvent("mouseup", 0));
+  assert.equal(controller.shouldResolveLinks(), true);
+  target.dispatchEvent(commandUp);
+  assert.equal(controller.shouldResolveLinks(), false);
+
+  target.dispatchEvent(commandDown);
+  target.dispatchEvent(mouseEvent("mousedown", 0));
+  target.dispatchEvent(new Event("blur"));
+  assert.equal(controller.shouldResolveLinks(), false);
+
+  target.dispatchEvent(commandDown);
+  target.dispatchEvent(mouseEvent("mousedown", 0));
+  controller.dispose();
+  assert.equal(controller.shouldResolveLinks(), false);
+  assert.equal(target.listenerCount(), 0);
+  target.dispatchEvent(commandDown);
+  assert.equal(controller.shouldResolveLinks(), false);
+});
+
 function fakeTerminal(lines) {
   const cell = {
     chars: "",
@@ -158,4 +224,36 @@ test("maps validated links across wrapped xterm buffer lines", async () => {
   links[0].activate({ ctrlKey: true }, links[0].text);
   await Promise.resolve();
   assert.equal(opened, "/repo/src/longfile.js");
+});
+
+test("skips parsing and backend resolution while link discovery is guarded", async () => {
+  let lineReads = 0;
+  let resolutionCalls = 0;
+  const terminal = fakeTerminal([{ text: "src/app.js" }]);
+  const originalGetLine = terminal.buffer.active.getLine;
+  terminal.buffer.active.getLine = (...args) => {
+    lineReads += 1;
+    return originalGetLine(...args);
+  };
+  let allowResolution = false;
+  const provider = createTerminalFileLinkProvider({
+    terminal,
+    shouldResolve: () => allowResolution,
+    resolvePaths: async () => {
+      resolutionCalls += 1;
+      return [{ index: 0, path: "/repo/src/app.js" }];
+    },
+    openPath: async () => {},
+  });
+
+  const suppressedLinks = await new Promise((resolve) => provider.provideLinks(1, resolve));
+  assert.equal(suppressedLinks, undefined);
+  assert.equal(lineReads, 0);
+  assert.equal(resolutionCalls, 0);
+
+  allowResolution = true;
+  const links = await new Promise((resolve) => provider.provideLinks(1, resolve));
+  assert.equal(lineReads > 0, true);
+  assert.equal(resolutionCalls, 1);
+  assert.equal(links.length, 1);
 });

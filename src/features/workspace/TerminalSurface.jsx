@@ -335,6 +335,7 @@ function TerminalPane({
     const fileLinksDisposable = terminal.registerLinkProvider(createTerminalFileLinkProvider({
       terminal,
       linkModifier,
+      shouldResolve: () => linkModifier.shouldResolveLinks(),
       resolvePaths: (candidates) => invoke("resolve_terminal_paths", {
         tabId,
         paneId: pane.paneId,

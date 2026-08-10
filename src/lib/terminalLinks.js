@@ -146,6 +146,7 @@ export function createTerminalLinkModifierController({
   platform = globalThis.navigator?.platform || "",
 } = {}) {
   let active = false;
+  let primaryButtonDown = false;
   let hoveredLink = null;
 
   const updateLink = () => {
@@ -161,12 +162,27 @@ export function createTerminalLinkModifierController({
     active = false;
     updateLink();
   };
+  const trackMouseDown = (event) => {
+    if (event.button === 0) primaryButtonDown = true;
+  };
+  const trackMouseUp = (event) => {
+    if (event.button === 0) primaryButtonDown = false;
+  };
+  const resetInteraction = () => {
+    primaryButtonDown = false;
+    resetModifier();
+  };
 
   target?.addEventListener("keydown", updateModifier, true);
   target?.addEventListener("keyup", updateModifier, true);
-  target?.addEventListener("blur", resetModifier);
+  target?.addEventListener("mousedown", trackMouseDown, true);
+  target?.addEventListener("mouseup", trackMouseUp, true);
+  target?.addEventListener("blur", resetInteraction);
 
   return {
+    shouldResolveLinks() {
+      return active && !primaryButtonDown;
+    },
     decorate(link) {
       link.decorations = { underline: active, pointerCursor: active };
       link.hover = (event) => {
@@ -187,7 +203,11 @@ export function createTerminalLinkModifierController({
     dispose() {
       target?.removeEventListener("keydown", updateModifier, true);
       target?.removeEventListener("keyup", updateModifier, true);
-      target?.removeEventListener("blur", resetModifier);
+      target?.removeEventListener("mousedown", trackMouseDown, true);
+      target?.removeEventListener("mouseup", trackMouseUp, true);
+      target?.removeEventListener("blur", resetInteraction);
+      active = false;
+      primaryButtonDown = false;
       hoveredLink = null;
     },
   };
@@ -258,9 +278,21 @@ function candidateRange(terminal, firstLine, candidate) {
   };
 }
 
-export function createTerminalFileLinkProvider({ terminal, resolvePaths, openPath, linkModifier }) {
+export function createTerminalFileLinkProvider({
+  terminal,
+  resolvePaths,
+  openPath,
+  linkModifier,
+  shouldResolve = () => true,
+}) {
   return {
     async provideLinks(bufferLineNumber, callback) {
+      // A selection drag can cross many wrapped rows from one logical line.
+      // Keep path parsing and filesystem resolution out of that hot path.
+      if (!shouldResolve()) {
+        callback(undefined);
+        return;
+      }
       const logicalLine = windowedLineStrings(bufferLineNumber, terminal);
       if (!logicalLine) {
         callback(undefined);
