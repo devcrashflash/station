@@ -427,18 +427,6 @@ function SessionRow({
   return (
     <div className="border-b last:border-b-0">
       <div className="flex min-w-0 items-center gap-3 p-4">
-        {hasChildren && (
-          <Button
-            type="button"
-            size="icon-sm"
-            variant="ghost"
-            aria-label={expanded ? "Hide subagents" : "Show subagents"}
-            title={expanded ? "Hide subagents" : "Show subagents"}
-            onClick={onToggle}
-          >
-            {expanded ? <ChevronDown /> : <ChevronRight />}
-          </Button>
-        )}
         <AiSessionStateIcon state={state} label={stateLabel} className="size-5" />
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2">
@@ -462,6 +450,18 @@ function SessionRow({
             {hasChildren ? ` · ${session.children.length} subagent${session.children.length === 1 ? "" : "s"}` : ""}
           </p>
         </div>
+        {hasChildren && (
+          <Button
+            type="button"
+            size="icon-sm"
+            variant="ghost"
+            aria-label={expanded ? "Hide subagents" : "Show subagents"}
+            title={expanded ? "Hide subagents" : "Show subagents"}
+            onClick={onToggle}
+          >
+            {expanded ? <ChevronDown /> : <ChevronRight />}
+          </Button>
+        )}
         <div className="flex shrink-0 items-center gap-2">
           {archived ? (
             <Tooltip>
@@ -540,13 +540,13 @@ function SessionRow({
         </div>
       </div>
       {expanded && hasChildren && (
-        <div className="border-t bg-muted/20 py-1 pl-12 pr-4">
+        <div className="border-t bg-muted/20 px-4 py-1">
           {session.children.map((child) => (
             <div key={child.id} className="flex min-w-0 items-center gap-3 border-b py-3 last:border-b-0">
               <AiSessionStateIcon
                 state={aiSessionState(child)}
                 label={aiSessionStateTooltip(child, { now })}
-                className="size-4"
+                className="size-5"
               />
               <div className="min-w-0 flex-1">
                 <div className="flex min-w-0 items-center gap-2">
