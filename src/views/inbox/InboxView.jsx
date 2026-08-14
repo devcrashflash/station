@@ -15,7 +15,12 @@ import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SmartInput } from "@/features/smart-input/SmartInput";
-import { dashboardTaskCreatedAt, dashboardTaskProjectName, latestDashboardTasks } from "@/lib/dashboardTasks";
+import {
+  dashboardTaskCreatedAt,
+  dashboardTaskProjectName,
+  filterDashboardTasks,
+  latestDashboardTasks,
+} from "@/lib/dashboardTasks";
 import { isPrimarySearchShortcut, shortcutModifier } from "@/lib/keyboardShortcut";
 import { isSupportedOcrFile } from "@/lib/ocr";
 import { reviewRequestInput, reviewRequestSubtitle } from "@/lib/smartInboxReviewRequests";
@@ -55,6 +60,7 @@ export function InboxView({
   const [activeTab, setActiveTab] = useState("all");
   const latestTasks = latestDashboardTasks(tasks, 20);
   const recentTasks = latestTasks.slice(0, 3);
+  const dashboardTaskCount = filterDashboardTasks(tasks).length;
 
   return (
     <div className="grid flex-1 gap-6 overflow-y-auto p-6 [scrollbar-gutter:stable] lg:grid-cols-[minmax(0,1fr)_360px]">
@@ -76,7 +82,7 @@ export function InboxView({
           onActiveTabChange={setActiveTab}
           todos={smartInboxTodos}
           tasks={latestTasks}
-          taskCount={tasks.length}
+          taskCount={dashboardTaskCount}
           projects={projects}
           files={recentDirectoryFiles}
           onEditTodo={onEditTodo}
@@ -108,7 +114,7 @@ export function InboxView({
         </Panel>
         <Panel title="Recent tasks" icon={ClipboardList}>
           <DashboardTaskList tasks={recentTasks} projects={projects} onOpenTask={onOpenTask} />
-          {tasks.length > 3 && (
+          {dashboardTaskCount > 3 && (
             <Button
               type="button"
               variant="outline"

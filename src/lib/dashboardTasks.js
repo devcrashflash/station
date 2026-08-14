@@ -1,9 +1,15 @@
+import { isTaskDone } from "./taskStatus.js";
+
 function createdAtValue(task) {
   if (Number.isFinite(task?.createdAt)) return task.createdAt;
   if (task?.createdAt == null || task.createdAt === "") return Number.NEGATIVE_INFINITY;
 
   const parsed = Date.parse(task?.createdAt);
   return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
+}
+
+export function filterDashboardTasks(tasks = []) {
+  return tasks.filter((task) => !isTaskDone(task));
 }
 
 export function sortDashboardTasks(tasks = []) {
@@ -16,7 +22,7 @@ export function sortDashboardTasks(tasks = []) {
 }
 
 export function latestDashboardTasks(tasks = [], limit = 20) {
-  return sortDashboardTasks(tasks).slice(0, Math.max(0, limit));
+  return sortDashboardTasks(filterDashboardTasks(tasks)).slice(0, Math.max(0, limit));
 }
 
 export function dashboardTaskProjectName(task, projects = []) {
