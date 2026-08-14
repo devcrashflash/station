@@ -4,7 +4,9 @@ import test from "node:test";
 import {
   aiSessionDoneWindowMs,
   aiSessionArchiveActionLabel,
+  aiSessionArchiveBadgeLabel,
   aiSessionCanArchive,
+  aiSessionCanRestore,
   aiSessionCommand,
   aiSessionPreferredOpenTarget,
   aiSessionProviderBadgeClass,
@@ -208,6 +210,12 @@ test("labels provider-synced and Station-only archive actions", () => {
     aiSessionArchiveActionLabel({ provider: "codex", archiveScope: "station" }, true),
     "Restore in Station",
   );
+  assert.equal(aiSessionCanRestore({ archiveScope: "provider" }), true);
+  assert.equal(aiSessionCanRestore({ archiveScope: "station" }), true);
+  assert.equal(aiSessionCanRestore({ archiveScope: "lifecycle" }), false);
+  assert.equal(aiSessionArchiveBadgeLabel({ archiveScope: "provider" }), "");
+  assert.equal(aiSessionArchiveBadgeLabel({ archiveScope: "station" }), "Station only");
+  assert.equal(aiSessionArchiveBadgeLabel({ archiveScope: "lifecycle" }), "Not running");
 });
 
 test("sorts archived sessions by archive time with stable provider and id ties", () => {
@@ -217,6 +225,21 @@ test("sorts archived sessions by archive time with stable provider and id ties",
     { provider: "claude", id: "a", archivedAt: 200 },
   ]);
   assert.deepEqual(sessions.map(({ id }) => id), ["a", "b", "older"]);
+});
+
+test("filters lifecycle archives using their last activity archive time", () => {
+  const now = Date.UTC(2026, 7, 12, 12);
+  const recentActivity = now - 23 * 3_600_000;
+  const olderActivity = now - 25 * 3_600_000;
+  const sessions = [
+    { id: "recent", archiveScope: "lifecycle", updatedAt: recentActivity, archivedAt: recentActivity },
+    { id: "older", archiveScope: "lifecycle", updatedAt: olderActivity, archivedAt: olderActivity },
+  ];
+
+  assert.deepEqual(
+    filterArchivedAiSessionsByWindow(sessions, 24, now).map(({ id }) => id),
+    ["recent"],
+  );
 });
 
 test("formats the last successful AI session refresh in local time", () => {

@@ -329,6 +329,16 @@ export function aiSessionArchiveActionLabel(session, archived = false) {
     : "Hide from Station";
 }
 
+export function aiSessionCanRestore(session) {
+  return session?.archiveScope !== "lifecycle";
+}
+
+export function aiSessionArchiveBadgeLabel(session) {
+  if (session?.archiveScope === "lifecycle") return "Not running";
+  if (session?.archiveScope !== "provider") return "Station only";
+  return "";
+}
+
 export function formatAiSessionLastRefreshed(value) {
   if (!value) return "";
   const date = new Date(value);

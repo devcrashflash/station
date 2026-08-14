@@ -39,7 +39,9 @@ import {
   AI_SESSION_SOURCE_OPTIONS,
   AI_SESSION_WINDOWS,
   aiSessionArchiveActionLabel,
+  aiSessionArchiveBadgeLabel,
   aiSessionCanArchive,
+  aiSessionCanRestore,
   aiSessionProviderBadgeClass,
   aiSessionProviderFilterEnabled,
   aiSessionProviderLabel,
@@ -191,7 +193,7 @@ export function AiAgentsView({
     const key = `${session.provider}:${session.id}`;
     setBusySessionKey(key);
     try {
-      if (session.archivedAt) {
+      if (session.archivedAt && aiSessionCanRestore(session)) {
         await api.restoreAiSession({ provider: session.provider, sessionId: session.id });
         await onRefresh({ quiet: true });
       }
@@ -420,6 +422,7 @@ function SessionRow({
   const state = aiSessionTreeState(session);
   const stateLabel = aiSessionStateTooltip(session, { now, tree: true });
   const providerSyncedArchive = session.archiveScope === "provider";
+  const archiveBadgeLabel = aiSessionArchiveBadgeLabel(session);
   const actionLabel = aiSessionArchiveActionLabel(session, archived);
   const preferredOpenTarget = aiSessionPreferredOpenTarget(session);
   const hasBothOpenTargets = session.openTargets?.includes("terminal")
@@ -437,9 +440,9 @@ function SessionRow({
             >
               {aiSessionSourceLabel(session)}
             </Badge>
-            {archived && !providerSyncedArchive && (
+            {archived && !providerSyncedArchive && archiveBadgeLabel && (
               <Badge variant="outline" className="shrink-0 text-muted-foreground">
-                Station only
+                {archiveBadgeLabel}
               </Badge>
             )}
             {waitingForInput && <WaitingForInputBadge />}
@@ -464,21 +467,23 @@ function SessionRow({
         )}
         <div className="flex shrink-0 items-center gap-2">
           {archived ? (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  type="button"
-                  size="icon-sm"
-                  variant="ghost"
-                  aria-label={actionLabel}
-                  disabled={busy}
-                  onClick={onRestore}
-                >
-                  {busy ? <LoaderCircle className="animate-spin" /> : <ArchiveRestore />}
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>{actionLabel}</TooltipContent>
-            </Tooltip>
+            aiSessionCanRestore(session) ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    size="icon-sm"
+                    variant="ghost"
+                    aria-label={actionLabel}
+                    disabled={busy}
+                    onClick={onRestore}
+                  >
+                    {busy ? <LoaderCircle className="animate-spin" /> : <ArchiveRestore />}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{actionLabel}</TooltipContent>
+              </Tooltip>
+            ) : null
           ) : aiSessionCanArchive(session) ? (
             <Tooltip>
               <TooltipTrigger asChild>

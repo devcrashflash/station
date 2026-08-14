@@ -634,7 +634,7 @@ fn claude_live_states_with(
     }
     let output = run(
         &executable,
-        &["agents", "--json"],
+        &["agents", "--all", "--json"],
         CLAUDE_AGENTS_COMMAND_TIMEOUT,
     )?;
     output
@@ -2251,6 +2251,45 @@ fn reconcile_archived_sessions(
     Ok((sessions, archived_sessions))
 }
 
+fn partition_claude_lifecycle_archives(
+    sessions: Vec<AiSession>,
+    live_states: Option<&HashMap<String, ClaudeLiveLifecycle>>,
+) -> (Vec<AiSession>, Vec<AiSession>) {
+    let Some(live_states) = live_states else {
+        return (sessions, Vec::new());
+    };
+    let mut active_sessions = Vec::new();
+    let mut archived_sessions = Vec::new();
+    for mut session in sessions {
+        if session.provider == "claude"
+            && session.origin == "cli"
+            && !live_states.contains_key(&session.id)
+        {
+            session.archived_at = Some(session.updated_at);
+            session.archive_scope = Some("lifecycle".to_string());
+            archived_sessions.push(session);
+        } else {
+            if session.archive_scope.as_deref() == Some("lifecycle") {
+                session.archived_at = None;
+                session.archive_scope = None;
+            }
+            active_sessions.push(session);
+        }
+    }
+    (active_sessions, archived_sessions)
+}
+
+fn sort_archived_sessions(sessions: &mut [AiSession]) {
+    sessions.sort_by(|left, right| {
+        right
+            .archived_at
+            .unwrap_or(0)
+            .cmp(&left.archived_at.unwrap_or(0))
+            .then_with(|| left.provider.cmp(&right.provider))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
 fn scan_ai_sessions(
     state: &AppState,
     since: i64,
@@ -2287,7 +2326,11 @@ fn scan_ai_sessions(
     reconcile_claude_live_states(&mut sessions, live_states.as_ref());
     let sessions = group_and_filter(sessions, since, &settings);
     let db = state.db.lock().map_err(db_error)?;
-    let (sessions, archived_sessions) = reconcile_archived_sessions(&db, sessions)?;
+    let (sessions, mut archived_sessions) = reconcile_archived_sessions(&db, sessions)?;
+    let (sessions, mut lifecycle_archives) =
+        partition_claude_lifecycle_archives(sessions, live_states.as_ref());
+    archived_sessions.append(&mut lifecycle_archives);
+    sort_archived_sessions(&mut archived_sessions);
     Ok(AiSessionList {
         sessions,
         archived_sessions,
@@ -2796,13 +2839,13 @@ mod tests {
             calls.push(arguments.join(" "));
             match arguments {
                 ["--version"] => Some(output(true, "2.1.226 (Claude Code)")),
-                ["agents", "--json"] => Some(output(true, "[]")),
+                ["agents", "--all", "--json"] => Some(output(true, "[]")),
                 _ => None,
             }
         })
         .unwrap();
         assert!(states.is_empty());
-        assert_eq!(calls, ["--version", "agents --json"]);
+        assert_eq!(calls, ["--version", "agents --all --json"]);
 
         let mut calls = Vec::new();
         let states = claude_live_states_with(&mut cache, executable.clone(), |_, arguments, _| {
@@ -2811,7 +2854,7 @@ mod tests {
         })
         .unwrap();
         assert!(states.is_empty());
-        assert_eq!(calls, ["agents --json"]);
+        assert_eq!(calls, ["agents --all --json"]);
 
         for (version, agents) in [
             (Some(output(true, "2.1.174")), Some(output(true, "[]"))),
@@ -2826,7 +2869,7 @@ mod tests {
                 claude_live_states_with(&mut cache, executable.clone(), |_, arguments, _| {
                     match arguments {
                         ["--version"] => version.clone(),
-                        ["agents", "--json"] => agents.clone(),
+                        ["agents", "--all", "--json"] => agents.clone(),
                         _ => None,
                     }
                 });
@@ -2916,6 +2959,91 @@ mod tests {
 
         assert!(session.running);
         assert!(session.waiting_for_input);
+    }
+
+    #[test]
+    fn partitions_only_absent_claude_cli_sessions_into_lifecycle_archives() {
+        let mut present = session("present", 500, None);
+        present.provider = "claude".to_string();
+        present.origin = "cli".to_string();
+        present.completed_at = Some(450);
+        let mut absent = session("absent", 400, None);
+        absent.provider = "claude".to_string();
+        absent.origin = "cli".to_string();
+        absent.children.push(session("child", 390, Some("absent")));
+        let mut desktop = session("desktop", 300, None);
+        desktop.provider = "claude".to_string();
+        desktop.origin = "desktop".to_string();
+        let mut unknown = session("unknown", 200, None);
+        unknown.provider = "claude".to_string();
+        let codex = session("codex", 100, None);
+        let states = HashMap::from([("present".to_string(), ClaudeLiveLifecycle::Inactive)]);
+
+        let (active, archived) = partition_claude_lifecycle_archives(
+            vec![present, absent, desktop, unknown, codex],
+            Some(&states),
+        );
+
+        assert_eq!(
+            active
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>(),
+            ["present", "desktop", "unknown", "codex"]
+        );
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].id, "absent");
+        assert_eq!(archived[0].archived_at, Some(400));
+        assert_eq!(archived[0].archive_scope.as_deref(), Some("lifecycle"));
+        assert_eq!(archived[0].children[0].id, "child");
+
+        let (active_again, archived_again) = partition_claude_lifecycle_archives(
+            archived,
+            Some(&HashMap::from([(
+                "absent".to_string(),
+                ClaudeLiveLifecycle::Working,
+            )])),
+        );
+        assert_eq!(active_again.len(), 1);
+        assert!(archived_again.is_empty());
+        assert_eq!(active_again[0].archived_at, None);
+        assert_eq!(active_again[0].archive_scope, None);
+    }
+
+    #[test]
+    fn unavailable_roster_does_not_create_lifecycle_archives() {
+        let mut claude = session("fallback", 100, None);
+        claude.provider = "claude".to_string();
+        claude.origin = "cli".to_string();
+
+        let (active, archived) = partition_claude_lifecycle_archives(vec![claude], None);
+
+        assert_eq!(active.len(), 1);
+        assert!(archived.is_empty());
+    }
+
+    #[test]
+    fn sorts_manual_and_lifecycle_archives_deterministically() {
+        let mut older = session("older", 50, None);
+        older.archived_at = Some(100);
+        older.archive_scope = Some("station".to_string());
+        let mut claude_b = session("b", 200, None);
+        claude_b.provider = "claude".to_string();
+        claude_b.archived_at = Some(200);
+        claude_b.archive_scope = Some("lifecycle".to_string());
+        let mut claude_a = claude_b.clone();
+        claude_a.id = "a".to_string();
+        let mut sessions = vec![older, claude_b, claude_a];
+
+        sort_archived_sessions(&mut sessions);
+
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b", "older"]
+        );
     }
 
     #[test]
