@@ -2,12 +2,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  activityActionFilterKey,
+  activityActionFilters,
   activityActionLabel,
   activityEventKindLabel,
   activityOpenUrl,
   addDays,
   formatActivityLastSyncText,
   formatLocalDate,
+  filterActivitiesByActionBadges,
   isTrelloAutomationActivity,
   isTrelloDelimiterActivity,
   isTrelloListMoveActivity,
@@ -102,6 +105,39 @@ test("auto-syncs incomplete past days and stale today only", () => {
 test("normalizes cached GitHub review submissions independently from review comments", () => {
   assert.equal(activityActionLabel({ eventType: "PullRequestReviewEvent", actionLabel: "Created" }), "Reviewed");
   assert.equal(activityActionLabel({ eventType: "PullRequestReviewCommentEvent", actionLabel: "Created" }), "Commented");
+});
+
+test("derives unique alphabetical activity filters and groups detailed move labels", () => {
+  const activities = [
+    { actionLabel: "Moved: Done" },
+    { actionLabel: "Commented" },
+    { actionLabel: "Assigned" },
+    { actionLabel: "Moved: In Progress" },
+  ];
+
+  assert.equal(activityActionFilterKey(activities[0]), "Moved");
+  assert.equal(activityActionLabel(activities[0]), "Moved: Done");
+  assert.deepEqual(activityActionFilters(activities), ["Assigned", "Commented", "Moved"]);
+});
+
+test("filters actions across providers after connection selection without changing labels", () => {
+  const activities = [
+    { id: "trello-move", provider: "trello", connectionId: "trello", actionLabel: "Moved: Done" },
+    { id: "trello-comment", provider: "trello", connectionId: "trello", actionLabel: "Commented" },
+    { id: "gitlab-comment", provider: "gitlab", connectionId: "gitlab", actionLabel: "Commented" },
+    { id: "github-merge", provider: "github", connectionId: "github", actionLabel: "Merged" },
+  ];
+  const enabledConnectionActivities = activities.filter((activity) => activity.connectionId !== "github");
+
+  assert.deepEqual(activityActionFilters(enabledConnectionActivities), ["Commented", "Moved"]);
+  assert.deepEqual(
+    filterActivitiesByActionBadges(enabledConnectionActivities, new Set(["Commented"]))
+      .map((activity) => activity.id),
+    ["trello-move"],
+  );
+  assert.equal(enabledConnectionActivities[0].actionLabel, "Moved: Done");
+  assert.notEqual(filterActivitiesByActionBadges(activities), activities);
+  assert.deepEqual(filterActivitiesByActionBadges(activities), activities);
 });
 
 test("sorts activities oldest first", () => {

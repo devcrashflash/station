@@ -1,4 +1,4 @@
-import { activityActionLabel, isTrelloListMoveActivity } from "./activity.js";
+import { activityActionLabel } from "./activity.js";
 import { calendarEventOpenUrl, calendarEventTimeLabel } from "./calendar.js";
 
 const TRELLO_CARD_URL_PATTERN = /https?:\/\/(?:www\.)?trello\.com\/c\/([A-Za-z0-9_-]+)(?:\/[^\s)\]>"']*)?/gi;
@@ -51,51 +51,6 @@ export function trelloTicketReferencesForActivity(activity) {
 
 export function trelloTicketExternalIdForActivity(activity) {
   return ticketFromTrelloActivity(activity)?.externalId || null;
-}
-
-export function filterMoveOnlyTrelloTicketActivities(activities = [], hideMoveOnlyTickets = false) {
-  return filterOnlyTrelloTicketActivities(activities, hideMoveOnlyTickets, isTrelloListMoveActivity);
-}
-
-export function filterChangedOnlyTrelloTicketActivities(activities = [], hideChangedOnlyTickets = false) {
-  return filterOnlyTrelloTicketActivities(
-    activities,
-    hideChangedOnlyTickets,
-    (activity) => activityActionLabel(activity) === "Changed",
-  );
-}
-
-function filterOnlyTrelloTicketActivities(activities, enabled, matchesOnlyActivity) {
-  if (!enabled) return [...activities];
-
-  const trelloActivitiesByTicket = new Map();
-  const relatedTicketIds = new Set();
-
-  for (const activity of activities) {
-    if (activity.provider === "trello") {
-      const ticketId = trelloTicketExternalIdForActivity(activity);
-      if (!ticketId) continue;
-      if (!trelloActivitiesByTicket.has(ticketId)) trelloActivitiesByTicket.set(ticketId, []);
-      trelloActivitiesByTicket.get(ticketId).push(activity);
-      continue;
-    }
-
-    for (const reference of trelloTicketReferencesForActivity(activity)) {
-      relatedTicketIds.add(reference.externalId);
-    }
-  }
-
-  const hiddenTicketIds = new Set();
-  for (const [ticketId, ticketActivities] of trelloActivitiesByTicket) {
-    if (!relatedTicketIds.has(ticketId) && ticketActivities.every(matchesOnlyActivity)) {
-      hiddenTicketIds.add(ticketId);
-    }
-  }
-
-  return activities.filter((activity) => (
-    activity.provider !== "trello"
-    || !hiddenTicketIds.has(trelloTicketExternalIdForActivity(activity))
-  ));
 }
 
 export function buildDaySummaryModel({

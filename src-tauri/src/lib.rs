@@ -8283,17 +8283,35 @@ fn fetch_github_activities(
     let user = fetch_json("https://api.github.com/user", headers.clone())?;
     let login = json_string(&user, "login")
         .ok_or_else(|| "GitHub account login was not returned.".to_string())?;
-    let events = fetch_json(
-        &format!(
-            "https://api.github.com/users/{}/events?per_page=100",
-            percent_encode(&login)
-        ),
-        headers.clone(),
-    )?;
+    let mut events = Vec::new();
+    for page in 1..=3 {
+        let page_json = fetch_json(
+            &format!(
+                "https://api.github.com/users/{}/events?per_page=100&page={page}",
+                percent_encode(&login)
+            ),
+            headers.clone(),
+        )?;
+        let page_events = page_json
+            .as_array()
+            .ok_or_else(|| "GitHub activity response was not a list.".to_string())?;
+        let page_is_complete = page_events.len() < 100;
+        let reached_requested_day = page_events
+            .last()
+            .and_then(|event| {
+                json_string(event, "created_at")
+                    .and_then(|created_at| parse_rfc3339_millis(&created_at))
+            })
+            .is_some_and(|occurred_at| occurred_at < start_at);
+        events.extend(page_events.iter().cloned());
+        if page_is_complete || reached_requested_day {
+            break;
+        }
+    }
 
     let mut pull_requests = HashMap::<String, Option<Value>>::new();
     let mut activities = Vec::new();
-    for event in events.as_array().into_iter().flatten() {
+    for event in &events {
         let Some(mut activity) = github_activity_from_json(connection, event, start_at, end_at)
         else {
             continue;

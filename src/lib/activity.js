@@ -251,6 +251,21 @@ export function activityActionLabel(activity) {
   return label;
 }
 
+export function activityActionFilterKey(activity) {
+  const label = activityActionLabel(activity);
+  return label.toLocaleLowerCase().startsWith("moved:") ? "Moved" : label;
+}
+
+export function activityActionFilters(activities = []) {
+  return [...new Set(activities.map(activityActionFilterKey))]
+    .sort((left, right) => left.localeCompare(right));
+}
+
+export function filterActivitiesByActionBadges(activities = [], disabledActionKeys = new Set()) {
+  if (!disabledActionKeys?.size) return [...activities];
+  return activities.filter((activity) => !disabledActionKeys.has(activityActionFilterKey(activity)));
+}
+
 export function activityEventKindLabel(activity) {
   const type = activity?.eventType || "";
   const normalized = type.toLowerCase();

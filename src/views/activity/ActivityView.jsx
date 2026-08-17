@@ -28,6 +28,7 @@ import { DaySummaryPreview } from "@/features/activity/DaySummaryPreview";
 import { api } from "@/lib/api";
 import {
   activityActionClassName,
+  activityActionFilters,
   activityActionLabel,
   activityEventKindLabel,
   activityOpenUrl,
@@ -35,6 +36,7 @@ import {
   addDays,
   formatActivityLastSyncText,
   formatLocalDate,
+  filterActivitiesByActionBadges,
   isTrelloAutomationActivity,
   isTrelloDelimiterActivity,
   isTrelloPositionOnlyActivity,
@@ -49,8 +51,6 @@ import {
   buildDaySummaryModel,
   daySummaryModelToMarkdown,
   filterDaySummaryModelBySearch,
-  filterChangedOnlyTrelloTicketActivities,
-  filterMoveOnlyTrelloTicketActivities,
   trelloTicketUrlsForActivities,
 } from "@/lib/activitySummary";
 import { filterTimelineItemsBySearch } from "@/lib/activitySearch";
@@ -86,8 +86,7 @@ export function ActivityView({
     [activities, syncRuns, calendarEvents, calendarSyncRuns],
   );
   const [disabledConnectionKeys, setDisabledConnectionKeys] = useState(() => new Set());
-  const [hideMoveOnlyTickets, setHideMoveOnlyTickets] = useState(false);
-  const [hideChangedOnlyTickets, setHideChangedOnlyTickets] = useState(false);
+  const [disabledActionKeys, setDisabledActionKeys] = useState(() => new Set());
   const [copyState, setCopyState] = useState("idle");
   const [summaryCopyState, setSummaryCopyState] = useState("idle");
   const [activeTimelineTab, setActiveTimelineTab] = useState("details");
@@ -110,17 +109,20 @@ export function ActivityView({
     )),
     [activities],
   );
-  const sortedActivities = sortActivities(manualActivities);
-  const connectionFilteredActivities = sortedActivities.filter(
-    (activity) => !disabledConnectionKeys.has(activityConnectionKey(activity)),
+  const sortedActivities = useMemo(() => sortActivities(manualActivities), [manualActivities]);
+  const connectionFilteredActivities = useMemo(
+    () => sortedActivities.filter(
+      (activity) => !disabledConnectionKeys.has(activityConnectionKey(activity)),
+    ),
+    [disabledConnectionKeys, sortedActivities],
   );
-  const moveFilteredActivities = filterMoveOnlyTrelloTicketActivities(
-    connectionFilteredActivities,
-    hideMoveOnlyTickets,
+  const actionFilters = useMemo(
+    () => activityActionFilters(connectionFilteredActivities),
+    [connectionFilteredActivities],
   );
-  const filteredActivities = filterChangedOnlyTrelloTicketActivities(
-    moveFilteredActivities,
-    hideChangedOnlyTickets,
+  const filteredActivities = useMemo(
+    () => filterActivitiesByActionBadges(connectionFilteredActivities, disabledActionKeys),
+    [connectionFilteredActivities, disabledActionKeys],
   );
   const filteredCalendarEvents = calendarEvents.filter(
     (event) => !disabledConnectionKeys.has(calendarConnectionKey(event)),
@@ -168,6 +170,7 @@ export function ActivityView({
 
   useEffect(() => {
     setSearchQuery("");
+    setDisabledActionKeys(new Set());
   }, [date]);
 
   useEffect(() => {
@@ -250,8 +253,28 @@ export function ActivityView({
     });
   }, [connectionFilters]);
 
+  useEffect(() => {
+    const knownKeys = new Set(actionFilters);
+    setDisabledActionKeys((current) => {
+      const next = new Set([...current].filter((key) => knownKeys.has(key)));
+      return next.size === current.size ? current : next;
+    });
+  }, [actionFilters]);
+
   const toggleConnection = useCallback((key, enabled) => {
     setDisabledConnectionKeys((current) => {
+      const next = new Set(current);
+      if (enabled) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleAction = useCallback((key, enabled) => {
+    setDisabledActionKeys((current) => {
       const next = new Set(current);
       if (enabled) {
         next.delete(key);
@@ -478,17 +501,15 @@ export function ActivityView({
       <aside className="min-w-0">
         <Panel title="Filters" icon={ListFilter}>
           <ActivityFilters
+            actions={actionFilters}
             connections={connectionFilters}
+            disabledActionKeys={disabledActionKeys}
             disabledConnectionKeys={disabledConnectionKeys}
-            hideChangedOnlyTickets={hideChangedOnlyTickets}
-            hideMoveOnlyTickets={hideMoveOnlyTickets}
-            onHideChangedOnlyTicketsChange={setHideChangedOnlyTickets}
-            onHideMoveOnlyTicketsChange={setHideMoveOnlyTickets}
             onReset={() => {
               setDisabledConnectionKeys(new Set());
-              setHideChangedOnlyTickets(false);
-              setHideMoveOnlyTickets(false);
+              setDisabledActionKeys(new Set());
             }}
+            onToggleAction={toggleAction}
             onToggle={toggleConnection}
           />
         </Panel>
@@ -680,17 +701,15 @@ function SyncSummary({ syncRuns, isSyncing }) {
 }
 
 function ActivityFilters({
+  actions,
   connections,
+  disabledActionKeys,
   disabledConnectionKeys,
-  hideChangedOnlyTickets,
-  hideMoveOnlyTickets,
-  onHideChangedOnlyTicketsChange,
-  onHideMoveOnlyTicketsChange,
   onReset,
+  onToggleAction,
   onToggle,
 }) {
-  const disabledCount = disabledConnectionKeys.size;
-  const hasActiveFilters = disabledCount > 0 || hideMoveOnlyTickets || hideChangedOnlyTickets;
+  const hasActiveFilters = disabledConnectionKeys.size > 0 || disabledActionKeys.size > 0;
 
   return (
     <div className="grid gap-4">
@@ -735,20 +754,20 @@ function ActivityFilters({
 
       <div className="grid gap-2 border-t pt-4">
         <p className="text-sm font-medium">Activity</p>
-        <CheckboxFilterCard
-          label="Hide move-only tickets"
-          description="Keep tickets with other activity or a related pull request."
-          checked={hideMoveOnlyTickets}
-          ariaLabel="Hide move-only tickets"
-          onCheckedChange={(checked) => onHideMoveOnlyTicketsChange(checked === true)}
-        />
-        <CheckboxFilterCard
-          label="Hide changed-only tickets"
-          description="Keep tickets with other activity or a related pull request."
-          checked={hideChangedOnlyTickets}
-          ariaLabel="Hide changed-only tickets"
-          onCheckedChange={(checked) => onHideChangedOnlyTicketsChange(checked === true)}
-        />
+        {actions.length > 0 ? actions.map((action) => {
+          const enabled = !disabledActionKeys.has(action);
+          return (
+            <CheckboxFilterCard
+              key={action}
+              label={action}
+              checked={enabled}
+              ariaLabel={`${enabled ? "Disable" : "Enable"} ${action} activity`}
+              onCheckedChange={(checked) => onToggleAction(action, checked === true)}
+            />
+          );
+        }) : (
+          <EmptyState text="No activity badges for enabled connections." />
+        )}
       </div>
     </div>
   );

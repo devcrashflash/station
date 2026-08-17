@@ -4,14 +4,14 @@ import assert from "node:assert/strict";
 import { api } from "./api.js";
 import {
   buildDaySummaryMarkdown,
+  buildDaySummaryModel,
   daySummaryModelToMarkdown,
   extractTrelloCardUrls,
   filterDaySummaryModelBySearch,
-  filterChangedOnlyTrelloTicketActivities,
-  filterMoveOnlyTrelloTicketActivities,
   trelloTicketReferencesForActivity,
   trelloTicketUrlsForActivities,
 } from "./activitySummary.js";
+import { filterActivitiesByActionBadges } from "./activity.js";
 
 const searchableSummary = {
   sections: [
@@ -264,97 +264,34 @@ test("builds a linked ticket from its historical Trello activity snapshot", () =
   assert.doesNotMatch(markdown, /## Unknown/);
 });
 
-test("hides only move-only Trello tickets without visible code relationships", () => {
-  const trello = (id, actionLabel, rawJson = null) => ({
-    id: `${id}:${actionLabel}`,
-    provider: "trello",
-    actionLabel,
-    targetUrl: `https://trello.com/c/${id}`,
-    rawJson: rawJson || JSON.stringify({ data: { card: { shortLink: id, name: id } } }),
-  });
+test("filtered summary retains grouped parents until their last enabled action is removed", () => {
+  const ticketId = "mixed-card";
+  const ticketRawJson = JSON.stringify({ data: { card: { shortLink: ticketId, name: "Mixed card" } } });
+  const mergeRequest = {
+    id: 42,
+    title: "Ship mixed card",
+    description: `Tracks https://trello.com/c/${ticketId}`,
+    web_url: "https://gitlab.example.com/acme/app/-/merge_requests/42",
+  };
   const activities = [
-    trello("hidden", "Moved: Done"),
-    trello("commented", "Moved: Done"),
-    trello("commented", "Commented"),
-    trello("gitlab-linked", "Moved: Done"),
-    trello("github-linked", "Moved: Done"),
-    { id: "unknown-card", provider: "trello", actionLabel: "Moved: Done", rawJson: "{bad json" },
-    {
-      id: "gitlab-related",
-      provider: "gitlab",
-      subjectJson: JSON.stringify({ description: "https://trello.com/c/gitlab-linked" }),
-    },
-    {
-      id: "github-related",
-      provider: "github",
-      eventType: "PullRequestEvent",
-      subjectJson: JSON.stringify({ body: "https://trello.com/c/github-linked" }),
-    },
-    { id: "unrelated", provider: "github", subjectJson: JSON.stringify({ body: "No ticket" }) },
+    { id: "moved", provider: "trello", actionLabel: "Moved: Done", rawJson: ticketRawJson },
+    { id: "ticket-comment", provider: "trello", actionLabel: "Commented", rawJson: ticketRawJson },
+    { id: "mr-comment", provider: "gitlab", actionLabel: "Commented", subjectJson: JSON.stringify(mergeRequest) },
+    { id: "mr-merge", provider: "gitlab", actionLabel: "Merged", subjectJson: JSON.stringify(mergeRequest) },
   ];
 
-  assert.deepEqual(
-    filterMoveOnlyTrelloTicketActivities(activities, true).map((activity) => activity.id),
-    activities.filter((activity) => activity.id !== "hidden:Moved: Done").map((activity) => activity.id),
-  );
-  const withoutRelatedConnections = activities.filter((activity) => (
-    activity.provider !== "github" && activity.provider !== "gitlab"
-  ));
-  assert.deepEqual(
-    filterMoveOnlyTrelloTicketActivities(withoutRelatedConnections, true).map((activity) => activity.id),
-    ["commented:Moved: Done", "commented:Commented", "unknown-card"],
-  );
-  assert.deepEqual(filterMoveOnlyTrelloTicketActivities(activities, false), activities);
-});
-
-test("hides only changed-only Trello tickets without visible code relationships", () => {
-  const trello = (id, actionLabel, rawJson = null) => ({
-    id: `${id}:${actionLabel}`,
-    provider: "trello",
-    actionLabel,
-    targetUrl: `https://trello.com/c/${id}`,
-    rawJson: rawJson || JSON.stringify({ data: { card: { shortLink: id, name: id } } }),
+  const partiallyFiltered = buildDaySummaryModel({
+    activities: filterActivitiesByActionBadges(activities, new Set(["Moved", "Commented"])),
   });
-  const activities = [
-    trello("hidden", "Changed"),
-    trello("normalized", "Updated"),
-    trello("move-only", "Moved: Done"),
-    trello("commented", "Changed"),
-    trello("commented", "Commented"),
-    trello("mixed", "Changed"),
-    trello("mixed", "Moved: Done"),
-    trello("gitlab-linked", "Changed"),
-    trello("github-linked", "Changed"),
-    { id: "unknown-card", provider: "trello", actionLabel: "Changed", rawJson: "{bad json" },
-    {
-      id: "gitlab-related",
-      provider: "gitlab",
-      subjectJson: JSON.stringify({ description: "https://trello.com/c/gitlab-linked" }),
-    },
-    {
-      id: "github-related",
-      provider: "github",
-      eventType: "PullRequestEvent",
-      subjectJson: JSON.stringify({ body: "https://trello.com/c/github-linked" }),
-    },
-  ];
+  assert.equal(partiallyFiltered.sections.length, 1);
+  assert.equal(partiallyFiltered.sections[0].tickets.length, 1);
+  assert.deepEqual(partiallyFiltered.sections[0].tickets[0].ticketActions, []);
+  assert.deepEqual(partiallyFiltered.sections[0].tickets[0].providers[0].items[0].actions, ["merged"]);
 
-  assert.deepEqual(
-    filterChangedOnlyTrelloTicketActivities(activities, true).map((activity) => activity.id),
-    activities
-      .filter((activity) => !["hidden:Changed", "normalized:Updated"].includes(activity.id))
-      .map((activity) => activity.id),
-  );
-  assert.deepEqual(
-    filterChangedOnlyTrelloTicketActivities(
-      filterMoveOnlyTrelloTicketActivities(activities, true),
-      true,
-    ).map((activity) => activity.id),
-    activities
-      .filter((activity) => !["hidden:Changed", "normalized:Updated", "move-only:Moved: Done"].includes(activity.id))
-      .map((activity) => activity.id),
-  );
-  assert.deepEqual(filterChangedOnlyTrelloTicketActivities(activities, false), activities);
+  const fullyFiltered = buildDaySummaryModel({
+    activities: filterActivitiesByActionBadges(activities, new Set(["Moved", "Commented", "Merged"])),
+  });
+  assert.deepEqual(fullyFiltered.sections, []);
 });
 
 test("groups GitHub pull requests beneath referenced Trello tickets", () => {
