@@ -19,6 +19,7 @@ test("matches shortcuts with exact platform modifiers", () => {
   assert.equal(matchesTerminalShortcut(event({ ctrlKey: true }), "CommandOrControl+KeyD", "Win32"), true);
   assert.equal(matchesTerminalShortcut(event({ metaKey: true, shiftKey: true }), "CommandOrControl+KeyD", "MacIntel"), false);
   assert.equal(matchesTerminalShortcut(event({ metaKey: true, code: "KeyF" }), "CommandOrControl+KeyD", "MacIntel"), false);
+  assert.equal(matchesTerminalShortcut(event({ metaKey: true, repeat: true }), "CommandOrControl+KeyD", "MacIntel"), false);
 });
 
 test("compares equivalent shortcuts after resolving the platform primary modifier", () => {
@@ -81,6 +82,8 @@ test("requires exact default zoom modifiers", () => {
   assert.equal(terminalZoomDelta(event({ code: "BracketRight", key: "+", metaKey: true, altKey: true }), DEFAULT_TERMINAL_SHORTCUTS, "MacIntel"), null);
   assert.equal(terminalZoomDelta(event({ code: "Slash", key: "-", ctrlKey: true, altKey: true }), DEFAULT_TERMINAL_SHORTCUTS, "Win32"), null);
   assert.equal(terminalZoomDelta(event({ code: "Slash", key: "-", ctrlKey: true, shiftKey: true }), DEFAULT_TERMINAL_SHORTCUTS, "Linux x86_64"), null);
+  assert.equal(terminalZoomDelta(event({ code: "BracketRight", key: "+", metaKey: true, repeat: true }), DEFAULT_TERMINAL_SHORTCUTS, "MacIntel"), null);
+  assert.equal(terminalZoomDelta(event({ code: "Slash", key: "-", ctrlKey: true, repeat: true }), DEFAULT_TERMINAL_SHORTCUTS, "Linux x86_64"), null);
 });
 
 test("uses layout-independent aliases only for unchanged default zoom bindings", () => {

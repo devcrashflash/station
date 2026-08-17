@@ -25,6 +25,8 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Modifiers, Shortcut, Short
 #[cfg(target_os = "macos")]
 use objc2_app_kit::NSScreen;
 #[cfg(target_os = "macos")]
+use objc2_foundation::{ns_string, NSUserDefaults};
+#[cfg(target_os = "macos")]
 use tauri_nspanel::{tauri_panel, ManagerExt as PanelManagerExt, StyleMask, WebviewWindowExt};
 
 mod ai_sessions;
@@ -1492,6 +1494,12 @@ fn prepare_app_database(app_dir: &Path) -> std::io::Result<PathBuf> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "macos")]
+    // AppKit reads this when text input clients are created, so configure it
+    // before Tauri creates any windows or webviews.
+    NSUserDefaults::standardUserDefaults()
+        .setBool_forKey(false, ns_string!("ApplePressAndHoldEnabled"));
+
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_nspanel::init());

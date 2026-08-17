@@ -144,6 +144,7 @@ export function terminalShortcutConflict(shortcuts, platform) {
 }
 
 export function terminalZoomDelta(event, shortcuts, platform) {
+  if (event.repeat) return null;
   const normalized = normalizeTerminalShortcuts(shortcuts);
   if (matchesTerminalShortcut(event, normalized.zoomIn, platform)) return 1;
   if (matchesTerminalShortcut(event, normalized.zoomOut, platform)) return -1;
