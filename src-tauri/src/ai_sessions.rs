@@ -24,6 +24,7 @@ pub const AI_SESSION_MONITOR_UPDATED_EVENT: &str = "ai-session-monitor-updated";
 const AI_SESSION_MONITOR_WINDOW_HOURS: i64 = 24 * 30;
 const CLAUDE_AGENTS_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 const MINIMUM_CLAUDE_AGENTS_VERSION: (u64, u64, u64) = (2, 1, 175);
+const CODEX_ARCHIVE_ACTIVE_WRITER_WARNING: &str = "Codex Desktop is still using this session, so it was hidden in Station only. It remains in Codex and will reappear in Station if it changes.";
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -101,6 +102,13 @@ pub struct AiSessionMonitorStatus {
     last_refreshed_at: i64,
     waiting_session_count: u32,
     waiting_terminal_tab_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiSessionArchiveResult {
+    archive_scope: String,
+    warning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2038,6 +2046,15 @@ fn session_tree_active(session: &AiSession) -> bool {
     session.waiting_for_input || session.running || session.children.iter().any(session_tree_active)
 }
 
+fn session_tree_updated_at(session: &AiSession) -> i64 {
+    session
+        .children
+        .iter()
+        .fold(session.updated_at, |updated_at, child| {
+            updated_at.max(session_tree_updated_at(child))
+        })
+}
+
 fn validate_archivable_session(session: &AiSession) -> Result<(), String> {
     if !matches!(session.provider.as_str(), "codex" | "claude") {
         return Err("Unsupported AI session provider.".to_string());
@@ -2165,20 +2182,36 @@ fn run_codex_archive_action(action: &str, session_id: &str) -> Result<(), String
     Err(format!("Codex could not {action} this session{suffix}"))
 }
 
+fn codex_archive_blocked_by_active_writer(error: &str) -> bool {
+    error
+        .to_ascii_lowercase()
+        .contains("already has an active writer")
+}
+
 fn archive_session_with_sync(
     db: &Connection,
     session: &AiSession,
     archived_at: i64,
     mut sync_codex: impl FnMut(&str, &str) -> Result<(), String>,
-) -> Result<AiSession, String> {
+) -> Result<AiSessionArchiveResult, String> {
     validate_archivable_session(session)?;
-    let scope = if session.provider == "codex" {
-        sync_codex("archive", &session.id)?;
-        "provider"
+    let (archive_scope, warning) = if session.provider == "codex" {
+        match sync_codex("archive", &session.id) {
+            Ok(()) => ("provider", None),
+            Err(error) if codex_archive_blocked_by_active_writer(&error) => (
+                "station",
+                Some(CODEX_ARCHIVE_ACTIVE_WRITER_WARNING.to_string()),
+            ),
+            Err(error) => return Err(error),
+        }
     } else {
-        "station"
+        ("station", None)
     };
-    archive_session_in_db(db, session, archived_at, scope)
+    archive_session_in_db(db, session, archived_at, archive_scope)?;
+    Ok(AiSessionArchiveResult {
+        archive_scope: archive_scope.to_string(),
+        warning,
+    })
 }
 
 fn restore_session_with_sync(
@@ -2231,13 +2264,25 @@ fn reconcile_archived_sessions(
     db: &Connection,
     mut sessions: Vec<AiSession>,
 ) -> Result<(Vec<AiSession>, Vec<AiSession>), String> {
-    for session in sessions
+    let stored_archives = load_archived_sessions(db)?;
+    let stored_by_key = stored_archives
         .iter()
-        .filter(|session| session_tree_active(session))
-    {
+        .map(|session| ((session.provider.as_str(), session.id.as_str()), session))
+        .collect::<HashMap<_, _>>();
+    let restored_keys = sessions
+        .iter()
+        .filter_map(|session| {
+            let archived = stored_by_key.get(&(session.provider.as_str(), session.id.as_str()))?;
+            let changed_station_archive = archived.archive_scope.as_deref() == Some("station")
+                && session_tree_updated_at(session) > session_tree_updated_at(archived);
+            (session_tree_active(session) || changed_station_archive)
+                .then(|| (session.provider.clone(), session.id.clone()))
+        })
+        .collect::<Vec<_>>();
+    for (provider, session_id) in restored_keys {
         db.execute(
             "DELETE FROM ai_session_archives WHERE provider = ?1 AND session_id = ?2",
-            params![session.provider, session.id],
+            params![provider, session_id],
         )
         .map_err(db_error)?;
     }
@@ -2617,7 +2662,7 @@ pub async fn archive_ai_session(
     monitor: tauri::State<'_, AiSessionMonitorHandle>,
     provider: String,
     session_id: String,
-) -> Result<(), String> {
+) -> Result<AiSessionArchiveResult, String> {
     if !matches!(provider.as_str(), "codex" | "claude") {
         return Err("Unsupported AI session provider.".to_string());
     }
@@ -2630,8 +2675,7 @@ pub async fn archive_ai_session(
         .map_err(db_error)??;
     let session = authoritative_archivable_session(&snapshot, &provider, &session_id)?;
     let db = state.db.lock().map_err(db_error)?;
-    archive_session_with_sync(&db, &session, now_millis(), run_codex_archive_action)?;
-    Ok(())
+    archive_session_with_sync(&db, &session, now_millis(), run_codex_archive_action)
 }
 
 #[tauri::command]
@@ -3404,12 +3448,19 @@ mod tests {
         let archived = session("provider-archive", 10, None);
         let mut calls = Vec::new();
 
-        let snapshot = archive_session_with_sync(&db, &archived, 100, |action, session_id| {
+        let result = archive_session_with_sync(&db, &archived, 100, |action, session_id| {
             calls.push((action.to_string(), session_id.to_string()));
             Ok(())
         })
         .unwrap();
-        assert_eq!(snapshot.archive_scope.as_deref(), Some("provider"));
+        assert_eq!(result.archive_scope, "provider");
+        assert_eq!(result.warning, None);
+        assert_eq!(
+            load_archived_sessions(&db).unwrap()[0]
+                .archive_scope
+                .as_deref(),
+            Some("provider")
+        );
         assert_eq!(
             calls,
             vec![("archive".to_string(), "provider-archive".to_string())]
@@ -3452,6 +3503,30 @@ mod tests {
     }
 
     #[test]
+    fn active_writer_conflicts_fall_back_to_station_only_archives() {
+        let db = Connection::open_in_memory().unwrap();
+        init_database(&db).unwrap();
+        let archived = session("active-writer", 10, None);
+
+        let result = archive_session_with_sync(&db, &archived, 100, |_, _| {
+            Err("thread active-writer already has an active writer".to_string())
+        })
+        .unwrap();
+
+        assert_eq!(result.archive_scope, "station");
+        assert_eq!(
+            result.warning.as_deref(),
+            Some(CODEX_ARCHIVE_ACTIVE_WRITER_WARNING)
+        );
+        assert_eq!(
+            load_archived_sessions(&db).unwrap()[0]
+                .archive_scope
+                .as_deref(),
+            Some("station")
+        );
+    }
+
+    #[test]
     fn historical_and_claude_archives_remain_station_only() {
         let db = Connection::open_in_memory().unwrap();
         init_database(&db).unwrap();
@@ -3479,11 +3554,12 @@ mod tests {
 
         let mut claude = session("claude-local", 20, None);
         claude.provider = "claude".to_string();
-        let archived = archive_session_with_sync(&db, &claude, 200, |_, _| {
+        let result = archive_session_with_sync(&db, &claude, 200, |_, _| {
             panic!("Claude archive must remain local")
         })
         .unwrap();
-        assert_eq!(archived.archive_scope.as_deref(), Some("station"));
+        assert_eq!(result.archive_scope, "station");
+        assert_eq!(result.warning, None);
     }
 
     #[test]
@@ -3531,6 +3607,41 @@ mod tests {
         let mut reactivated = archived;
         reactivated.running = true;
         let (active, snapshots) = reconcile_archived_sessions(&db, vec![reactivated]).unwrap();
+        assert_eq!(active.len(), 1);
+        assert!(snapshots.is_empty());
+        assert!(load_archived_sessions(&db).unwrap().is_empty());
+    }
+
+    #[test]
+    fn restores_changed_station_only_archives() {
+        let db = Connection::open_in_memory().unwrap();
+        init_database(&db).unwrap();
+        let archived = session("changed-session", 10, None);
+        archive_session_in_db(&db, &archived, 100, "station").unwrap();
+
+        let mut changed = archived.clone();
+        changed.updated_at = 11;
+        let (active, snapshots) = reconcile_archived_sessions(&db, vec![changed]).unwrap();
+
+        assert_eq!(active.len(), 1);
+        assert!(snapshots.is_empty());
+        assert!(load_archived_sessions(&db).unwrap().is_empty());
+    }
+
+    #[test]
+    fn restores_station_only_archives_when_a_subagent_changes() {
+        let db = Connection::open_in_memory().unwrap();
+        init_database(&db).unwrap();
+        let mut archived = session("changed-tree", 10, None);
+        archived
+            .children
+            .push(session("changed-child", 11, Some("changed-tree")));
+        archive_session_in_db(&db, &archived, 100, "station").unwrap();
+
+        let mut changed = archived.clone();
+        changed.children[0].updated_at = 12;
+        let (active, snapshots) = reconcile_archived_sessions(&db, vec![changed]).unwrap();
+
         assert_eq!(active.len(), 1);
         assert!(snapshots.is_empty());
         assert!(load_archived_sessions(&db).unwrap().is_empty());

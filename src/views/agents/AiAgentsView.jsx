@@ -210,8 +210,12 @@ export function AiAgentsView({
     const key = `${session.provider}:${session.id}`;
     setBusySessionKey(key);
     try {
-      await api.archiveAiSession({ provider: session.provider, sessionId: session.id });
+      const result = await api.archiveAiSession({
+        provider: session.provider,
+        sessionId: session.id,
+      });
       await onRefresh({ quiet: true });
+      if (result?.warning) onNotice(result.warning);
     } catch (error) {
       onNotice(error?.message || String(error));
     } finally {
