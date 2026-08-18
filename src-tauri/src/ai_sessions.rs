@@ -777,16 +777,93 @@ fn codex_database(home: &Path) -> Option<PathBuf> {
     .max_by_key(|path| file_millis(path))
 }
 
+#[derive(Debug, Default)]
+struct CodexDiscovery {
+    sessions: Vec<AiSession>,
+    internal_ids: HashSet<String>,
+}
+
+fn sqlite_table_has_column(db: &Connection, table: &str, column: &str) -> bool {
+    db.prepare(&format!("PRAGMA table_info({table})"))
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .is_ok_and(|columns| columns.iter().any(|candidate| candidate == column))
+}
+
+fn codex_source_is_subagent(source: &str) -> bool {
+    serde_json::from_str::<Value>(source)
+        .ok()
+        .is_some_and(|value| value.get("subagent").is_some())
+}
+
+fn codex_session_meta_is_internal(payload: &Value) -> bool {
+    payload
+        .get("thread_source")
+        .and_then(Value::as_str)
+        .is_some_and(|source| source.eq_ignore_ascii_case("subagent"))
+        || payload
+            .get("source")
+            .is_some_and(|source| source.get("subagent").is_some())
+        || payload
+            .get("parent_thread_id")
+            .and_then(Value::as_str)
+            .is_some_and(|parent_id| !parent_id.is_empty())
+}
+
+fn codex_database_internal_ids(db: &Connection) -> HashSet<String> {
+    let thread_source = sqlite_table_has_column(db, "threads", "thread_source")
+        .then_some("thread_source")
+        .unwrap_or("NULL");
+    let query = format!("SELECT id, source, {thread_source} FROM threads");
+    let mut internal_ids = db
+        .prepare(&query)
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1).unwrap_or_default(),
+                        row.get::<_, Option<String>>(2).unwrap_or_default(),
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(id, source, thread_source)| {
+            (codex_source_is_subagent(&source)
+                || thread_source
+                    .as_deref()
+                    .is_some_and(|source| source.eq_ignore_ascii_case("subagent")))
+            .then_some(id)
+        })
+        .collect::<HashSet<_>>();
+    let child_ids = db
+        .prepare("SELECT child_thread_id FROM thread_spawn_edges")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap_or_default();
+    internal_ids.extend(child_ids);
+    internal_ids
+}
+
 fn read_codex_database(
     path: &Path,
     since: i64,
     cache: &mut CodexDiscoveryCache,
-) -> Result<Vec<AiSession>, String> {
+) -> Result<CodexDiscovery, String> {
     let db = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|error| error.to_string())?;
+    let mut internal_ids = codex_database_internal_ids(&db);
     let targets = open_targets("codex");
     let mut statement = db
         .prepare(
@@ -794,69 +871,71 @@ fn read_codex_database(
              FROM threads WHERE archived = 0",
         )
         .map_err(|error| error.to_string())?;
-    let mut sessions = statement
+    let discovered = statement
         .query_map([], |row| {
+            let id = row.get::<_, String>(0)?;
             let source = row.get::<_, String>(5).unwrap_or_default();
             let rollout_path = row.get::<_, String>(6).unwrap_or_default();
+            let (origin, transcript_internal) =
+                codex_transcript_metadata(&source, Path::new(&rollout_path));
+            let internal = internal_ids.contains(&id) || transcript_internal;
             let updated_at = millis(row.get(2)?);
-            let state = if updated_at >= since {
+            let state = if !internal && updated_at >= since {
                 read_codex_transcript_state_cached(Path::new(&rollout_path), cache)
                     .map(|state| state.lifecycle)
                     .unwrap_or_default()
             } else {
                 CodexSessionState::default()
             };
-            Ok(AiSession {
-                id: row.get(0)?,
-                provider: "codex".to_string(),
-                title: row.get::<_, String>(4).unwrap_or_default(),
-                cwd: row
-                    .get::<_, String>(3)
-                    .ok()
-                    .filter(|value| !value.is_empty()),
-                created_at: millis(row.get(1)?),
-                updated_at,
-                parent_id: None,
-                kind: "session".to_string(),
-                origin: codex_origin(&source, Path::new(&rollout_path)),
-                waiting_for_input: state.waiting_for_input(),
-                running: state.running,
-                completed_at: state.completed_at,
-                archived_at: None,
-                archive_scope: None,
-                open_targets: targets.clone(),
-                children: Vec::new(),
-            })
+            Ok((
+                AiSession {
+                    id,
+                    provider: "codex".to_string(),
+                    title: row.get::<_, String>(4).unwrap_or_default(),
+                    cwd: row
+                        .get::<_, String>(3)
+                        .ok()
+                        .filter(|value| !value.is_empty()),
+                    created_at: millis(row.get(1)?),
+                    updated_at,
+                    parent_id: None,
+                    kind: "session".to_string(),
+                    origin,
+                    waiting_for_input: state.waiting_for_input(),
+                    running: state.running,
+                    completed_at: state.completed_at,
+                    archived_at: None,
+                    archive_scope: None,
+                    open_targets: targets.clone(),
+                    children: Vec::new(),
+                },
+                internal,
+            ))
         })
         .map_err(|error| error.to_string())?
         .filter_map(Result::ok)
         .collect::<Vec<_>>();
-
-    let edges = db
-        .prepare("SELECT parent_thread_id, child_thread_id FROM thread_spawn_edges")
-        .and_then(|mut statement| {
-            statement
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()
-        })
-        .unwrap_or_default();
-    let parents = edges
+    internal_ids.extend(
+        discovered
+            .iter()
+            .filter(|(_, internal)| *internal)
+            .map(|(session, _)| session.id.clone()),
+    );
+    let sessions = discovered
         .into_iter()
-        .map(|(parent_id, child_id)| (child_id, parent_id))
-        .collect::<HashMap<_, _>>();
-    for session in &mut sessions {
-        if let Some(parent_id) = parents.get(&session.id) {
-            session.parent_id = Some(parent_id.clone());
-            session.kind = "subagent".to_string();
-            session.open_targets.clear();
-        }
-        if session.title.trim().is_empty() {
-            session.title = "Codex session".to_string();
-        }
-    }
-    Ok(sessions)
+        .filter(|(_, internal)| !internal)
+        .map(|(session, _)| session)
+        .map(|mut session| {
+            if session.title.trim().is_empty() {
+                session.title = "Codex session".to_string();
+            }
+            session
+        })
+        .collect::<Vec<_>>();
+    Ok(CodexDiscovery {
+        sessions,
+        internal_ids,
+    })
 }
 
 fn content_text(value: &Value) -> Option<String> {
@@ -893,12 +972,14 @@ fn concise_title(value: &str, fallback: &str) -> String {
     title
 }
 
-fn codex_origin(source: &str, rollout_path: &Path) -> String {
-    if source.eq_ignore_ascii_case("cli") {
-        return "cli".to_string();
-    }
+fn codex_transcript_metadata(source: &str, rollout_path: &Path) -> (String, bool) {
+    let mut origin = if source.eq_ignore_ascii_case("cli") {
+        "cli".to_string()
+    } else {
+        "unknown".to_string()
+    };
     let Ok(file) = fs::File::open(rollout_path) else {
-        return "unknown".to_string();
+        return (origin, false);
     };
     for line in BufReader::new(file).lines().map_while(Result::ok).take(10) {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
@@ -907,17 +988,19 @@ fn codex_origin(source: &str, rollout_path: &Path) -> String {
         if value.get("type").and_then(Value::as_str) != Some("session_meta") {
             continue;
         }
+        let Some(payload) = value.get("payload") else {
+            continue;
+        };
         let originator = value
             .pointer("/payload/originator")
             .and_then(Value::as_str)
             .unwrap_or("");
-        return if originator.eq_ignore_ascii_case("Codex Desktop") {
-            "desktop".to_string()
-        } else {
-            "unknown".to_string()
-        };
+        if !source.eq_ignore_ascii_case("cli") && originator.eq_ignore_ascii_case("Codex Desktop") {
+            origin = "desktop".to_string();
+        }
+        return (origin, codex_session_meta_is_internal(payload));
     }
-    "unknown".to_string()
+    (origin, false)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1151,6 +1234,7 @@ struct CodexTranscriptState {
     created_at: i64,
     title: Option<String>,
     origin: String,
+    internal: bool,
     lifecycle: CodexSessionState,
 }
 
@@ -1173,6 +1257,7 @@ impl CodexTranscriptState {
                 .map(str::to_string);
             self.created_at =
                 timestamp_millis(payload.get("timestamp").and_then(Value::as_str)).max(timestamp);
+            self.internal |= codex_session_meta_is_internal(payload);
             let source = payload.get("source").and_then(Value::as_str).unwrap_or("");
             let originator = payload
                 .get("originator")
@@ -1359,6 +1444,7 @@ fn read_codex_transcript(path: &Path) -> Option<AiSession> {
     let mut created_at = 0;
     let mut title = None;
     let mut origin = "unknown".to_string();
+    let mut internal = false;
     let mut session_state = CodexSessionState::default();
     for line in BufReader::new(file).lines().map_while(Result::ok) {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
@@ -1379,6 +1465,7 @@ fn read_codex_transcript(path: &Path) -> Option<AiSession> {
                 .map(str::to_string);
             created_at =
                 timestamp_millis(payload.get("timestamp").and_then(Value::as_str)).max(timestamp);
+            internal |= codex_session_meta_is_internal(payload);
             let source = payload.get("source").and_then(Value::as_str).unwrap_or("");
             let originator = payload
                 .get("originator")
@@ -1407,6 +1494,9 @@ fn read_codex_transcript(path: &Path) -> Option<AiSession> {
             value => Some(value),
         };
     }
+    if internal {
+        return None;
+    }
     Some(AiSession {
         id: id?,
         provider: "codex".to_string(),
@@ -1427,7 +1517,7 @@ fn read_codex_transcript(path: &Path) -> Option<AiSession> {
     })
 }
 
-fn discover_codex(since: i64, cache: &mut CodexDiscoveryCache) -> Result<Vec<AiSession>, String> {
+fn discover_codex(since: i64, cache: &mut CodexDiscoveryCache) -> Result<CodexDiscovery, String> {
     let home =
         codex_home().ok_or_else(|| "Could not determine the Codex data directory.".to_string())?;
     if let Some(database) = codex_database(&home) {
@@ -1437,7 +1527,7 @@ fn discover_codex(since: i64, cache: &mut CodexDiscoveryCache) -> Result<Vec<AiS
     }
     let sessions_root = home.join("sessions");
     if !sessions_root.is_dir() {
-        return Ok(Vec::new());
+        return Ok(CodexDiscovery::default());
     }
     let mut files = Vec::new();
     collect_files(
@@ -1447,37 +1537,45 @@ fn discover_codex(since: i64, cache: &mut CodexDiscoveryCache) -> Result<Vec<AiS
     );
     let selected = files.into_iter().collect::<HashSet<_>>();
     cache.transcripts.retain(|path, _| selected.contains(path));
-    Ok(selected
-        .iter()
-        .filter_map(|path| {
-            let state = read_codex_transcript_state_cached(path, cache)?;
-            let mut lifecycle = state.lifecycle;
-            if lifecycle.completed_at == Some(0) {
-                lifecycle.completed_at = match file_millis(path) {
-                    0 => None,
-                    value => Some(value),
-                };
-            }
-            Some(AiSession {
-                id: state.id?,
-                provider: "codex".to_string(),
-                title: state.title.unwrap_or_else(|| "Codex session".to_string()),
-                cwd: state.cwd,
-                created_at: state.created_at,
-                updated_at: file_millis(path).max(state.created_at),
-                parent_id: None,
-                kind: "session".to_string(),
-                origin: state.origin,
-                waiting_for_input: lifecycle.waiting_for_input(),
-                running: lifecycle.running,
-                completed_at: lifecycle.completed_at,
-                archived_at: None,
-                archive_scope: None,
-                open_targets: open_targets("codex"),
-                children: Vec::new(),
-            })
-        })
-        .collect())
+    let mut discovery = CodexDiscovery::default();
+    for path in &selected {
+        let Some(state) = read_codex_transcript_state_cached(path, cache) else {
+            continue;
+        };
+        let Some(id) = state.id.clone() else {
+            continue;
+        };
+        if state.internal {
+            discovery.internal_ids.insert(id);
+            continue;
+        }
+        let mut lifecycle = state.lifecycle;
+        if lifecycle.completed_at == Some(0) {
+            lifecycle.completed_at = match file_millis(path) {
+                0 => None,
+                value => Some(value),
+            };
+        }
+        discovery.sessions.push(AiSession {
+            id,
+            provider: "codex".to_string(),
+            title: state.title.unwrap_or_else(|| "Codex session".to_string()),
+            cwd: state.cwd,
+            created_at: state.created_at,
+            updated_at: file_millis(path).max(state.created_at),
+            parent_id: None,
+            kind: "session".to_string(),
+            origin: state.origin,
+            waiting_for_input: lifecycle.waiting_for_input(),
+            running: lifecycle.running,
+            completed_at: lifecycle.completed_at,
+            archived_at: None,
+            archive_scope: None,
+            open_targets: open_targets("codex"),
+            children: Vec::new(),
+        });
+    }
+    Ok(discovery)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2260,6 +2358,20 @@ fn load_archived_sessions(db: &Connection) -> Result<Vec<AiSession>, String> {
     Ok(sessions)
 }
 
+fn remove_internal_codex_archives(
+    db: &Connection,
+    internal_ids: &HashSet<String>,
+) -> Result<(), String> {
+    for session_id in internal_ids {
+        db.execute(
+            "DELETE FROM ai_session_archives WHERE provider = 'codex' AND session_id = ?1",
+            [session_id],
+        )
+        .map_err(db_error)?;
+    }
+    Ok(())
+}
+
 fn reconcile_archived_sessions(
     db: &Connection,
     mut sessions: Vec<AiSession>,
@@ -2344,26 +2456,32 @@ fn scan_ai_sessions(
     claude_live_cache: &mut ClaudeLiveStateCache,
 ) -> Result<AiSessionList, String> {
     let mut sessions = Vec::new();
+    let mut internal_codex_ids = HashSet::new();
     let mut warnings = Vec::new();
-    let mut providers = Vec::new();
     if settings.codex_cli || settings.codex_desktop {
-        providers.push(("codex", discover_codex(since, codex_cache)));
+        match discover_codex(since, codex_cache) {
+            Ok(discovery) => {
+                sessions.extend(discovery.sessions);
+                internal_codex_ids = discovery.internal_ids;
+            }
+            Err(message) => warnings.push(AiSessionProviderWarning {
+                provider: "codex".to_string(),
+                message,
+            }),
+        }
     } else {
         codex_cache.transcripts.clear();
     }
     if settings.claude_cli || settings.claude_desktop {
-        providers.push(("claude", discover_claude(since, claude_cache)));
-    } else {
-        claude_cache.transcripts.clear();
-    }
-    for (provider, result) in providers {
-        match result {
-            Ok(mut provider_sessions) => sessions.append(&mut provider_sessions),
+        match discover_claude(since, claude_cache) {
+            Ok(claude_sessions) => sessions.extend(claude_sessions),
             Err(message) => warnings.push(AiSessionProviderWarning {
-                provider: provider.to_string(),
+                provider: "claude".to_string(),
                 message,
             }),
         }
+    } else {
+        claude_cache.transcripts.clear();
     }
     let live_states = (settings.claude_cli || settings.claude_desktop)
         .then(|| claude_live_states(claude_live_cache))
@@ -2371,6 +2489,7 @@ fn scan_ai_sessions(
     reconcile_claude_live_states(&mut sessions, live_states.as_ref());
     let sessions = group_and_filter(sessions, since, &settings);
     let db = state.db.lock().map_err(db_error)?;
+    remove_internal_codex_archives(&db, &internal_codex_ids)?;
     let (sessions, mut archived_sessions) = reconcile_archived_sessions(&db, sessions)?;
     let (sessions, mut lifecycle_archives) =
         partition_claude_lifecycle_archives(sessions, live_states.as_ref());
@@ -3442,6 +3561,30 @@ mod tests {
     }
 
     #[test]
+    fn removes_only_archived_internal_codex_snapshots() {
+        let db = Connection::open_in_memory().unwrap();
+        init_database(&db).unwrap();
+        archive_session_in_db(&db, &session("guardian", 10, None), 100, "station").unwrap();
+        archive_session_in_db(&db, &session("normal", 20, None), 200, "station").unwrap();
+        let mut claude = session("claude-internal-id", 30, None);
+        claude.provider = "claude".to_string();
+        archive_session_in_db(&db, &claude, 300, "station").unwrap();
+
+        remove_internal_codex_archives(
+            &db,
+            &HashSet::from(["guardian".to_string(), "claude-internal-id".to_string()]),
+        )
+        .unwrap();
+
+        let archived = load_archived_sessions(&db).unwrap();
+        assert_eq!(archived.len(), 2);
+        assert!(archived.iter().any(|session| session.id == "normal"));
+        assert!(archived
+            .iter()
+            .any(|session| session.id == "claude-internal-id"));
+    }
+
+    #[test]
     fn synchronizes_new_codex_archives_and_restores() {
         let db = Connection::open_in_memory().unwrap();
         init_database(&db).unwrap();
@@ -3659,6 +3802,36 @@ mod tests {
 
         let session = read_codex_transcript(&path).unwrap();
         assert_eq!(session.origin, "desktop");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn excludes_codex_transcript_subagents_using_rollout_metadata() {
+        let directory = fixture_dir("codex-internal-rollouts");
+        let guardian = directory.join("guardian.jsonl");
+        fs::write(
+            &guardian,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"guardian\",\"thread_source\":\"subagent\",\"source\":{\"subagent\":{\"other\":\"guardian\"}},\"parent_thread_id\":\"parent\",\"originator\":\"Codex Desktop\"}}\n",
+        )
+        .unwrap();
+        let delegated = directory.join("delegated.jsonl");
+        fs::write(
+            &delegated,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"delegated\",\"thread_source\":\"subagent\",\"source\":\"cli\"}}\n",
+        )
+        .unwrap();
+
+        let guardian_state =
+            read_codex_transcript_state_cached(&guardian, &mut CodexDiscoveryCache::default())
+                .unwrap();
+        let delegated_state =
+            read_codex_transcript_state_cached(&delegated, &mut CodexDiscoveryCache::default())
+                .unwrap();
+
+        assert!(guardian_state.internal);
+        assert!(delegated_state.internal);
+        assert!(read_codex_transcript(&guardian).is_none());
+        assert!(read_codex_transcript(&delegated).is_none());
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -4247,6 +4420,7 @@ mod tests {
             read_codex_database(&path, 50_000, &mut CodexDiscoveryCache::default()).unwrap();
         assert!(
             sessions
+                .sessions
                 .iter()
                 .find(|session| session.id == "recent")
                 .unwrap()
@@ -4254,6 +4428,7 @@ mod tests {
         );
         assert!(
             !sessions
+                .sessions
                 .iter()
                 .find(|session| session.id == "old")
                 .unwrap()
@@ -4338,7 +4513,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_codex_database_and_excludes_archived_threads() {
+    fn reads_legacy_codex_database_and_excludes_archived_and_subagent_threads() {
         let directory = fixture_dir("codex");
         let path = directory.join("state_5.sqlite");
         let db = Connection::open(&path).unwrap();
@@ -4353,16 +4528,55 @@ mod tests {
         .unwrap();
         drop(db);
 
-        let sessions = read_codex_database(&path, 0, &mut CodexDiscoveryCache::default()).unwrap();
-        assert_eq!(sessions.len(), 2);
-        assert!(!sessions.iter().any(|session| session.id == "archived"));
-        let child = sessions
+        let discovery = read_codex_database(&path, 0, &mut CodexDiscoveryCache::default()).unwrap();
+        assert_eq!(discovery.sessions.len(), 1);
+        assert_eq!(discovery.sessions[0].id, "parent");
+        assert!(!discovery
+            .sessions
             .iter()
-            .find(|session| session.id == "child")
-            .unwrap();
-        assert_eq!(child.parent_id.as_deref(), Some("parent"));
-        assert_eq!(child.title, "Codex session");
-        assert_eq!(child.origin, "cli");
+            .any(|session| session.id == "archived"));
+        assert!(discovery.internal_ids.contains("child"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn excludes_codex_database_subagents_using_modern_metadata() {
+        let directory = fixture_dir("codex-internal-metadata");
+        let path = directory.join("state_5.sqlite");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE threads (id TEXT, created_at INTEGER, updated_at INTEGER, cwd TEXT, title TEXT, source TEXT, rollout_path TEXT, archived INTEGER, thread_source TEXT);\
+             CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT);\
+             INSERT INTO threads VALUES ('normal', 10, 20, '/work/app', 'Normal', 'vscode', '', 0, 'user');\
+             INSERT INTO threads VALUES ('guardian', 11, 21, '/work/app', 'Injected transcript', '{\"subagent\":{\"other\":\"guardian\"}}', '', 0, 'subagent');\
+             INSERT INTO threads VALUES ('internal-archived', 12, 22, '/work/app', 'Internal', 'vscode', '', 1, 'subagent');",
+        )
+        .unwrap();
+        let rollout = directory.join("parented.jsonl");
+        fs::write(
+            &rollout,
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"parented\",\"source\":\"vscode\",\"parent_thread_id\":\"normal\",\"originator\":\"Codex Desktop\"}}\n",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO threads VALUES ('parented', 13, 23, '/work/app', 'Parented', 'vscode', ?1, 0, 'user')",
+            [rollout.to_string_lossy().as_ref()],
+        )
+        .unwrap();
+        drop(db);
+
+        let discovery = read_codex_database(&path, 0, &mut CodexDiscoveryCache::default()).unwrap();
+
+        assert_eq!(discovery.sessions.len(), 1);
+        assert_eq!(discovery.sessions[0].id, "normal");
+        assert_eq!(
+            discovery.internal_ids,
+            HashSet::from([
+                "guardian".to_string(),
+                "internal-archived".to_string(),
+                "parented".to_string(),
+            ])
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
