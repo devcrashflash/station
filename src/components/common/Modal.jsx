@@ -5,10 +5,10 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
-export function Modal({ title, children, onClose, onEscapeKeyDown, contentClassName, headerClassName }) {
+export function Modal({ title, children, onClose, onEscapeKeyDown, contentClassName, headerClassName, showCloseButton = true }) {
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className={contentClassName} onEscapeKeyDown={onEscapeKeyDown}>
+      <DialogContent className={contentClassName} onEscapeKeyDown={onEscapeKeyDown} showCloseButton={showCloseButton}>
         <DialogHeader className={headerClassName}>
           <DialogTitle>{title}</DialogTitle>
         </DialogHeader>

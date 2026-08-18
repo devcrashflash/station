@@ -40,7 +40,7 @@ database; anyone with access to that database may be able to read them.
 
 ## Release
 
-- Run `pnpm release` to increase the patch version and build an installable macOS DMG.
+- Run `pnpm release` to increase the patch version and build an installable local macOS DMG.
 - Run `pnpm release 0.1.1` (or `pnpm release -- 0.1.1`) to set an explicit version.
 - Find the finished `Station_<version>_<architecture>.dmg` installer in
   `src-tauri/target/release/bundle/dmg/`. Version dots are replaced with
@@ -49,6 +49,27 @@ database; anyone with access to that database may be able to read them.
 
 The release command synchronizes the versions in `package.json`, the Tauri config,
 and the Rust package files before building. DMG releases must be built on macOS.
+The local DMG build deliberately skips updater artifacts; public updater artifacts
+are always built from a committed version by GitHub Actions.
+
+Public releases are created only from bare stable version tags such as `0.10.6`:
+
+1. Run `pnpm release <version>`, review and commit the synchronized version files.
+2. Push the commit, create a tag matching the configured version exactly, and push
+   that tag.
+3. GitHub Actions creates a draft release, builds Intel and Apple Silicon DMGs and
+   signed updater archives, validates `latest.json`, and publishes the release only
+   when both architectures are complete.
+
+The release workflow requires a repository secret named
+`TAURI_SIGNING_PRIVATE_KEY`. Its matching public key is compiled into the app.
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is optional when the key is not encrypted.
+Back up the private key securely: losing it prevents installed versions from
+accepting future updates. macOS bundles currently use ad-hoc signing, so users may
+need to approve Station in Privacy & Security after the initial manual install.
+Versions up to `0.10.5` do not contain the updater and require that one manual
+bootstrap installation.
+
 The application bundle includes the BSL, commercial license, and third-party
 notices under its `legal` resources directory.
 
@@ -60,10 +81,11 @@ GitLab, Trello, or any other external network request.
 
 Offline use should work for most read and organization workflows. Network
 access is only required for actions that explicitly sync external metadata or
-edit/modify external systems. Provider sync may start automatically after local
-data has rendered when it runs as bounded background work. Foreground syncs
-should show status while they run, and no sync may block local navigation or
-local editing.
+edit/modify external systems, plus a lightweight non-blocking update check at
+startup and every six hours. Failed automatic update checks remain silent.
+Provider sync may start automatically after local data has rendered when it runs
+as bounded background work. Foreground syncs should show status while they run,
+and no sync may block local navigation or local editing.
 
 ## Frontend Structure
 

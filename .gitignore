@@ -13,6 +13,8 @@ node_modules
 dist
 dist-ssr
 *.local
+station-updater.key
+station-updater.key.pub
 
 # Editor directories and files
 .vscode/*
