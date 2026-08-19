@@ -2,14 +2,13 @@
 
 Minimal Tauri v2 starter using React, JavaScript, Vite, Tailwind CSS, and shadcn/ui.
 
-## License and 40-day evaluation
+## License and time evaluation
 
 Station is **source available**, not open source. It is licensed under the
-[Business Source License 1.1](LICENSE). The license permits non-production use
-and grants one 40-day period of ordinary production use for evaluation. After
-that period, continued production use requires a paid
-[commercial license](COMMERCIAL_LICENSE.md); payment is not optional even if the
-application remains functional or displays only a reminder.
+[Business Source License 1.1](LICENSE). The license grants one time period of
+ordinary production use for evaluation. After that period, continued production
+use requires a paid [commercial license](COMMERCIAL_LICENSE.md); payment is not
+optional even if the application remains functional or displays only a reminder.
 
 Each released version automatically becomes available under the Apache License
 2.0 four years after that version's first public distribution. Third-party
