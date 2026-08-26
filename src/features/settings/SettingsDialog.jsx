@@ -1173,6 +1173,15 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
     }
   }
 
+  function closeAccountEditor() {
+    if (busyKey === "editor" || busyKey === "google-cancel") return;
+    if (busyKey === "google-connect") {
+      cancelGoogle();
+      return;
+    }
+    resetEditor();
+  }
+
   async function runAction(key, action, success) {
     setBusyKey(key);
     setActionNotice("");
@@ -1197,6 +1206,9 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
   const tokenUrl = editor && ["github", "gitlab", "trello"].includes(editor.type)
     ? credentialUrl(editor.type, fields.baseUrl || "", fields.apiKey || "")
     : "";
+  const editorProviderLabel = editor?.type === "google"
+    ? "Google"
+    : providerOptions.find((item) => item.value === editor?.type)?.label;
   const savedCount = connections.length + calendarAccounts.length;
   const calendarAccountWarnings = calendarWarnings(calendarSyncRuns);
   const groups = [
@@ -1213,48 +1225,43 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
       <div className="grid gap-4 rounded-md border bg-muted/20 p-4">
         <div>
           <p className="font-medium">Add account</p>
-          <p className="mt-1 text-sm text-muted-foreground">Choose a provider to configure it here.</p>
+          <p className="mt-1 text-sm text-muted-foreground">Choose a provider to configure.</p>
         </div>
         <div className="flex flex-wrap gap-2">
           {accountAddOptions.map((option) => {
             const Icon = option.icon;
-            return <Button key={option.value} type="button" disabled={busyKey === "google-connect" || busyKey === "google-cancel"} variant={editor?.type === option.value && editor?.mode === "create" ? "secondary" : "outline"} onClick={() => openCreate(option.value)}>
+            return <Button key={option.value} type="button" disabled={busyKey === "google-connect" || busyKey === "google-cancel"} variant="outline" onClick={() => openCreate(option.value)}>
               <Icon />{option.label}
             </Button>;
           })}
         </div>
+      </div>
 
-        {editor && editor.type !== "calendar" && (
-          <div className="grid gap-4 border-t pt-4">
-            {["github", "gitlab", "trello"].includes(editor.type) && (
-              <form className="grid gap-3" onSubmit={submitDeveloper}>
-                <EditorHeading editor={editor} label={providerOptions.find((item) => item.value === editor.type)?.label} onCancel={() => resetEditor()} />
-                <Field><FieldLabel>Connection name</FieldLabel><Input value={fields.name || ""} onChange={(event) => setField("name", event.target.value)} required /></Field>
-                {editor.type === "trello" ? <p className="rounded-md border bg-background p-3 text-sm text-muted-foreground">Trello uses the fixed cloud API. Enter the API key and token from your Trello developer app.</p> : (
-                  <Field><FieldLabel>{editor.type === "github" ? "GitHub server" : "GitLab server"}</FieldLabel><Input value={fields.baseUrl || ""} onChange={(event) => setField("baseUrl", event.target.value)} required /></Field>
-                )}
-                {editor.type === "trello" && <Field><FieldLabel>API key</FieldLabel><Input type="password" value={fields.apiKey || ""} onChange={(event) => setField("apiKey", event.target.value)} required /></Field>}
-                <Field>
-                  <FieldLabel>{editor.type === "trello" ? "API token" : "Token"}</FieldLabel>
-                  <Input type="password" value={fields.token || ""} onChange={(event) => setField("token", event.target.value)} required />
-                  <div className="grid gap-1 text-xs text-muted-foreground"><p>{permissionHints[editor.type]}</p>{tokenUrl ? <a className="font-medium text-blue-700 underline-offset-2 hover:underline dark:text-blue-300" href={tokenUrl} target="_blank" rel="noreferrer">Generate token</a> : editor.type === "trello" ? <span>Enter an API key to generate a token.</span> : null}</div>
-                </Field>
-                <EditorFooter busy={busyKey === "editor"} submitLabel={editor.mode === "edit" ? "Update connection" : `Add ${providerOptions.find((item) => item.value === editor.type)?.label}`} error={editorError} onCancel={() => resetEditor()} />
-              </form>
+      {editor && editor.type !== "calendar" && <Modal title={`${editor.mode === "edit" ? "Edit" : "Add"} ${editorProviderLabel} account`} onClose={closeAccountEditor} contentClassName="sm:max-w-xl">
+        {["github", "gitlab", "trello"].includes(editor.type) && (
+          <form className="grid max-h-[75vh] gap-3 overflow-y-auto pr-1" onSubmit={submitDeveloper}>
+            <Field><FieldLabel>Connection name</FieldLabel><Input value={fields.name || ""} onChange={(event) => setField("name", event.target.value)} required /></Field>
+            {editor.type === "trello" ? <p className="rounded-md border bg-background p-3 text-sm text-muted-foreground">Trello uses the fixed cloud API. Enter the API key and token from your Trello developer app.</p> : (
+              <Field><FieldLabel>{editor.type === "github" ? "GitHub server" : "GitLab server"}</FieldLabel><Input value={fields.baseUrl || ""} onChange={(event) => setField("baseUrl", event.target.value)} required /></Field>
             )}
+            {editor.type === "trello" && <Field><FieldLabel>API key</FieldLabel><Input type="password" value={fields.apiKey || ""} onChange={(event) => setField("apiKey", event.target.value)} required /></Field>}
+            <Field>
+              <FieldLabel>{editor.type === "trello" ? "API token" : "Token"}</FieldLabel>
+              <Input type="password" value={fields.token || ""} onChange={(event) => setField("token", event.target.value)} required />
+              <div className="grid gap-1 text-xs text-muted-foreground"><p>{permissionHints[editor.type]}</p>{tokenUrl ? <a className="font-medium text-blue-700 underline-offset-2 hover:underline dark:text-blue-300" href={tokenUrl} target="_blank" rel="noreferrer">Generate token</a> : editor.type === "trello" ? <span>Enter an API key to generate a token.</span> : null}</div>
+            </Field>
+            <EditorFooter busy={busyKey === "editor"} submitLabel={editor.mode === "edit" ? "Update connection" : `Add ${editorProviderLabel}`} error={editorError} onCancel={closeAccountEditor} />
+          </form>
+        )}
 
-            {editor.type === "google" && (
-              <div className="grid gap-3">
-                <EditorHeading editor={editor} label="Google" onCancel={() => resetEditor()} />
-                <p className="text-sm text-muted-foreground">{editor.mode === "edit" ? `Reconnect ${fields.name} to refresh its Google authorization.` : "Sign in with Google to discover calendars. Calendar access is read-only."}</p>
-                {editorError && <p className="rounded-md border bg-background p-3 text-sm text-destructive">{editorError}</p>}
-                <div className="flex gap-2"><Button type="button" disabled={busyKey === "google-connect" || busyKey === "google-cancel"} onClick={connectGoogle}>{busyKey === "google-connect" && <LoaderCircle className="animate-spin" />}{busyKey === "google-connect" ? "Connecting Google…" : editor.mode === "edit" ? "Reconnect Google" : "Connect Google"}</Button><Button type="button" variant="outline" disabled={busyKey === "google-cancel"} onClick={busyKey === "google-connect" ? cancelGoogle : () => resetEditor()}>{busyKey === "google-cancel" && <LoaderCircle className="animate-spin" />}{busyKey === "google-connect" || busyKey === "google-cancel" ? "Cancel connection" : "Cancel"}</Button></div>
-              </div>
-            )}
-
+        {editor.type === "google" && (
+          <div className="grid gap-3">
+            <p className="text-sm text-muted-foreground">{editor.mode === "edit" ? `Reconnect ${fields.name} to refresh its Google authorization.` : "Sign in with Google to discover calendars. Calendar access is read-only."}</p>
+            {editorError && <p className="rounded-md border bg-background p-3 text-sm text-destructive">{editorError}</p>}
+            <div className="flex gap-2"><Button type="button" disabled={busyKey === "google-connect" || busyKey === "google-cancel"} onClick={connectGoogle}>{busyKey === "google-connect" && <LoaderCircle className="animate-spin" />}{busyKey === "google-connect" ? "Connecting Google…" : editor.mode === "edit" ? "Reconnect Google" : "Connect Google"}</Button><Button type="button" variant="outline" disabled={busyKey === "google-cancel"} onClick={closeAccountEditor}>{busyKey === "google-cancel" && <LoaderCircle className="animate-spin" />}{busyKey === "google-connect" || busyKey === "google-cancel" ? "Cancel connection" : "Cancel"}</Button></div>
           </div>
         )}
-      </div>
+      </Modal>}
 
       {editor?.type === "calendar" && <Modal title={editor.mode === "edit" ? "Edit calendar" : "Add calendar"} onClose={() => resetEditor()} contentClassName="sm:max-w-xl">
         <form className="grid max-h-[75vh] gap-3 overflow-y-auto pr-1" onSubmit={submitCalendar}>
@@ -1280,10 +1287,6 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
       </div>}
     </div>
   );
-}
-
-function EditorHeading({ editor, label }) {
-  return <div><p className="font-medium">{editor.mode === "edit" ? `Edit ${label}` : `Add ${label}`}</p><p className="mt-1 text-sm text-muted-foreground">{editor.mode === "edit" ? "Update this saved account." : `Configure a new ${label} account.`}</p></div>;
 }
 
 function EditorFooter({ busy, submitLabel, error, onCancel }) {
