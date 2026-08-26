@@ -89,7 +89,7 @@ export function ActivityView({
   const [disabledActionKeys, setDisabledActionKeys] = useState(() => new Set());
   const [copyState, setCopyState] = useState("idle");
   const [summaryCopyState, setSummaryCopyState] = useState("idle");
-  const [activeTimelineTab, setActiveTimelineTab] = useState("details");
+  const [activeTimelineTab, setActiveTimelineTab] = useState("summary");
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef(null);
   const shortcutKey = shortcutModifier();
@@ -382,16 +382,16 @@ export function ActivityView({
                 aria-label="Timeline views"
               >
                 <TimelineTab
-                  id="details"
-                  label="Details"
-                  icon={List}
+                  id="summary"
+                  label="Summary"
+                  icon={FileText}
                   activeTab={activeTimelineTab}
                   onChange={setActiveTimelineTab}
                 />
                 <TimelineTab
-                  id="summary"
-                  label="Summary"
-                  icon={FileText}
+                  id="details"
+                  label="Details"
+                  icon={List}
                   activeTab={activeTimelineTab}
                   onChange={setActiveTimelineTab}
                 />
