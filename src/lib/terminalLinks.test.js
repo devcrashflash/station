@@ -221,7 +221,10 @@ test("maps validated links across wrapped xterm buffer lines", async () => {
   });
   links[0].activate({ ctrlKey: false }, links[0].text);
   assert.equal(opened, null);
-  links[0].activate({ ctrlKey: true }, links[0].text);
+  const primaryEvent = globalThis.navigator?.platform?.toLowerCase().startsWith("mac")
+    ? { metaKey: true }
+    : { ctrlKey: true };
+  links[0].activate(primaryEvent, links[0].text);
   await Promise.resolve();
   assert.equal(opened, "/repo/src/longfile.js");
 });
