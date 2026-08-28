@@ -235,6 +235,10 @@ export const api = {
   },
   deleteConnection: (payload) => call("delete_connection", payload, () => local.deleteConnection(payload)),
   testConnection: (payload) => call("test_connection", payload, () => local.testConnection(payload)),
+  testConnectionInput: (payload) => {
+    const input = normalizeConnectionInput(payload);
+    return call("test_connection_input", { input }, () => local.testConnectionInput(input));
+  },
   listAiPrompts: () => call("list_ai_prompts", {}, local.listAiPrompts),
   saveAiPrompt: (payload) => call("save_ai_prompt", { input: payload }, () => local.saveAiPrompt(payload)),
   deleteAiPrompt: (payload) => call("delete_ai_prompt", payload, () => local.deleteAiPrompt(payload)),
@@ -271,6 +275,7 @@ export const api = {
   refreshCalendarCollections: ({ accountId }) => call("refresh_calendar_collections", { accountId }, () => local.refreshCalendarCollections({ accountId })),
   updateCalendarCollections: ({ selections }) => call("update_calendar_collections", { selections }, () => local.updateCalendarCollections({ selections })),
   testCalendarAccount: ({ accountId }) => call("test_calendar_account", { accountId }, () => local.testCalendarAccount({ accountId })),
+  testCalendarAccountInput: (payload) => call("test_calendar_account_input", { input: payload }, () => local.testCalendarAccountInput(payload)),
   deleteCalendarAccount: ({ accountId }) => call("delete_calendar_account", { accountId }, () => local.deleteCalendarAccount({ accountId })),
   listCalendarEvents: (payload) => {
     const input = activityRequestPayload(payload);
@@ -430,6 +435,21 @@ export function validateConnectionForTest(connection) {
   return "";
 }
 
+export function validateCalendarAccountInputForTest(input) {
+  if (input?.provider === "caldav") {
+    if (!input.serverUrl?.trim()) return "Calendar server URL is required.";
+    if (!input.username?.trim() || !input.password?.trim()) {
+      return "Calendar username and password are required.";
+    }
+    return "";
+  }
+  if (input?.provider === "ical") {
+    if (!input.url?.trim() && !input.id) return "Enter the secret iCal URL.";
+    return "";
+  }
+  return `Unsupported calendar provider: ${input?.provider || "unknown"}`;
+}
+
 export function validateAiPromptForTest(prompt, prompts = []) {
   const agentType = prompt?.agentType?.trim() || "";
   if (!["codex", "claude"].includes(agentType)) return "AI Prompt agent must be Codex or Claude.";
@@ -446,7 +466,7 @@ export function validateAiPromptForTest(prompt, prompts = []) {
   return "";
 }
 
-function normalizeConnectionInput(input) {
+export function normalizeConnectionInput(input) {
   return {
     ...input,
     apiKey: input.provider === "trello" ? input.apiKey : null,
@@ -1793,6 +1813,22 @@ const local = {
     };
   },
 
+  testConnectionInput(input) {
+    const validationMessage = validateConnectionForTest(input);
+    if (validationMessage) {
+      return {
+        ok: false,
+        message: validationMessage,
+        accountName: null,
+      };
+    }
+    return {
+      ok: false,
+      message: "Live connection testing requires the desktop app.",
+      accountName: null,
+    };
+  },
+
   listProjectConnections({ projectId }) {
     return readState().projectConnections?.[projectId] || [];
   },
@@ -1898,6 +1934,12 @@ const local = {
     const account = (readState().calendarAccounts || []).find((item) => item.id === accountId);
     if (!account) throw new Error("Calendar account not found.");
     return `Connected. Found ${(account.calendars || []).length} calendars.`;
+  },
+
+  testCalendarAccountInput(input) {
+    const validationMessage = validateCalendarAccountInputForTest(input);
+    if (validationMessage) throw new Error(validationMessage);
+    throw new Error("Live calendar connection testing requires the desktop app.");
   },
 
   deleteCalendarAccount({ accountId }) {

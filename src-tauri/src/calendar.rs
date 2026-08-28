@@ -125,6 +125,17 @@ pub struct CalendarSubscriptionInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CalendarAccountTestInput {
+    pub id: Option<String>,
+    pub provider: String,
+    pub server_url: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CalendarSelectionInput {
     pub id: String,
     pub enabled: bool,
@@ -716,6 +727,54 @@ pub fn test_account(db: &Connection, account_id: &str) -> Result<String, String>
         calendars.len(),
         if calendars.len() == 1 { "" } else { "s" }
     ))
+}
+
+pub fn test_account_input(
+    db: &Connection,
+    input: CalendarAccountTestInput,
+) -> Result<String, String> {
+    match input.provider.trim() {
+        "ical" => {
+            let url = resolve_calendar_test_subscription_url(
+                db,
+                input.id.as_deref(),
+                input.url.as_deref(),
+            )?;
+            validate_ical_feed(&url)?;
+            Ok("Connected. The iCal feed is valid.".to_string())
+        }
+        "caldav" => {
+            let server_url = normalize_server_url(input.server_url.as_deref().unwrap_or_default())?;
+            let username = input.username.as_deref().unwrap_or_default().trim();
+            let password = input.password.as_deref().unwrap_or_default().trim();
+            if username.is_empty() || password.is_empty() {
+                return Err("Calendar username and password are required.".to_string());
+            }
+            let calendars = discover_collections(
+                &server_url,
+                &Auth::Basic(username.to_string(), password.to_string()),
+            )?;
+            Ok(format!(
+                "Connected. Found {} calendar{}.",
+                calendars.len(),
+                if calendars.len() == 1 { "" } else { "s" }
+            ))
+        }
+        provider => Err(format!("Unsupported calendar provider: {provider}")),
+    }
+}
+
+fn resolve_calendar_test_subscription_url(
+    db: &Connection,
+    account_id: Option<&str>,
+    entered_url: Option<&str>,
+) -> Result<String, String> {
+    let entered_url = entered_url.unwrap_or_default().trim();
+    if !entered_url.is_empty() {
+        return normalize_subscription_url(entered_url);
+    }
+    let id = account_id.ok_or_else(|| "Enter the secret iCal URL.".to_string())?;
+    get_secret(db, id).map_err(|_| "Enter the secret iCal URL.".to_string())
 }
 
 pub fn delete_account(db: &Connection, account_id: &str) -> Result<(), String> {
@@ -2461,5 +2520,55 @@ mod tests {
         let all_day_event = serde_json::json!({"start":{"date":"2026-07-16"}});
         let (_, all_day, _) = google_event_timestamp(&all_day_event, "start").unwrap();
         assert!(all_day);
+    }
+
+    #[test]
+    fn calendar_test_input_uses_saved_ical_secret_when_edit_url_is_blank() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        init_database(&db).unwrap();
+        db.execute("INSERT INTO calendar_accounts (id,provider,auth_type,name,server_url,username,created_at,updated_at) VALUES ('ical','ical','subscription','Private','example.com',NULL,1,1)", []).unwrap();
+        set_secret(&db, "ical", "https://example.com/private.ics", 1).unwrap();
+
+        assert_eq!(
+            resolve_calendar_test_subscription_url(&db, Some("ical"), Some(" ")).unwrap(),
+            "https://example.com/private.ics"
+        );
+        assert_eq!(
+            resolve_calendar_test_subscription_url(
+                &db,
+                Some("ical"),
+                Some("https://example.org/new.ics"),
+            )
+            .unwrap(),
+            "https://example.org/new.ics"
+        );
+    }
+
+    #[test]
+    fn calendar_test_input_rejects_unsupported_provider_without_writes() {
+        let db = Connection::open_in_memory().unwrap();
+        init_database(&db).unwrap();
+
+        let error = test_account_input(
+            &db,
+            CalendarAccountTestInput {
+                id: None,
+                provider: "google".into(),
+                server_url: None,
+                username: None,
+                password: None,
+                url: None,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "Unsupported calendar provider: google");
+        let account_count: i64 = db
+            .query_row("SELECT COUNT(*) FROM calendar_accounts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(account_count, 0);
     }
 }

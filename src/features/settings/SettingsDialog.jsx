@@ -26,6 +26,7 @@ import {
 } from "@/lib/aiSessions";
 import { calendarWarnings } from "@/lib/calendar";
 import { api } from "@/lib/api";
+import { TRELLO_CREDENTIAL_URLS, credentialUrl } from "@/lib/credentialLinks";
 import { formatShortcut, shortcutFromKeyboardEvent, shortcutPreviewFromKeyboardEvent } from "@/lib/keyboardShortcut";
 import { quickCaptureShortcutConflict, quickCaptureStatus } from "@/lib/quickCaptureSettings";
 import { terminalFontFamily, terminalFontOptions, terminalFontStyle, terminalFontStyleOptions } from "@/lib/terminalFonts";
@@ -109,28 +110,6 @@ const aiSessionSourceGroups = Array.from(
   }),
 );
 
-function normalizeCredentialBaseUrl(value, fallback) {
-  const trimmed = value?.trim().replace(/\/+$/, "") || "";
-  if (!trimmed) return fallback;
-  if (trimmed.startsWith("https://") || trimmed.startsWith("http://")) return trimmed;
-  return `https://${trimmed}`;
-}
-
-function credentialUrl(provider, baseUrl, apiKey) {
-  if (provider === "github") {
-    return "https://github.com/settings/personal-access-tokens/new";
-  }
-  if (provider === "gitlab") {
-    return `${normalizeCredentialBaseUrl(baseUrl, "https://gitlab.com")}/-/user_settings/personal_access_tokens`;
-  }
-  if (provider === "trello") {
-    const trimmedApiKey = apiKey.trim();
-    if (!trimmedApiKey) return "";
-    return `https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&name=Server%20Token&key=${encodeURIComponent(trimmedApiKey)}`;
-  }
-  return "";
-}
-
 export function SettingsDialog({
   connections,
   aiPrompts,
@@ -149,6 +128,7 @@ export function SettingsDialog({
   onSave,
   onDelete,
   onTest,
+  onTestConnectionInput,
   onSaveAiPrompt,
   onDeleteAiPrompt,
   onChooseDirectory,
@@ -168,6 +148,7 @@ export function SettingsDialog({
   onRefreshCalendarCollections,
   onUpdateCalendarCollections,
   onTestCalendarAccount,
+  onTestCalendarAccountInput,
   onDeleteCalendarAccount,
 }) {
   const [activeTab, setActiveTab] = useState(initialSection);
@@ -275,6 +256,7 @@ export function SettingsDialog({
                 onSaveConnection={onSave}
                 onDeleteConnection={onDelete}
                 onTestConnection={onTest}
+                onTestConnectionInput={onTestConnectionInput}
                 onSaveSubscription={onSaveCalendarSubscription}
                 onSaveCalDav={onSaveCalDavAccount}
                 onConnectGoogle={onConnectGoogleAccount}
@@ -283,6 +265,7 @@ export function SettingsDialog({
                 onRefreshCalendars={onRefreshCalendarCollections}
                 onUpdateCollections={onUpdateCalendarCollections}
                 onTestCalendar={onTestCalendarAccount}
+                onTestCalendarInput={onTestCalendarAccountInput}
                 onDeleteCalendar={onDeleteCalendarAccount}
               />
             )}
@@ -1074,21 +1057,25 @@ function QuickCaptureSettingsTab({ settings, terminalShortcuts, onSave }) {
   );
 }
 
-function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, onSaveConnection, onDeleteConnection, onTestConnection, onSaveSubscription, onSaveCalDav, onConnectGoogle, onCancelGoogle, onUpdateService, onRefreshCalendars, onUpdateCollections, onTestCalendar, onDeleteCalendar }) {
+function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, onSaveConnection, onDeleteConnection, onTestConnection, onTestConnectionInput, onSaveSubscription, onSaveCalDav, onConnectGoogle, onCancelGoogle, onUpdateService, onRefreshCalendars, onUpdateCollections, onTestCalendar, onTestCalendarInput, onDeleteCalendar }) {
   const [editor, setEditor] = useState(null);
   const [fields, setFields] = useState({});
   const [calendarKind, setCalendarKind] = useState("caldav");
   const [busyKey, setBusyKey] = useState("");
   const [editorError, setEditorError] = useState("");
+  const [editorTestResult, setEditorTestResult] = useState(null);
   const [actionNotice, setActionNotice] = useState("");
   const [testResults, setTestResults] = useState({});
   const googleConnectRunRef = useRef(0);
+  const editorTestRunRef = useRef(0);
 
   function resetEditor(nextEditor = null, nextFields = {}, nextCalendarKind = "caldav") {
+    editorTestRunRef.current += 1;
     setEditor(nextEditor);
     setFields(nextFields);
     setCalendarKind(nextCalendarKind);
     setEditorError("");
+    setEditorTestResult(null);
     setBusyKey("");
   }
 
@@ -1127,7 +1114,17 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
   }
 
   function setField(name, value) {
+    editorTestRunRef.current += 1;
+    setEditorTestResult(null);
     setFields((current) => ({ ...current, [name]: value }));
+  }
+
+  function changeCalendarKind(value) {
+    editorTestRunRef.current += 1;
+    setCalendarKind(value);
+    setFields(value === "ical" ? { color: "#64748b" } : {});
+    setEditorError("");
+    setEditorTestResult(null);
   }
 
   async function submitDeveloper(event) {
@@ -1247,6 +1244,38 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
     }
   }
 
+  async function testEditorConnection() {
+    const run = editorTestRunRef.current + 1;
+    editorTestRunRef.current = run;
+    setEditorTestResult({ ok: null, message: "Testing connection..." });
+    try {
+      const result = ["github", "gitlab", "trello"].includes(editor.type)
+        ? await onTestConnectionInput({
+          id: editor.mode === "edit" ? editor.id : null,
+          provider: editor.type,
+          name: fields.name || "",
+          baseUrl: editor.type === "trello" ? TRELLO_BASE_URL : fields.baseUrl || "",
+          apiKey: editor.type === "trello" ? fields.apiKey || "" : null,
+          token: fields.token || "",
+        })
+        : await onTestCalendarInput({
+          id: editor.mode === "edit" ? editor.id : null,
+          provider: calendarKind,
+          serverUrl: calendarKind === "caldav" ? fields.serverUrl || "" : null,
+          username: calendarKind === "caldav" ? fields.username || "" : null,
+          password: calendarKind === "caldav" ? fields.password || "" : null,
+          url: calendarKind === "ical" ? fields.url || "" : null,
+        });
+      if (editorTestRunRef.current !== run) return;
+      setEditorTestResult(["github", "gitlab", "trello"].includes(editor.type)
+        ? result
+        : { ok: true, message: result });
+    } catch (error) {
+      if (editorTestRunRef.current !== run) return;
+      setEditorTestResult({ ok: false, message: error?.message || String(error) });
+    }
+  }
+
   const tokenUrl = editor && ["github", "gitlab", "trello"].includes(editor.type)
     ? credentialUrl(editor.type, fields.baseUrl || "", fields.apiKey || "")
     : "";
@@ -1285,7 +1314,15 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
         {["github", "gitlab", "trello"].includes(editor.type) && (
           <form className="grid max-h-[75vh] gap-3 overflow-y-auto pr-1" onSubmit={submitDeveloper}>
             <Field><FieldLabel>Connection name</FieldLabel><Input value={fields.name || ""} onChange={(event) => setField("name", event.target.value)} required /></Field>
-            {editor.type === "trello" ? <p className="rounded-md border bg-background p-3 text-sm text-muted-foreground">Trello uses the fixed cloud API. Enter the API key and token from your Trello developer app.</p> : (
+            {editor.type === "trello" ? <div className="rounded-md border bg-background p-3 text-sm text-muted-foreground">
+              <p>Get an API key, paste it below, then generate an API token for your account.</p>
+              <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs">
+                <a className="font-medium text-blue-700 underline-offset-2 hover:underline dark:text-blue-300" href={TRELLO_CREDENTIAL_URLS.apps} target="_blank" rel="noreferrer">Trello app administration</a>
+                <a className="font-medium text-blue-700 underline-offset-2 hover:underline dark:text-blue-300" href={TRELLO_CREDENTIAL_URLS.powerUps} target="_blank" rel="noreferrer">Power-Up administration</a>
+                <a className="font-medium text-blue-700 underline-offset-2 hover:underline dark:text-blue-300" href={TRELLO_CREDENTIAL_URLS.legacyAppKey} target="_blank" rel="noreferrer">Legacy app-key page</a>
+                <a className="font-medium text-blue-700 underline-offset-2 hover:underline dark:text-blue-300" href={TRELLO_CREDENTIAL_URLS.setupGuide} target="_blank" rel="noreferrer">Trello API setup guide</a>
+              </div>
+            </div> : (
               <Field><FieldLabel>{editor.type === "github" ? "GitHub server" : "GitLab server"}</FieldLabel><Input value={fields.baseUrl || ""} onChange={(event) => setField("baseUrl", event.target.value)} required /></Field>
             )}
             {editor.type === "trello" && <Field><FieldLabel>API key</FieldLabel><Input type="password" value={fields.apiKey || ""} onChange={(event) => setField("apiKey", event.target.value)} required /></Field>}
@@ -1294,7 +1331,7 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
               <Input type="password" value={fields.token || ""} onChange={(event) => setField("token", event.target.value)} required />
               <div className="grid gap-1 text-xs text-muted-foreground"><p>{permissionHints[editor.type]}</p>{tokenUrl ? <a className="font-medium text-blue-700 underline-offset-2 hover:underline dark:text-blue-300" href={tokenUrl} target="_blank" rel="noreferrer">Generate token</a> : editor.type === "trello" ? <span>Enter an API key to generate a token.</span> : null}</div>
             </Field>
-            <EditorFooter busy={busyKey === "editor"} submitLabel={editor.mode === "edit" ? "Update connection" : `Add ${editorProviderLabel}`} error={editorError} onCancel={closeAccountEditor} />
+            <EditorFooter busy={busyKey === "editor"} submitLabel={editor.mode === "edit" ? "Update connection" : `Add ${editorProviderLabel}`} error={editorError} testResult={editorTestResult} onTest={testEditorConnection} onCancel={closeAccountEditor} />
           </form>
         )}
 
@@ -1309,7 +1346,7 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
 
       {editor?.type === "calendar" && <Modal title={editor.mode === "edit" ? "Edit calendar" : "Add calendar"} onClose={() => resetEditor()} contentClassName="sm:max-w-xl">
         <form className="grid max-h-[75vh] gap-3 overflow-y-auto pr-1" onSubmit={submitCalendar}>
-          <Field><FieldLabel>Calendar type</FieldLabel><SelectControl value={calendarKind} disabled={editor.mode === "edit"} onValueChange={(value) => { setCalendarKind(value); setFields(value === "ical" ? { color: "#64748b" } : {}); setEditorError(""); }} options={calendarKindOptions} /></Field>
+          <Field><FieldLabel>Calendar type</FieldLabel><SelectControl value={calendarKind} disabled={editor.mode === "edit"} onValueChange={changeCalendarKind} options={calendarKindOptions} /></Field>
           <Field><FieldLabel>{calendarKind === "ical" ? "Calendar name" : "Account name"}</FieldLabel><Input value={fields.name || ""} onChange={(event) => setField("name", event.target.value)} required /></Field>
           {calendarKind === "caldav" ? <>
             <Field><FieldLabel>Server URL</FieldLabel><Input value={fields.serverUrl || ""} onChange={(event) => setField("serverUrl", event.target.value)} placeholder="https://calendar.example.com" required /></Field>
@@ -1321,7 +1358,7 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
             <Field><FieldLabel>Color</FieldLabel><input className="h-9 w-14 cursor-pointer rounded-md border bg-background p-1" type="color" value={fields.color || "#64748b"} onChange={(event) => setField("color", event.target.value)} /></Field>
             <p className="rounded-md border bg-background p-3 text-sm text-muted-foreground">Treat this URL like a password. It is stored in the app’s local database and never displayed again.</p>
           </>}
-          <EditorFooter busy={busyKey === "editor"} submitLabel={editor.mode === "edit" ? (calendarKind === "caldav" ? "Reconnect account" : "Update subscription") : (calendarKind === "caldav" ? "Connect CalDAV" : "Add calendar")} error={editorError} onCancel={() => resetEditor()} />
+          <EditorFooter busy={busyKey === "editor"} submitLabel={editor.mode === "edit" ? (calendarKind === "caldav" ? "Reconnect account" : "Update subscription") : (calendarKind === "caldav" ? "Connect CalDAV" : "Add calendar")} error={editorError} testResult={editorTestResult} onTest={testEditorConnection} onCancel={() => resetEditor()} />
         </form>
       </Modal>}
 
@@ -1333,8 +1370,24 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
   );
 }
 
-function EditorFooter({ busy, submitLabel, error, onCancel }) {
-  return <><>{error && <p className="rounded-md border bg-background p-3 text-sm text-destructive">{error}</p>}</><div className="flex gap-2"><Button type="submit" disabled={busy}>{busy && <LoaderCircle className="animate-spin" />}{submitLabel}</Button><Button type="button" variant="outline" disabled={busy} onClick={onCancel}>Cancel</Button></div></>;
+function EditorFooter({ busy, submitLabel, error, testResult, onTest, onCancel }) {
+  const testing = testResult?.ok === null;
+  return <>
+    {error && <p className="rounded-md border bg-background p-3 text-sm text-destructive">{error}</p>}
+    {testResult && (
+      <div className="flex items-center gap-2 rounded-md border bg-background p-3">
+        <Badge variant={testResult.ok === false ? "destructive" : "secondary"} className={cn(testResult.ok === true && "bg-green-100 text-green-800 dark:bg-green-950/50 dark:text-green-300")}>
+          {testing ? "Testing" : testResult.ok ? "Connected" : "Failed"}
+        </Badge>
+        <span className="text-xs text-muted-foreground">{testResult.message}</span>
+      </div>
+    )}
+    <div className="flex flex-wrap gap-2">
+      <Button type="submit" disabled={busy}>{busy && <LoaderCircle className="animate-spin" />}{submitLabel}</Button>
+      <Button type="button" variant="outline" disabled={busy || testing} onClick={onTest}>{testing && <LoaderCircle className="animate-spin" />}{testing ? "Testing…" : "Test connection"}</Button>
+      <Button type="button" variant="outline" disabled={busy} onClick={onCancel}>Cancel</Button>
+    </div>
+  </>;
 }
 
 function AccountGroup({ group, busyKey, testResults, calendarWarnings: warnings, onEdit, onReconnect, onTest, onRefresh, onDelete, onUpdateService, onUpdateCollections, setActionNotice }) {

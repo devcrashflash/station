@@ -1331,6 +1331,7 @@ function App() {
               };
             }
           }}
+          onTestConnectionInput={(payload) => api.testConnectionInput(payload)}
           onSaveAiPrompt={async (payload) => {
             try {
               await api.saveAiPrompt(payload);
@@ -1437,6 +1438,7 @@ function App() {
             return accounts;
           }}
           onTestCalendarAccount={(accountId) => api.testCalendarAccount({ accountId })}
+          onTestCalendarAccountInput={(payload) => api.testCalendarAccountInput(payload)}
           onDeleteCalendarAccount={async (accountId) => {
             await api.deleteCalendarAccount({ accountId });
             setCalendarAccounts(await api.listCalendarAccounts());

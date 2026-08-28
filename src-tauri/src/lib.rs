@@ -1735,6 +1735,7 @@ pub fn run() {
             list_browser_settings,
             save_browser_settings,
             test_connection,
+            test_connection_input,
             list_directories,
             save_directory,
             delete_directory,
@@ -1750,6 +1751,7 @@ pub fn run() {
             refresh_calendar_collections,
             update_calendar_collections,
             test_calendar_account,
+            test_calendar_account_input,
             delete_calendar_account,
             list_calendar_events,
             sync_calendar_events,
@@ -9224,6 +9226,24 @@ fn test_connection_with_record(connection: &ConnectionRecord) -> TestConnectionR
     }
 }
 
+fn connection_record_from_test_input(input: ConnectionInput) -> ConnectionRecord {
+    let provider = input.provider.trim().to_string();
+    ConnectionRecord {
+        id: input.id.unwrap_or_else(|| "connection_test".to_string()),
+        name: input.name.trim().to_string(),
+        base_url: if provider == "trello" {
+            "https://api.trello.com".to_string()
+        } else {
+            normalize_base_url(&input.base_url)
+        },
+        api_key: input.api_key.map(|value| value.trim().to_string()),
+        token: input.token.trim().to_string(),
+        provider,
+        created_at: 0,
+        updated_at: 0,
+    }
+}
+
 fn connection_test_error_message(provider: &str, message: &str) -> String {
     if message.contains("401") || message.contains("403") {
         format!("{message}. {}", provider_permission_hint(provider))
@@ -11191,6 +11211,13 @@ fn test_connection(
 }
 
 #[tauri::command]
+fn test_connection_input(input: ConnectionInput) -> Result<TestConnectionResult, String> {
+    Ok(test_connection_with_record(
+        &connection_record_from_test_input(input),
+    ))
+}
+
+#[tauri::command]
 fn list_project_connections(
     state: tauri::State<'_, AppState>,
     project_id: String,
@@ -11341,6 +11368,15 @@ fn test_calendar_account(
 ) -> Result<String, String> {
     let db = state.db.lock().map_err(db_error)?;
     calendar::test_account(&db, &account_id)
+}
+
+#[tauri::command]
+fn test_calendar_account_input(
+    state: tauri::State<'_, AppState>,
+    input: calendar::CalendarAccountTestInput,
+) -> Result<String, String> {
+    let db = state.db.lock().map_err(db_error)?;
+    calendar::test_account_input(&db, input)
 }
 
 #[tauri::command]
@@ -16686,6 +16722,25 @@ mod tests {
         .expect("save connection");
 
         assert_eq!(connection.name, "Trello");
+        assert_eq!(connection.base_url, "https://api.trello.com");
+        assert_eq!(connection.api_key.as_deref(), Some("key"));
+        assert_eq!(connection.token, "token");
+    }
+
+    #[test]
+    fn builds_normalized_transient_connection_for_testing() {
+        let connection = connection_record_from_test_input(ConnectionInput {
+            id: None,
+            provider: " trello ".to_string(),
+            name: " Draft Trello ".to_string(),
+            base_url: "https://ignored.example.com".to_string(),
+            api_key: Some(" key ".to_string()),
+            token: " token ".to_string(),
+        });
+
+        assert_eq!(connection.id, "connection_test");
+        assert_eq!(connection.provider, "trello");
+        assert_eq!(connection.name, "Draft Trello");
         assert_eq!(connection.base_url, "https://api.trello.com");
         assert_eq!(connection.api_key.as_deref(), Some("key"));
         assert_eq!(connection.token, "token");

@@ -5,10 +5,12 @@ import {
   api,
   isPullRequestResource,
   normalizeBaseUrl,
+  normalizeConnectionInput,
   normalizeRepoUrl,
   repoUrlFromPullRequestUrl,
   selectBestConnection,
   validateAiPromptForTest,
+  validateCalendarAccountInputForTest,
   validateConnectionForTest,
 } from "./api.js";
 import {
@@ -86,6 +88,44 @@ test("validates local connection test requirements", () => {
     }),
     "",
   );
+});
+
+test("normalizes draft connection test inputs", () => {
+  assert.deepEqual(
+    normalizeConnectionInput({ provider: "trello", baseUrl: "https://ignored.example.com", apiKey: "key", token: "token" }),
+    { provider: "trello", baseUrl: "https://api.trello.com", apiKey: "key", token: "token" },
+  );
+  assert.deepEqual(
+    normalizeConnectionInput({ provider: "gitlab", baseUrl: "gitlab.example.org/", apiKey: "ignored", token: "token" }),
+    { provider: "gitlab", baseUrl: "https://gitlab.example.org", apiKey: null, token: "token" },
+  );
+});
+
+test("validates draft calendar test requirements", () => {
+  assert.equal(validateCalendarAccountInputForTest({ provider: "caldav", serverUrl: "", username: "user", password: "secret" }), "Calendar server URL is required.");
+  assert.equal(validateCalendarAccountInputForTest({ provider: "caldav", serverUrl: "https://calendar.example.com", username: "", password: "secret" }), "Calendar username and password are required.");
+  assert.equal(validateCalendarAccountInputForTest({ provider: "caldav", serverUrl: "https://calendar.example.com", username: "user", password: "secret" }), "");
+  assert.equal(validateCalendarAccountInputForTest({ provider: "ical", url: "", id: null }), "Enter the secret iCal URL.");
+  assert.equal(validateCalendarAccountInputForTest({ provider: "ical", url: "", id: "calendar_1" }), "");
+  assert.equal(validateCalendarAccountInputForTest({ provider: "google" }), "Unsupported calendar provider: google");
+});
+
+test("local draft connection tests do not persist input", async () => {
+  let stored = JSON.stringify({
+    connections: [{ id: "saved", provider: "github", name: "Saved", baseUrl: "https://github.com", token: "saved-token" }],
+  });
+  global.localStorage = {
+    getItem: () => stored,
+    setItem: (_key, value) => { stored = value; },
+  };
+
+  const before = await api.listConnections();
+  const result = await api.testConnectionInput({ provider: "gitlab", name: "Draft", baseUrl: "gitlab.example.org", token: "draft-token" });
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /desktop app/);
+  assert.deepEqual(await api.listConnections(), before);
+  assert.equal(stored.includes("draft-token"), false);
 });
 
 test("validates AI Prompt agents, names, and case-insensitive uniqueness", () => {
