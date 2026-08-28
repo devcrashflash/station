@@ -1227,6 +1227,14 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
     setTestResults((current) => ({ ...current, [id]: result }));
   }
 
+  async function testCalendar(id) {
+    setTestResults((current) => ({ ...current, [id]: { ok: null, message: "Testing connection..." } }));
+    const result = await runAction(`test:${id}`, () => onTestCalendar(id), (message) => message)
+      .then((message) => ({ ok: true, message }))
+      .catch((error) => ({ ok: false, message: error?.message || String(error) }));
+    setTestResults((current) => ({ ...current, [id]: result }));
+  }
+
   const tokenUrl = editor && ["github", "gitlab", "trello"].includes(editor.type)
     ? credentialUrl(editor.type, fields.baseUrl || "", fields.apiKey || "")
     : "";
@@ -1307,7 +1315,7 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
 
       {actionNotice && <p className="rounded-md border bg-muted/30 p-3 text-sm text-muted-foreground">{actionNotice}</p>}
       {savedCount === 0 ? <EmptyState text="No accounts configured." /> : <div className="grid gap-5">
-        {groups.map((group) => group.items.length > 0 && <AccountGroup key={group.id} group={group} busyKey={busyKey} testResults={testResults} calendarWarnings={calendarAccountWarnings} onEdit={group.kind === "developer" ? editConnection : editCalendar} onReconnect={(item) => runAction(`reconnect:${item.id}`, () => onConnectGoogle(item.id), `${item.name} reconnected.`).catch(() => {})} onTest={(item) => group.kind === "developer" ? testDeveloper(item.id) : runAction(`test:${item.id}`, () => onTestCalendar(item.id), (message) => message).catch(() => {})} onRefresh={(item) => runAction(`refresh:${item.id}`, () => onRefreshCalendars(item.id), "Calendars refreshed.").catch(() => {})} onDelete={(item) => runAction(`delete:${item.id}`, () => group.kind === "developer" ? onDeleteConnection(item.id) : onDeleteCalendar(item.id), "Account removed.").then(() => { if (editor?.id === item.id) resetEditor(); }).catch(() => {})} onUpdateService={(item, enabled) => runAction(`service:${item.id}`, () => onUpdateService(item.id, enabled), enabled ? "Google Calendar enabled." : "Google Calendar paused.").catch(() => {})} onUpdateCollections={onUpdateCollections} setActionNotice={setActionNotice} />)}
+        {groups.map((group) => group.items.length > 0 && <AccountGroup key={group.id} group={group} busyKey={busyKey} testResults={testResults} calendarWarnings={calendarAccountWarnings} onEdit={group.kind === "developer" ? editConnection : editCalendar} onReconnect={(item) => runAction(`reconnect:${item.id}`, () => onConnectGoogle(item.id), `${item.name} reconnected.`).catch(() => {})} onTest={(item) => group.kind === "developer" ? testDeveloper(item.id) : testCalendar(item.id)} onRefresh={(item) => runAction(`refresh:${item.id}`, () => onRefreshCalendars(item.id), "Calendars refreshed.").catch(() => {})} onDelete={(item) => runAction(`delete:${item.id}`, () => group.kind === "developer" ? onDeleteConnection(item.id) : onDeleteCalendar(item.id), "Account removed.").then(() => { if (editor?.id === item.id) resetEditor(); }).catch(() => {})} onUpdateService={(item, enabled) => runAction(`service:${item.id}`, () => onUpdateService(item.id, enabled), enabled ? "Google Calendar enabled." : "Google Calendar paused.").catch(() => {})} onUpdateCollections={onUpdateCollections} setActionNotice={setActionNotice} />)}
       </div>}
     </div>
   );
