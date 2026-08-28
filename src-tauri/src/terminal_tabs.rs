@@ -5,7 +5,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{mpsc, Mutex, OnceLock},
     thread,
 };
 use tauri::{
@@ -292,10 +292,29 @@ struct TerminalSession {
     generation: u64,
     process_id: Option<u32>,
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    input: mpsc::Sender<Vec<u8>>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     attachment: Option<TerminalAttachment>,
     detached_output: DetachedOutputBuffer,
+}
+
+fn start_terminal_writer<F>(
+    mut writer: Box<dyn Write + Send>,
+    queued_input: mpsc::Receiver<Vec<u8>>,
+    on_error: F,
+) -> thread::JoinHandle<()>
+where
+    F: FnOnce(String) + Send + 'static,
+{
+    thread::spawn(move || {
+        for data in queued_input {
+            let result = writer.write_all(&data).and_then(|()| writer.flush());
+            if let Err(error) = result {
+                on_error(error.to_string());
+                break;
+            }
+        }
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2882,7 +2901,7 @@ fn route_terminal_output(
     true
 }
 
-fn route_terminal_reader_error(
+fn route_terminal_io_error(
     app: &tauri::AppHandle,
     pane_id: &str,
     generation: u64,
@@ -2941,8 +2960,9 @@ fn spawn_terminal_session(
     let mut reader = pair.master.try_clone_reader().map_err(db_error)?;
     let writer = pair.master.take_writer().map_err(db_error)?;
     let mut killer = child.clone_killer();
+    let (input, queued_input) = mpsc::channel::<Vec<u8>>();
 
-    let (generation, attachment_id) = {
+    let (generation, attachment_id, flush_pending_input) = {
         let mut runtime = state.runtime.lock().map_err(db_error)?;
         if let Err(error) = validate_pane(&runtime, tab_id, pane_id) {
             let _ = killer.kill();
@@ -2951,6 +2971,15 @@ fn spawn_terminal_session(
         terminate_session(&mut runtime, pane_id);
         let generation = runtime.next_generation;
         runtime.next_generation += 1;
+        let flush_pending_input = !runtime.startup_input_gates.contains(tab_id);
+        if flush_pending_input {
+            // Keep input queued until the reader is ready to drain echoed output.
+            // Otherwise a large paste can fill both sides of the PTY and deadlock.
+            runtime
+                .pending_input
+                .entry(pane_id.to_string())
+                .or_default();
+        }
         let attachment_id = next_attachment_id(&mut runtime);
         runtime.sessions.insert(
             pane_id.to_string(),
@@ -2958,7 +2987,7 @@ fn spawn_terminal_session(
                 generation,
                 process_id,
                 master: pair.master,
-                writer,
+                input,
                 killer,
                 attachment: Some(TerminalAttachment {
                     id: attachment_id,
@@ -2968,13 +2997,6 @@ fn spawn_terminal_session(
                 detached_output: DetachedOutputBuffer::default(),
             },
         );
-        if !runtime.startup_input_gates.contains(tab_id) {
-            if let Some(data) = runtime.pending_input.remove(pane_id) {
-                let session = runtime.sessions.get_mut(pane_id).unwrap();
-                session.writer.write_all(&data).map_err(db_error)?;
-                session.writer.flush().map_err(db_error)?;
-            }
-        }
         let tab = runtime
             .tabs
             .iter_mut()
@@ -2987,12 +3009,20 @@ fn spawn_terminal_session(
             *running = true;
             *exit_code = None;
         }
-        (generation, attachment_id)
+        (generation, attachment_id, flush_pending_input)
     };
+
+    let writer_app = app.clone();
+    let writer_pane_id = pane_id.to_string();
+    let _writer_worker = start_terminal_writer(writer, queued_input, move |message| {
+        route_terminal_io_error(&writer_app, &writer_pane_id, generation, message);
+    });
 
     let reader_app = app.clone();
     let reader_pane_id = pane_id.to_string();
+    let (reader_ready, wait_for_reader) = mpsc::sync_channel(0);
     thread::spawn(move || {
+        let _ = reader_ready.send(());
         let mut buffer = vec![0_u8; 16 * 1024];
         loop {
             match reader.read(&mut buffer) {
@@ -3008,7 +3038,7 @@ fn spawn_terminal_session(
                     }
                 }
                 Err(error) => {
-                    route_terminal_reader_error(
+                    route_terminal_io_error(
                         &reader_app,
                         &reader_pane_id,
                         generation,
@@ -3019,6 +3049,21 @@ fn spawn_terminal_session(
             }
         }
     });
+    wait_for_reader.recv().map_err(db_error)?;
+
+    if flush_pending_input {
+        let mut runtime = state.runtime.lock().map_err(db_error)?;
+        let data = runtime.pending_input.remove(pane_id).unwrap_or_default();
+        if !data.is_empty() {
+            runtime
+                .sessions
+                .get(pane_id)
+                .ok_or_else(|| "The terminal process is not running.".to_string())?
+                .input
+                .send(data)
+                .map_err(db_error)?;
+        }
+    }
 
     let wait_app = app.clone();
     let wait_tab_id = tab_id.to_string();
@@ -3201,13 +3246,9 @@ pub fn terminal_write(
     }
     let session = runtime
         .sessions
-        .get_mut(&pane_id)
+        .get(&pane_id)
         .ok_or_else(|| "The terminal process is not running.".to_string())?;
-    session
-        .writer
-        .write_all(data.as_bytes())
-        .map_err(db_error)?;
-    session.writer.flush().map_err(db_error)
+    session.input.send(data.into_bytes()).map_err(db_error)
 }
 
 #[tauri::command]
@@ -3244,10 +3285,9 @@ fn complete_terminal_startup_input_inner(
         if let Some(suffix) = runtime.pending_input.remove(&pane_id) {
             ordered_input.extend_from_slice(&suffix);
         }
-        if let Some(session) = runtime.sessions.get_mut(&pane_id) {
+        if let Some(session) = runtime.sessions.get(&pane_id) {
             if !ordered_input.is_empty() {
-                session.writer.write_all(&ordered_input).map_err(db_error)?;
-                session.writer.flush().map_err(db_error)?;
+                session.input.send(ordered_input).map_err(db_error)?;
             }
         } else {
             // Keep an empty entry as a startup marker so input arriving between
@@ -3399,9 +3439,45 @@ pub fn terminal_set_cwd(
 mod tests {
     use super::*;
     use std::{
+        io,
         sync::{Arc, Barrier},
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
+
+    struct BlockingWriter {
+        entered: Arc<Barrier>,
+        release: Arc<Barrier>,
+        output: Arc<Mutex<Vec<u8>>>,
+        block_first_write: bool,
+    }
+
+    impl Write for BlockingWriter {
+        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+            if self.block_first_write {
+                self.block_first_write = false;
+                self.entered.wait();
+                self.release.wait();
+            }
+            self.output.lock().unwrap().extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _data: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "writer failed"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn runtime(ids: &[&str], active: &str) -> TerminalTabsRuntime {
         TerminalTabsRuntime {
@@ -3530,6 +3606,57 @@ mod tests {
                 .unwrap(),
             b"df -h\r"
         );
+    }
+
+    #[test]
+    fn terminal_writer_queues_input_without_waiting_and_preserves_fifo_bytes() {
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let (input, queued_input) = mpsc::channel();
+        let worker = start_terminal_writer(
+            Box::new(BlockingWriter {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                output: Arc::clone(&output),
+                block_first_write: true,
+            }),
+            queued_input,
+            |_| panic!("terminal writer unexpectedly failed"),
+        );
+        let paste = "php -r 'echo ’;'".repeat(512).into_bytes();
+
+        input.send(paste.clone()).unwrap();
+        entered.wait();
+        input
+            .send(b"\rordinary typing".to_vec())
+            .expect("input enqueue must not wait for the blocked PTY writer");
+        release.wait();
+        drop(input);
+        worker.join().unwrap();
+
+        let mut expected = paste;
+        expected.extend_from_slice(b"\rordinary typing");
+        assert_eq!(*output.lock().unwrap(), expected);
+    }
+
+    #[test]
+    fn terminal_writer_reports_io_errors_and_stops_accepting_input() {
+        let (input, queued_input) = mpsc::channel();
+        let (errors, reported_errors) = mpsc::sync_channel(1);
+        let worker = start_terminal_writer(Box::new(FailingWriter), queued_input, move |message| {
+            errors.send(message).unwrap();
+        });
+
+        input.send(b"large paste".to_vec()).unwrap();
+        assert_eq!(
+            reported_errors
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap(),
+            "writer failed"
+        );
+        worker.join().unwrap();
+        assert!(input.send(b"after failure".to_vec()).is_err());
     }
 
     #[test]
