@@ -265,7 +265,7 @@ export function SettingsDialog({
           </div>
         </nav>
 
-        <main className="min-h-0 overflow-y-auto px-4 py-5 sm:px-8 sm:py-6">
+        <main className="min-h-0 overflow-y-auto px-4 py-5 sm:px-8 sm:py-6" style={activeTab === "accounts" ? { overflowAnchor: "none" } : undefined}>
           <div className="mx-auto grid w-full max-w-3xl gap-6">
             {activeTab === "accounts" && (
               <AccountsSettingsTab
@@ -1222,17 +1222,29 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
   }
 
   async function testDeveloper(id) {
+    setBusyKey(`test:${id}`);
     setTestResults((current) => ({ ...current, [id]: { ok: null, message: "Testing connection..." } }));
-    const result = await runAction(`test:${id}`, () => onTestConnection(id), "Connection tested.").catch((error) => ({ ok: false, message: error?.message || String(error) }));
-    setTestResults((current) => ({ ...current, [id]: result }));
+    try {
+      const result = await onTestConnection(id);
+      setTestResults((current) => ({ ...current, [id]: result }));
+    } catch (error) {
+      setTestResults((current) => ({ ...current, [id]: { ok: false, message: error?.message || String(error) } }));
+    } finally {
+      setBusyKey("");
+    }
   }
 
   async function testCalendar(id) {
+    setBusyKey(`test:${id}`);
     setTestResults((current) => ({ ...current, [id]: { ok: null, message: "Testing connection..." } }));
-    const result = await runAction(`test:${id}`, () => onTestCalendar(id), (message) => message)
-      .then((message) => ({ ok: true, message }))
-      .catch((error) => ({ ok: false, message: error?.message || String(error) }));
-    setTestResults((current) => ({ ...current, [id]: result }));
+    try {
+      const message = await onTestCalendar(id);
+      setTestResults((current) => ({ ...current, [id]: { ok: true, message } }));
+    } catch (error) {
+      setTestResults((current) => ({ ...current, [id]: { ok: false, message: error?.message || String(error) } }));
+    } finally {
+      setBusyKey("");
+    }
   }
 
   const tokenUrl = editor && ["github", "gitlab", "trello"].includes(editor.type)
@@ -1337,6 +1349,7 @@ function AccountGroup({ group, busyKey, testResults, calendarWarnings: warnings,
       {group.items.map((item) => {
         const isDeveloper = group.kind === "developer";
         const result = testResults[item.id];
+        const isTesting = busyKey === `test:${item.id}`;
         const reconnectWarnings = item.provider === "google"
           ? warnings.filter((warning) => warning.accountId === item.id && warning.reconnectable)
           : [];
@@ -1360,8 +1373,8 @@ function AccountGroup({ group, busyKey, testResults, calendarWarnings: warnings,
               <Button size="icon-sm" variant="ghost" title={item.provider === "google" ? "Reconnect account" : "Edit account"} onClick={() => onEdit(item)}>
                 <Pencil />
               </Button>
-              <Button size="icon-sm" variant="ghost" title="Test account" disabled={Boolean(busyKey)} onClick={() => onTest(item)}>
-                {busyKey === `test:${item.id}` ? <LoaderCircle className="animate-spin" /> : <PlugZap />}
+              <Button size="icon-sm" variant="ghost" title="Test account" aria-disabled={isTesting || undefined} disabled={Boolean(busyKey) && !isTesting} onClick={() => { if (!busyKey) onTest(item); }}>
+                {isTesting ? <LoaderCircle className="animate-spin" /> : <PlugZap />}
               </Button>
               {!isDeveloper && (
                 <Button size="icon-sm" variant="ghost" title="Refresh calendars" disabled={Boolean(busyKey)} onClick={() => onRefresh(item)}>
