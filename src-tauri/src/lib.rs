@@ -5678,6 +5678,21 @@ fn list_connections_in_db(db: &SqliteConnection) -> rusqlite::Result<Vec<Connect
     Ok(connections)
 }
 
+fn select_activity_sync_connections(
+    connections: Vec<ConnectionRecord>,
+    requested_ids: Option<&HashSet<String>>,
+) -> Vec<ConnectionRecord> {
+    connections
+        .into_iter()
+        .filter(|connection| {
+            requested_ids.map_or(true, |ids| {
+                ids.contains(&connection.id)
+                    && matches!(connection.provider.as_str(), "github" | "gitlab" | "trello")
+            })
+        })
+        .collect()
+}
+
 fn deterministic_activity_id(provider: &str, connection_id: &str, external_id: &str) -> String {
     format!("{provider}:{connection_id}:{external_id}")
 }
@@ -11327,6 +11342,7 @@ async fn sync_activities(
     date: String,
     start_at: i64,
     end_at: i64,
+    connection_ids: Option<Vec<String>>,
 ) -> Result<ActivityResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let db_path = app.state::<AppState>().db_path.clone();
@@ -11334,57 +11350,58 @@ async fn sync_activities(
         db.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(db_error)?;
         let fetched_at = now_millis();
-        list_connections_in_db(&db)
-            .map_err(db_error)?
-            .into_iter()
-            .try_for_each(|connection| {
-                let result = validate_connection_credentials(&connection).and_then(|_| {
-                    fetch_connection_activities(&connection, &date, start_at, end_at)
-                });
+        let requested_ids = connection_ids.map(|ids| ids.into_iter().collect::<HashSet<_>>());
+        select_activity_sync_connections(
+            list_connections_in_db(&db).map_err(db_error)?,
+            requested_ids.as_ref(),
+        )
+        .into_iter()
+        .try_for_each(|connection| {
+            let result = validate_connection_credentials(&connection)
+                .and_then(|_| fetch_connection_activities(&connection, &date, start_at, end_at));
 
-                match result {
-                    Ok(activities) => {
-                        if connection.provider == "gitlab" {
-                            replace_gitlab_activity_sync_in_db(
-                                &mut db,
-                                &connection.id,
-                                &date,
-                                start_at,
-                                end_at,
-                                &activities,
-                                fetched_at,
-                            )
-                            .map_err(db_error)?;
-                        } else {
-                            for activity in activities {
-                                upsert_activity_in_db(&db, &activity, fetched_at)
-                                    .map_err(db_error)?;
-                            }
-                            save_activity_sync_run_in_db(
-                                &db,
-                                &connection.id,
-                                &date,
-                                "success",
-                                None,
-                                fetched_at,
-                            )
-                            .map_err(db_error)?;
+            match result {
+                Ok(activities) => {
+                    if connection.provider == "gitlab" {
+                        replace_gitlab_activity_sync_in_db(
+                            &mut db,
+                            &connection.id,
+                            &date,
+                            start_at,
+                            end_at,
+                            &activities,
+                            fetched_at,
+                        )
+                        .map_err(db_error)?;
+                    } else {
+                        for activity in activities {
+                            upsert_activity_in_db(&db, &activity, fetched_at).map_err(db_error)?;
                         }
-                    }
-                    Err(error) => {
                         save_activity_sync_run_in_db(
                             &db,
                             &connection.id,
                             &date,
-                            "failed",
-                            Some(&connection_test_error_message(&connection.provider, &error)),
+                            "success",
+                            None,
                             fetched_at,
                         )
                         .map_err(db_error)?;
                     }
                 }
-                Ok::<(), String>(())
-            })?;
+                Err(error) => {
+                    save_activity_sync_run_in_db(
+                        &db,
+                        &connection.id,
+                        &date,
+                        "failed",
+                        Some(&connection_test_error_message(&connection.provider, &error)),
+                        fetched_at,
+                    )
+                    .map_err(db_error)?;
+                }
+            }
+            Ok::<(), String>(())
+        })?;
 
         list_activities_in_db(&db, &date, start_at, end_at)
     })
@@ -11749,6 +11766,51 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         }
+    }
+
+    #[test]
+    fn filters_activity_sync_connections_when_ids_are_provided() {
+        let connections = vec![
+            connection_record("github", None, "token"),
+            connection_record("gitlab", None, "token"),
+            connection_record("trello", Some("key"), "token"),
+            connection_record("unsupported", None, "token"),
+        ];
+        let requested = HashSet::from([
+            "gitlab_1".to_string(),
+            "unsupported_1".to_string(),
+            "missing_1".to_string(),
+        ]);
+
+        let selected = select_activity_sync_connections(connections, Some(&requested));
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|connection| connection.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gitlab_1"]
+        );
+    }
+
+    #[test]
+    fn empty_activity_sync_connection_filter_selects_nothing() {
+        let connections = vec![
+            connection_record("github", None, "token"),
+            connection_record("gitlab", None, "token"),
+        ];
+
+        assert!(select_activity_sync_connections(connections, Some(&HashSet::new())).is_empty());
+    }
+
+    #[test]
+    fn omitted_activity_sync_connection_filter_preserves_manual_sync_behavior() {
+        let connections = vec![
+            connection_record("github", None, "token"),
+            connection_record("unsupported", None, "token"),
+        ];
+
+        assert_eq!(select_activity_sync_connections(connections, None).len(), 2);
     }
 
     fn smart_inbox_provider_item(

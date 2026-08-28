@@ -1,6 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { formatLocalDate, localDayBounds, sortActivities } from "./activity.js";
+import {
+  ACTIVITY_SYNC_PROVIDERS,
+  formatLocalDate,
+  localDayBounds,
+  sortActivities,
+} from "./activity.js";
 import { EMAIL_DESKTOP_REQUIRED_MESSAGE, OCR_DESKTOP_REQUIRED_MESSAGE } from "./ocr.js";
 import { AI_PROMPT_ICON_IDS } from "./aiPromptIcons.js";
 import {
@@ -368,6 +373,9 @@ function activityRequestPayload(payload) {
   return {
     date,
     ...bounds,
+    ...(Array.isArray(payload?.connectionIds)
+      ? { connectionIds: payload.connectionIds }
+      : {}),
   };
 }
 
@@ -1800,17 +1808,28 @@ const local = {
     const state = readState();
     const timestamp = now();
     state.activitySyncRuns = state.activitySyncRuns || [];
-    const nextRuns = (state.connections || []).map((connection) => ({
-      connectionId: connection.id,
-      connectionName: connection.name,
-      provider: connection.provider,
-      date: payload.date,
-      status: "failed",
-      warning: "Remote activity sync requires the desktop app.",
-      syncedAt: timestamp,
-    }));
+    const requestedConnectionIds = Object.hasOwn(payload || {}, "connectionIds")
+      ? new Set(payload.connectionIds || [])
+      : null;
+    const nextRuns = (state.connections || [])
+      .filter((connection) => !requestedConnectionIds || (
+        requestedConnectionIds.has(connection.id)
+        && ACTIVITY_SYNC_PROVIDERS.has(connection.provider)
+      ))
+      .map((connection) => ({
+        connectionId: connection.id,
+        connectionName: connection.name,
+        provider: connection.provider,
+        date: payload.date,
+        status: "failed",
+        warning: "Remote activity sync requires the desktop app.",
+        syncedAt: timestamp,
+      }));
+    const syncedConnectionIds = new Set(nextRuns.map((run) => run.connectionId));
     state.activitySyncRuns = [
-      ...(state.activitySyncRuns || []).filter((run) => run.date !== payload.date),
+      ...(state.activitySyncRuns || []).filter((run) => (
+        run.date !== payload.date || !syncedConnectionIds.has(run.connectionId)
+      )),
       ...nextRuns,
     ];
     writeState(state);

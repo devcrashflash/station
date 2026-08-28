@@ -42,8 +42,9 @@ import {
   isTrelloPositionOnlyActivity,
   latestActivitySyncAt,
   parseLocalDate,
-  shouldAutoSyncActivity,
+  recentActivityDates,
   sortActivities,
+  staleActivityConnectionIds,
   syncWarningMessages,
   timelineItemsToCsv,
 } from "@/lib/activity";
@@ -573,13 +574,21 @@ async function copyTextToClipboard(text) {
   if (!copied) throw new Error("Could not copy text.");
 }
 
-export function useActivityData({ date, enabled = true, onError }) {
+export function useActivityData({
+  date,
+  connections = [],
+  enabled = true,
+  onError,
+  startupSyncEnabled = false,
+}) {
   const [resultsByDate, setResultsByDate] = useState(() => new Map());
   const [isSyncing, setIsSyncing] = useState(false);
   const onErrorRef = useRef(onError);
   const resultsByDateRef = useRef(resultsByDate);
   const currentDateRef = useRef(date);
   const syncsByDateRef = useRef(new Map());
+  const syncQueueRef = useRef(Promise.resolve());
+  const startupSyncStartedRef = useRef(false);
 
   currentDateRef.current = date;
 
@@ -609,35 +618,44 @@ export function useActivityData({ date, enabled = true, onError }) {
     return result;
   }, [date, storeResult]);
 
-  const syncDate = useCallback((targetDate, waitForPaint = false) => {
+  const syncDate = useCallback((targetDate, {
+    connectionIds,
+    quiet = false,
+    waitForPaint = false,
+  } = {}) => {
     const pending = syncsByDateRef.current.get(targetDate);
-    if (pending) return pending;
+    if (pending) {
+      if (!quiet) pending.reportErrors = true;
+      return pending.promise;
+    }
 
-    const promise = (async () => {
+    const entry = { promise: null, reportErrors: !quiet };
+    entry.promise = syncQueueRef.current.catch(() => {}).then(async () => {
       if (currentDateRef.current === targetDate) setIsSyncing(true);
       if (waitForPaint) await waitForNextPaint();
       try {
-        const result = await api.syncActivities({ date: targetDate });
+        const result = await api.syncActivities({ date: targetDate, connectionIds });
         storeResult(targetDate, result);
         return result;
       } catch (error) {
-        onErrorRef.current?.(error);
+        if (entry.reportErrors) onErrorRef.current?.(error);
         return loadCached(targetDate);
       } finally {
         syncsByDateRef.current.delete(targetDate);
         if (currentDateRef.current === targetDate) setIsSyncing(false);
       }
-    })();
+    });
 
-    syncsByDateRef.current.set(targetDate, promise);
-    return promise;
+    syncsByDateRef.current.set(targetDate, entry);
+    syncQueueRef.current = entry.promise;
+    return entry.promise;
   }, [loadCached, storeResult]);
 
   const sync = useCallback(async () => {
     if (!enabled) {
       return { activities, syncRuns };
     }
-    return syncDate(date, true);
+    return syncDate(date, { waitForPaint: true });
   }, [activities, date, enabled, syncDate, syncRuns]);
 
   useEffect(() => {
@@ -649,10 +667,16 @@ export function useActivityData({ date, enabled = true, onError }) {
       try {
         const cached = resultsByDateRef.current.get(date);
         const result = cached || await loadCached(date);
-        if (cancelled || !enabled || !shouldAutoSyncActivity(date, result.syncRuns || [])) return;
+        if (cancelled || !enabled) return;
+        const connectionIds = staleActivityConnectionIds({
+          date,
+          connections,
+          syncRuns: result.syncRuns || [],
+        });
+        if (!connectionIds.length) return;
 
         syncTimer = window.setTimeout(() => {
-          if (!cancelled) void syncDate(date);
+          if (!cancelled) void syncDate(date, { connectionIds });
         }, 250);
       } catch (error) {
         if (!cancelled) onErrorRef.current?.(error);
@@ -667,7 +691,31 @@ export function useActivityData({ date, enabled = true, onError }) {
         window.clearTimeout(syncTimer);
       }
     };
-  }, [date, enabled, loadCached, syncDate]);
+  }, [connections, date, enabled, loadCached, syncDate]);
+
+  useEffect(() => {
+    if (!startupSyncEnabled || startupSyncStartedRef.current) return;
+    startupSyncStartedRef.current = true;
+
+    async function startBackgroundSync() {
+      const dates = recentActivityDates();
+      const cachedResults = await Promise.all(dates.map((targetDate) => loadCached(targetDate)));
+
+      for (let index = 0; index < dates.length; index += 1) {
+        const targetDate = dates[index];
+        const connectionIds = staleActivityConnectionIds({
+          date: targetDate,
+          connections,
+          syncRuns: cachedResults[index].syncRuns || [],
+        });
+        if (connectionIds.length) {
+          void syncDate(targetDate, { connectionIds, quiet: true }).catch(() => {});
+        }
+      }
+    }
+
+    void startBackgroundSync().catch(() => {});
+  }, [connections, loadCached, startupSyncEnabled, syncDate]);
 
   return {
     activities,

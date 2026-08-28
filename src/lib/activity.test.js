@@ -17,8 +17,10 @@ import {
   isTrelloPositionOnlyActivity,
   isPastLocalDate,
   localDayBounds,
+  recentActivityDates,
   shouldAutoSyncActivity,
   sortActivities,
+  staleActivityConnectionIds,
   syncWarningMessages,
   timelineItemsToCsv,
 } from "./activity.js";
@@ -28,6 +30,23 @@ test("formats local dates for native date inputs", () => {
   assert.equal(formatLocalDate(new Date(2026, 6, 9, 13, 5)), "2026-07-09");
   assert.equal(addDays("2026-07-09", -1), "2026-07-08");
   assert.equal(addDays("2026-12-31", 1), "2027-01-01");
+});
+
+test("generates seven recent local dates across month and year boundaries", () => {
+  assert.deepEqual(recentActivityDates("2027-01-03"), [
+    "2027-01-03",
+    "2027-01-02",
+    "2027-01-01",
+    "2026-12-31",
+    "2026-12-30",
+    "2026-12-29",
+    "2026-12-28",
+  ]);
+  assert.deepEqual(recentActivityDates("2026-03-31", 3), [
+    "2026-03-31",
+    "2026-03-30",
+    "2026-03-29",
+  ]);
 });
 
 test("calculates local day bounds as one full day", () => {
@@ -100,6 +119,51 @@ test("auto-syncs incomplete past days and stale today only", () => {
     shouldAutoSyncActivity("2026-07-10", [{ syncedAt: now - 6 * 60 * 1000 }], now, "2026-07-10"),
     true,
   );
+});
+
+test("finds stale activity connections per connection and ignores unsupported providers", () => {
+  const now = new Date(2026, 6, 10, 12, 0, 0).getTime();
+  const pastEnd = localDayBounds("2026-07-09").endAt;
+  const connections = [
+    { id: "github", provider: "github", updatedAt: 0 },
+    { id: "gitlab", provider: "gitlab", updatedAt: 0 },
+    { id: "trello", provider: "trello", updatedAt: pastEnd + 10 },
+    { id: "calendar", provider: "calendar", updatedAt: 0 },
+  ];
+
+  assert.deepEqual(staleActivityConnectionIds({
+    date: "2026-07-09",
+    connections,
+    syncRuns: [
+      { connectionId: "github", status: "success", syncedAt: pastEnd },
+      { connectionId: "gitlab", status: "failed", syncedAt: now },
+      { connectionId: "trello", status: "success", syncedAt: pastEnd },
+    ],
+    now,
+    today: "2026-07-10",
+  }), ["gitlab", "trello"]);
+});
+
+test("requires recent successful runs for today's activity connections", () => {
+  const now = new Date(2026, 6, 10, 12, 0, 0).getTime();
+  const connections = [
+    { id: "fresh", provider: "github", updatedAt: 0 },
+    { id: "old", provider: "gitlab", updatedAt: 0 },
+    { id: "updated", provider: "trello", updatedAt: now - 60_000 },
+    { id: "new", provider: "github", updatedAt: now },
+  ];
+
+  assert.deepEqual(staleActivityConnectionIds({
+    date: "2026-07-10",
+    connections,
+    syncRuns: [
+      { connectionId: "fresh", status: "success", syncedAt: now - 60_000 },
+      { connectionId: "old", status: "success", syncedAt: now - 6 * 60_000 },
+      { connectionId: "updated", status: "success", syncedAt: now - 2 * 60_000 },
+    ],
+    now,
+    today: "2026-07-10",
+  }), ["old", "updated", "new"]);
 });
 
 test("normalizes cached GitHub review submissions independently from review comments", () => {
@@ -438,4 +502,43 @@ test("local fallback reads cached activities for a selected day", async () => {
 
   assert.deepEqual(result.activities.map((activity) => activity.id), ["activity_1"]);
   assert.equal(result.syncRuns.length, 1);
+});
+
+test("local activity sync updates only requested connections", async () => {
+  let storedState = {
+    connections: [
+      { id: "github", name: "GitHub", provider: "github" },
+      { id: "gitlab", name: "GitLab", provider: "gitlab" },
+    ],
+    activitySyncRuns: [
+      {
+        connectionId: "gitlab",
+        connectionName: "GitLab",
+        provider: "gitlab",
+        date: "2026-07-09",
+        status: "success",
+        syncedAt: 100,
+      },
+    ],
+  };
+  global.localStorage = {
+    getItem: () => JSON.stringify(storedState),
+    setItem: (_key, value) => { storedState = JSON.parse(value); },
+  };
+
+  const result = await api.syncActivities({
+    date: "2026-07-09",
+    connectionIds: ["github"],
+  });
+
+  assert.deepEqual(
+    result.syncRuns.map((run) => [run.connectionId, run.status]),
+    [["gitlab", "success"], ["github", "failed"]],
+  );
+
+  const manualResult = await api.syncActivities({ date: "2026-07-09" });
+  assert.deepEqual(
+    manualResult.syncRuns.map((run) => [run.connectionId, run.status]),
+    [["github", "failed"], ["gitlab", "failed"]],
+  );
 });

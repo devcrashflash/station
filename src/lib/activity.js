@@ -34,6 +34,37 @@ export function isPastLocalDate(dateValue, today = formatLocalDate()) {
 }
 
 export const ACTIVITY_AUTO_SYNC_STALE_MS = 5 * 60 * 1000;
+export const ACTIVITY_SYNC_DAYS = 7;
+export const ACTIVITY_SYNC_PROVIDERS = new Set(["github", "gitlab", "trello"]);
+
+export function recentActivityDates(today = formatLocalDate(), count = ACTIVITY_SYNC_DAYS) {
+  return Array.from({ length: Math.max(0, count) }, (_, index) => addDays(today, -index));
+}
+
+export function staleActivityConnectionIds({
+  date,
+  connections = [],
+  syncRuns = [],
+  now = Date.now(),
+  today = formatLocalDate(),
+} = {}) {
+  if (!date || date > today) return [];
+
+  const runsByConnection = new Map(syncRuns.map((run) => [run.connectionId, run]));
+  return connections
+    .filter((connection) => ACTIVITY_SYNC_PROVIDERS.has(connection.provider))
+    .filter((connection) => {
+      const run = runsByConnection.get(connection.id);
+      if (!run || run.status !== "success") return true;
+
+      const connectionUpdatedAt = connection.updatedAt || 0;
+      const freshAfter = date === today
+        ? Math.max(now - ACTIVITY_AUTO_SYNC_STALE_MS, connectionUpdatedAt)
+        : Math.max(localDayBounds(date).endAt, connectionUpdatedAt);
+      return (run.syncedAt || 0) < freshAfter;
+    })
+    .map((connection) => connection.id);
+}
 
 export function latestActivitySyncAt(syncRuns = []) {
   return Math.max(0, ...syncRuns.map((run) => run.syncedAt || 0));

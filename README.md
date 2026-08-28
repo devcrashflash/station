@@ -60,9 +60,10 @@ GitLab, Trello, or any other external network request.
 
 Offline use should work for most read and organization workflows. Network
 access is only required for actions that explicitly sync external metadata or
-edit/modify external systems. Provider sync should be started from foreground
-UI, show sync status while it runs, and never block local navigation or local
-editing.
+edit/modify external systems. Provider sync may start automatically after local
+data has rendered when it runs as bounded background work. Foreground syncs
+should show status while they run, and no sync may block local navigation or
+local editing.
 
 ## Frontend Structure
 

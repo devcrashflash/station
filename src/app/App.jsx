@@ -153,6 +153,7 @@ function App() {
   const [resources, setResources] = useState([]);
   const [localResources, setLocalResources] = useState([]);
   const [connections, setConnections] = useState([]);
+  const [shellReady, setShellReady] = useState(false);
   const [calendarAccounts, setCalendarAccounts] = useState([]);
   const [aiPrompts, setAiPrompts] = useState([]);
   const [directories, setDirectories] = useState([]);
@@ -410,8 +411,10 @@ function App() {
   });
   const activityData = useActivityData({
     date: activityDate,
+    connections,
     enabled: showActivity,
     onError: reportError,
+    startupSyncEnabled: shellReady && isDesktopApp(),
   });
   const hasCalendarAccounts = calendarAccounts.some((account) => account.calendarEnabled !== false && (account.calendars || []).some((calendar) => account.provider !== "google" || calendar.enabled));
   const isInboxVisible = !selectedTask && !utilityPage && !selectedProject;
@@ -438,7 +441,9 @@ function App() {
   }
 
   useEffect(() => {
-    refreshShell().catch(reportError);
+    refreshShell()
+      .then(() => setShellReady(true))
+      .catch(reportError);
   }, []);
 
   useEffect(() => {
