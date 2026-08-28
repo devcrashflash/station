@@ -18,8 +18,11 @@ import {
   AI_SESSION_MIN_DONE_DURATION_SECONDS,
   AI_SESSION_REFRESH_INTERVALS,
   AI_SESSION_SOURCE_OPTIONS,
+  aiSessionSourceOption,
   aiSessionProviderLabel,
+  enabledAiSessionSourceOptions,
   normalizeAiSessionSettings,
+  preferredAiSessionSource,
 } from "@/lib/aiSessions";
 import { calendarWarnings } from "@/lib/calendar";
 import { api } from "@/lib/api";
@@ -59,11 +62,6 @@ const calendarTypeLabels = {
   caldav: "CalDAV",
   ical: "iCal URL",
 };
-
-const aiAgentTypeOptions = [
-  { value: "codex", label: "Codex", icon: SquareTerminal },
-  { value: "claude", label: "Claude", icon: Bot },
-];
 
 const aiSessionDoneDurationUnits = [
   { value: "minutes", label: "Minutes", seconds: 60 },
@@ -174,6 +172,7 @@ export function SettingsDialog({
 }) {
   const [activeTab, setActiveTab] = useState(initialSection);
   const [aiPromptAgentType, setAiPromptAgentType] = useState("codex");
+  const [aiPromptAgentOrigin, setAiPromptAgentOrigin] = useState("desktop");
   const [aiPromptName, setAiPromptName] = useState("");
   const [aiPromptIcon, setAiPromptIcon] = useState("sparkles");
   const [aiPromptText, setAiPromptText] = useState("");
@@ -184,6 +183,10 @@ export function SettingsDialog({
   const [browserBundleId, setBrowserBundleId] = useState(browserSettings?.browserBundleId || "");
   const [browserNotice, setBrowserNotice] = useState("");
   const activeSectionLabel = settingsSections.find((section) => section.id === activeTab)?.label || settingsSections[0].label;
+  const enabledAiPromptSources = enabledAiSessionSourceOptions(aiSessionSettings);
+  const selectedAiPromptSourceEnabled = enabledAiPromptSources.some((source) => (
+    source.provider === aiPromptAgentType && source.origin === aiPromptAgentOrigin
+  ));
 
   useEffect(() => {
     setBrowserBundleId(browserSettings?.browserBundleId || "");
@@ -191,6 +194,7 @@ export function SettingsDialog({
 
   function resetAiPromptForm() {
     setAiPromptAgentType("codex");
+    setAiPromptAgentOrigin("desktop");
     setAiPromptName("");
     setAiPromptIcon("sparkles");
     setAiPromptText("");
@@ -198,8 +202,9 @@ export function SettingsDialog({
     setAiPromptEditorMode(null);
   }
 
-  function createAiPrompt(agentType) {
-    setAiPromptAgentType(agentType);
+  function createAiPrompt(source) {
+    setAiPromptAgentType(source.provider);
+    setAiPromptAgentOrigin(source.origin);
     setAiPromptName("");
     setAiPromptIcon("sparkles");
     setAiPromptText("");
@@ -208,7 +213,13 @@ export function SettingsDialog({
   }
 
   function editAiPrompt(prompt) {
-    setAiPromptAgentType(prompt.agentType);
+    const source = preferredAiSessionSource(
+      aiSessionSettings,
+      prompt.agentType,
+      prompt.agentOrigin || "desktop",
+    );
+    setAiPromptAgentType(source?.provider || "");
+    setAiPromptAgentOrigin(source?.origin || "");
     setAiPromptName(prompt.name);
     setAiPromptIcon(prompt.icon || "sparkles");
     setAiPromptText(prompt.promptText || "");
@@ -222,6 +233,7 @@ export function SettingsDialog({
       await onSaveAiPrompt({
         id: editingAiPromptId,
         agentType: aiPromptAgentType,
+        agentOrigin: aiPromptAgentOrigin,
         name: aiPromptName,
         icon: aiPromptIcon,
         promptText: aiPromptText,
@@ -283,23 +295,26 @@ export function SettingsDialog({
                   <div className="grid gap-4 rounded-md border bg-muted/20 p-4">
                     <div>
                       <p className="font-medium">Add AI Prompt</p>
-                      <p className="mt-1 text-sm text-muted-foreground">Choose a provider to configure a new prompt.</p>
+                      <p className="mt-1 text-sm text-muted-foreground">Choose an enabled AI Session source to configure a new prompt.</p>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      {aiAgentTypeOptions.map((option) => {
-                        const Icon = option.icon;
+                      {enabledAiPromptSources.map((option) => {
+                        const Icon = option.origin === "cli" ? SquareTerminal : Bot;
                         return (
                           <Button
-                            key={option.value}
+                            key={option.key}
                             type="button"
-                            variant={aiPromptEditorMode === "create" && aiPromptAgentType === option.value ? "secondary" : "outline"}
-                            onClick={() => createAiPrompt(option.value)}
+                            variant={aiPromptEditorMode === "create" && aiPromptAgentType === option.provider && aiPromptAgentOrigin === option.origin ? "secondary" : "outline"}
+                            onClick={() => createAiPrompt(option)}
                           >
                             <Icon />
                             {option.label}
                           </Button>
                         );
                       })}
+                      {enabledAiPromptSources.length === 0 && (
+                        <p className="text-sm text-muted-foreground">Enable an AI Session source before adding an AI Prompt.</p>
+                      )}
                     </div>
 
                     {aiPromptEditorMode && (
@@ -308,7 +323,7 @@ export function SettingsDialog({
                           <p className="font-medium">
                             {aiPromptEditorMode === "edit"
                               ? "Edit AI Prompt"
-                              : `Add ${aiAgentTypeOptions.find((option) => option.value === aiPromptAgentType)?.label} AI Prompt`}
+                              : `Add ${aiSessionSourceOption(aiPromptAgentType, aiPromptAgentOrigin)?.label || "AI"} Prompt`}
                           </p>
                           <p className="mt-1 text-sm text-muted-foreground">
                             {aiPromptEditorMode === "edit"
@@ -321,9 +336,16 @@ export function SettingsDialog({
                             <Field>
                               <FieldLabel>AI Agent</FieldLabel>
                               <SelectControl
-                                value={aiPromptAgentType}
-                                onValueChange={setAiPromptAgentType}
-                                options={aiAgentTypeOptions}
+                                value={`${aiPromptAgentType}:${aiPromptAgentOrigin}`}
+                                onValueChange={(value) => {
+                                  const [provider, origin] = value.split(":");
+                                  setAiPromptAgentType(provider);
+                                  setAiPromptAgentOrigin(origin);
+                                }}
+                                options={enabledAiPromptSources.map((option) => ({
+                                  value: `${option.provider}:${option.origin}`,
+                                  label: option.label,
+                                }))}
                               />
                             </Field>
                           )}
@@ -355,7 +377,9 @@ export function SettingsDialog({
                           />
                         </Field>
                         <div className="flex flex-wrap gap-2">
-                          <Button type="submit">{aiPromptEditorMode === "edit" ? "Update AI Prompt" : "Save AI Prompt"}</Button>
+                          <Button type="submit" disabled={!selectedAiPromptSourceEnabled}>
+                            {aiPromptEditorMode === "edit" ? "Update AI Prompt" : "Save AI Prompt"}
+                          </Button>
                           <Button type="button" variant="outline" onClick={resetAiPromptForm}>
                             {aiPromptEditorMode === "edit" ? "Cancel edit" : "Cancel"}
                           </Button>
@@ -374,7 +398,7 @@ export function SettingsDialog({
                           <div className="min-w-0 flex-1">
                             <p className="truncate font-medium">{prompt.name}</p>
                             <p className="text-xs text-muted-foreground">
-                              {aiAgentTypeOptions.find((option) => option.value === prompt.agentType)?.label || prompt.agentType}
+                              {aiSessionSourceOption(prompt.agentType, prompt.agentOrigin || "desktop")?.label || prompt.agentType}
                             </p>
                             {prompt.promptText && (
                               <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{prompt.promptText}</p>

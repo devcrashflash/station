@@ -89,15 +89,16 @@ test("validates local connection test requirements", () => {
 });
 
 test("validates AI Prompt agents, names, and case-insensitive uniqueness", () => {
-  const existing = [{ id: "prompt_1", agentType: "codex", name: "Implement ticket", icon: "hammer" }];
+  const existing = [{ id: "prompt_1", agentType: "codex", agentOrigin: "desktop", name: "Implement ticket", icon: "hammer" }];
   assert.equal(validateAiPromptForTest({ agentType: "other", name: "Prompt", icon: "hammer" }, existing), "AI Prompt agent must be Codex or Claude.");
-  assert.equal(validateAiPromptForTest({ agentType: "codex", name: "Prompt", icon: "other" }, existing), "AI Prompt icon is not supported.");
-  assert.equal(validateAiPromptForTest({ agentType: "codex", name: "  ", icon: "hammer" }, existing), "AI Prompt name is required.");
+  assert.equal(validateAiPromptForTest({ agentType: "codex", agentOrigin: "other", name: "Prompt", icon: "hammer" }, existing), "AI Prompt source must be CLI or Desktop.");
+  assert.equal(validateAiPromptForTest({ agentType: "codex", agentOrigin: "desktop", name: "Prompt", icon: "other" }, existing), "AI Prompt icon is not supported.");
+  assert.equal(validateAiPromptForTest({ agentType: "codex", agentOrigin: "desktop", name: "  ", icon: "hammer" }, existing), "AI Prompt name is required.");
   assert.equal(
-    validateAiPromptForTest({ agentType: "claude", name: "implement ticket", icon: "review" }, existing),
+    validateAiPromptForTest({ agentType: "claude", agentOrigin: "cli", name: "implement ticket", icon: "review" }, existing),
     "An AI Prompt with this name already exists.",
   );
-  assert.equal(validateAiPromptForTest({ id: "prompt_1", agentType: "claude", name: "IMPLEMENT TICKET", icon: "review" }, existing), "");
+  assert.equal(validateAiPromptForTest({ id: "prompt_1", agentType: "claude", agentOrigin: "cli", name: "IMPLEMENT TICKET", icon: "review" }, existing), "");
 });
 
 test("local fallback stores, updates, lists, and deletes AI Prompts", async () => {
@@ -107,18 +108,18 @@ test("local fallback stores, updates, lists, and deletes AI Prompts", async () =
     setItem: (_key, value) => { stored = value; },
   };
 
-  const codex = await api.saveAiPrompt({ agentType: "codex", name: " Implement ticket ", icon: "hammer", promptText: " Fix it carefully. " });
-  const claude = await api.saveAiPrompt({ agentType: "claude", name: "Review ticket", icon: "review", promptText: "" });
+  const codex = await api.saveAiPrompt({ agentType: "codex", agentOrigin: "desktop", name: " Implement ticket ", icon: "hammer", promptText: " Fix it carefully. " });
+  const claude = await api.saveAiPrompt({ agentType: "claude", agentOrigin: "cli", name: "Review ticket", icon: "review", promptText: "" });
   assert.equal(codex.name, "Implement ticket");
   assert.equal("mode" in codex, false);
   assert.equal(codex.promptText, "Fix it carefully.");
   assert.deepEqual((await api.listAiPrompts()).map(({ name }) => name), ["Implement ticket", "Review ticket"]);
 
-  const updated = await api.saveAiPrompt({ id: codex.id, agentType: "claude", name: "Ship ticket", icon: "target", promptText: "" });
+  const updated = await api.saveAiPrompt({ id: codex.id, agentType: "claude", agentOrigin: "desktop", name: "Ship ticket", icon: "target", promptText: "" });
   assert.equal(updated.id, codex.id);
   assert.equal(updated.agentType, "claude");
   await assert.rejects(
-    async () => api.saveAiPrompt({ agentType: "codex", name: "ship ticket", icon: "clock", promptText: "" }),
+    async () => api.saveAiPrompt({ agentType: "codex", agentOrigin: "cli", name: "ship ticket", icon: "clock", promptText: "" }),
     /already exists/,
   );
 
@@ -139,6 +140,7 @@ test("local fallback migrates legacy AI Agents into AI Prompts", async () => {
   assert.deepEqual(await api.listAiPrompts(), [{
     id: "agent_1",
     agentType: "codex",
+    agentOrigin: "desktop",
     name: "Legacy Codex",
     icon: "sparkles",
     promptText: "",

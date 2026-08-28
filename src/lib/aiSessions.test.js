@@ -30,10 +30,12 @@ import {
   filterAiSessionsBySearch,
   filterAiSessionsByWindow,
   formatAiSessionLastRefreshed,
+  enabledAiSessionSourceOptions,
   normalizeAiSessionBackgroundRefreshInterval,
   normalizeAiSessionForegroundRefreshInterval,
   normalizeAiSessionDoneDuration,
   normalizeAiSessionSettings,
+  preferredAiSessionSource,
   sortAiSessions,
   sortArchivedAiSessions,
 } from "./aiSessions.js";
@@ -98,6 +100,27 @@ test("normalizes source settings and detects an all-disabled configuration", () 
     claudeCli: false,
     claudeDesktop: false,
   }), true);
+});
+
+test("selects an enabled saved AI Prompt source or falls back deterministically", () => {
+  const settings = {
+    codexCli: false,
+    codexDesktop: false,
+    claudeCli: true,
+    claudeDesktop: true,
+  };
+  assert.deepEqual(
+    enabledAiSessionSourceOptions(settings).map(({ key }) => key),
+    ["claudeCli", "claudeDesktop"],
+  );
+  assert.equal(preferredAiSessionSource(settings, "claude", "desktop")?.key, "claudeDesktop");
+  assert.equal(preferredAiSessionSource(settings, "codex", "desktop")?.key, "claudeCli");
+  assert.equal(preferredAiSessionSource({
+    codexCli: false,
+    codexDesktop: false,
+    claudeCli: false,
+    claudeDesktop: false,
+  }, "codex", "desktop"), null);
 });
 
 test("labels detected session sources while retaining provider fallback", () => {

@@ -40,6 +40,7 @@ import { AiPromptWizard } from "@/features/tasks/AiPromptWizard";
 import { TrelloTicketWizard } from "@/features/tasks/TrelloTicketWizard";
 import { isPullRequestResource } from "@/lib/api";
 import { aiPromptIconFor } from "@/lib/aiPromptIcons";
+import { aiSessionSourceOption } from "@/lib/aiSessions";
 import { externalLabelStyle } from "@/lib/externalLabels";
 import { shortcutModifier } from "@/lib/keyboardShortcut";
 import { parseSmartInput } from "@/lib/smartInputParser";
@@ -63,10 +64,6 @@ const relationTypeOptions = [
   { value: "sub_task", label: "Sub Task" },
 ];
 
-const aiAgentLabels = {
-  codex: "Codex",
-  claude: "Claude",
-};
 const EXTERNAL_REFRESH_STALE_MS = 60 * 1000;
 
 function waitForPaint() {
@@ -179,6 +176,7 @@ export function TaskDetailView({
   task,
   project,
   aiPrompts = [],
+  aiSessionSettings,
   commandSettings = { reviewEnabled: true },
   localResources = [],
   homeDirectory = "~",
@@ -721,7 +719,7 @@ export function TaskDetailView({
                     <PromptIcon className="size-4" />
                     <span className="min-w-0 flex-1 truncate text-left">{prompt.name}</span>
                     <span className="text-xs text-muted-foreground">
-                      {aiAgentLabels[prompt.agentType] || prompt.agentType}
+                      {aiSessionSourceOption(prompt.agentType, prompt.agentOrigin || "desktop")?.label || prompt.agentType}
                     </span>
                   </Button>
                 );
@@ -805,6 +803,7 @@ export function TaskDetailView({
           key={activeAiPromptId}
           task={task}
           prompts={aiPrompts}
+          aiSessionSettings={aiSessionSettings}
           initialPromptId={activeAiPromptId}
           localResources={localResources}
           homeDirectory={homeDirectory}

@@ -300,6 +300,7 @@ function readState() {
       parsed.aiPrompts = parsed.aiAgents.map(({ type, mode: _legacyMode, ...agent }) => ({
         ...agent,
         agentType: agent.agentType || type,
+        agentOrigin: "desktop",
         icon: AI_PROMPT_ICON_IDS.includes(agent.icon) ? agent.icon : "sparkles",
         promptText: agent.promptText || "",
       }));
@@ -310,9 +311,10 @@ function readState() {
       parsed.aiPrompts = parsed.aiPrompts.map((prompt) => {
         const icon = AI_PROMPT_ICON_IDS.includes(prompt.icon) ? prompt.icon : "sparkles";
         const { mode: _legacyMode, ...promptWithoutMode } = prompt;
-        if (icon === prompt.icon && !("mode" in prompt)) return prompt;
+        const agentOrigin = ["cli", "desktop"].includes(prompt.agentOrigin) ? prompt.agentOrigin : "desktop";
+        if (icon === prompt.icon && !("mode" in prompt) && agentOrigin === prompt.agentOrigin) return prompt;
         migrated = true;
-        return { ...promptWithoutMode, icon };
+        return { ...promptWithoutMode, agentOrigin, icon };
       });
     }
     if (migrated) {
@@ -431,6 +433,8 @@ export function validateConnectionForTest(connection) {
 export function validateAiPromptForTest(prompt, prompts = []) {
   const agentType = prompt?.agentType?.trim() || "";
   if (!["codex", "claude"].includes(agentType)) return "AI Prompt agent must be Codex or Claude.";
+  const agentOrigin = prompt?.agentOrigin?.trim() || "";
+  if (!["cli", "desktop"].includes(agentOrigin)) return "AI Prompt source must be CLI or Desktop.";
   if (!AI_PROMPT_ICON_IDS.includes(prompt?.icon)) return "AI Prompt icon is not supported.";
 
   const name = prompt?.name?.trim() || "";
@@ -1755,6 +1759,7 @@ const local = {
 
     Object.assign(prompt, {
       agentType: input.agentType.trim(),
+      agentOrigin: input.agentOrigin.trim(),
       name: input.name.trim(),
       icon: input.icon,
       promptText: input.promptText?.trim() || "",

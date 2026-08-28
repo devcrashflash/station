@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import {
   Check,
+  Bot,
   ChevronLeft,
   ExternalLink,
   FolderGit2,
@@ -9,23 +10,21 @@ import {
   GitPullRequest,
   LoaderCircle,
   Plus,
+  SquareTerminal,
 } from "lucide-react";
 
 import { EmptyState } from "@/components/common/EmptyState";
 import { Modal } from "@/components/common/Modal";
 import { Button } from "@/components/ui/button";
 import { aiPromptIconFor } from "@/lib/aiPromptIcons";
+import { aiSessionSourceOption, enabledAiSessionSourceOptions, preferredAiSessionSource } from "@/lib/aiSessions";
 import { aiPromptWorkspaceOptions, compactWorkspacePath } from "@/lib/aiPromptThread";
 import { cn } from "@/lib/utils";
-
-const agentTypeLabels = {
-  codex: "Codex",
-  claude: "Claude",
-};
 
 export function AiPromptWizard({
   task,
   prompts,
+  aiSessionSettings,
   initialPromptId = "",
   localResources,
   homeDirectory,
@@ -40,12 +39,25 @@ export function AiPromptWizard({
   const [selectedPath, setSelectedPath] = useState("");
   const [branchOptions, setBranchOptions] = useState(null);
   const [selectedBranchMode, setSelectedBranchMode] = useState("");
+  const initialPrompt = prompts.find((prompt) => prompt.id === initialPromptId);
+  const initialSource = preferredAiSessionSource(
+    aiSessionSettings,
+    initialPrompt?.agentType,
+    initialPrompt?.agentOrigin || "desktop",
+  );
+  const [selectedAgentSource, setSelectedAgentSource] = useState(
+    initialSource ? `${initialSource.provider}:${initialSource.origin}` : "",
+  );
   const [isAddingDirectory, setIsAddingDirectory] = useState(false);
   const [isInspecting, setIsInspecting] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState("");
   const workspaces = useMemo(() => aiPromptWorkspaceOptions(localResources), [localResources]);
   const selectedPrompt = prompts.find((prompt) => prompt.id === selectedPromptId);
+  const enabledAgentSources = useMemo(
+    () => enabledAiSessionSourceOptions(aiSessionSettings),
+    [aiSessionSettings],
+  );
   const isBusy = isAddingDirectory || isInspecting || isStarting;
 
   function selectPath(path) {
@@ -53,6 +65,17 @@ export function AiPromptWizard({
     setBranchOptions(null);
     setSelectedBranchMode("");
     setError("");
+  }
+
+  function selectPrompt(promptId) {
+    const prompt = prompts.find((candidate) => candidate.id === promptId);
+    const source = preferredAiSessionSource(
+      aiSessionSettings,
+      prompt?.agentType,
+      prompt?.agentOrigin || "desktop",
+    );
+    setSelectedPromptId(promptId);
+    setSelectedAgentSource(source ? `${source.provider}:${source.origin}` : "");
   }
 
   async function inspectBranches(path = selectedPath) {
@@ -76,7 +99,7 @@ export function AiPromptWizard({
   }
 
   async function startThread() {
-    if (!selectedPromptId || !selectedPath || !selectedBranchMode || isStarting) return;
+    if (!selectedPromptId || !selectedPath || !selectedBranchMode || !selectedAgentSource || isStarting) return;
     setIsStarting(true);
     setError("");
     try {
@@ -85,6 +108,8 @@ export function AiPromptWizard({
         taskId: task.id,
         path: selectedPath,
         branchMode: selectedBranchMode,
+        agentType: selectedAgentSource.split(":")[0],
+        agentOrigin: selectedAgentSource.split(":")[1],
       });
       onClose();
     } catch (nextError) {
@@ -123,6 +148,8 @@ export function AiPromptWizard({
           <span className={cn(step === "workspace" && "text-foreground")}>2. Repository</span>
           <span>→</span>
           <span className={cn(step === "branch" && "text-foreground")}>3. Branch</span>
+          <span>→</span>
+          <span className={cn(step === "agent" && "text-foreground")}>4. AI Agent</span>
         </div>
 
         {step === "prompt" ? (
@@ -141,8 +168,8 @@ export function AiPromptWizard({
                     selected={selectedPromptId === prompt.id}
                     icon={aiPromptIconFor(prompt.icon)}
                     title={prompt.name}
-                    detail={agentTypeLabels[prompt.agentType] || prompt.agentType}
-                    onClick={() => setSelectedPromptId(prompt.id)}
+                    detail={aiSessionSourceOption(prompt.agentType, prompt.agentOrigin || "desktop")?.label || prompt.agentType}
+                    onClick={() => selectPrompt(prompt.id)}
                   />
                 ))}
               </div>
@@ -210,7 +237,7 @@ export function AiPromptWizard({
               </Button>
             </div>
           </div>
-        ) : (
+        ) : step === "branch" ? (
           <div className="grid gap-3">
             <div>
               <p className="text-sm font-medium">Choose which branch to use</p>
@@ -266,7 +293,48 @@ export function AiPromptWizard({
                 <ChevronLeft className="size-4" />
                 Back
               </Button>
-              <Button type="button" disabled={!selectedBranchMode || isBusy} onClick={startThread}>
+              <Button type="button" disabled={!selectedBranchMode || isBusy} onClick={() => setStep("agent")}>
+                Continue
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="grid gap-3">
+            <div>
+              <p className="text-sm font-medium">Choose which AI Agent to use</p>
+              <p className="text-xs text-muted-foreground">
+                The saved default is selected when it is enabled. This choice applies to this run only.
+              </p>
+            </div>
+            {enabledAgentSources.length === 0 ? (
+              <EmptyState text="No AI Session sources are enabled. Enable one in Settings before running this AI Prompt." />
+            ) : (
+              <div className="grid gap-2">
+                {enabledAgentSources.map((source) => {
+                  const sourceValue = `${source.provider}:${source.origin}`;
+                  const isDefault = selectedPrompt?.agentType === source.provider
+                    && (selectedPrompt?.agentOrigin || "desktop") === source.origin;
+                  return (
+                    <ChoiceButton
+                      key={source.key}
+                      selected={selectedAgentSource === sourceValue}
+                      icon={source.origin === "cli" ? SquareTerminal : Bot}
+                      title={source.label}
+                      detail={isDefault ? `${source.description} Saved default.` : source.description}
+                      disabled={isBusy}
+                      onClick={() => setSelectedAgentSource(sourceValue)}
+                    />
+                  );
+                })}
+              </div>
+            )}
+            {error && <p className="text-sm text-destructive">{error}</p>}
+            <div className="flex flex-wrap justify-between gap-2">
+              <Button type="button" variant="outline" disabled={isBusy} onClick={() => setStep("branch")}>
+                <ChevronLeft className="size-4" />
+                Back
+              </Button>
+              <Button type="button" disabled={!selectedAgentSource || isBusy} onClick={startThread}>
                 {isStarting ? <LoaderCircle className="size-4 animate-spin" /> : <ExternalLink className="size-4" />}
                 {isStarting ? "Opening..." : `Open ${selectedPrompt?.name || "AI Prompt"}`}
               </Button>

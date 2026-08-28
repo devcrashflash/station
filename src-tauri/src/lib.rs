@@ -668,6 +668,7 @@ struct ConnectionRecord {
 struct AiPromptRecord {
     id: String,
     agent_type: String,
+    agent_origin: String,
     name: String,
     icon: String,
     prompt_text: String,
@@ -1365,18 +1366,28 @@ struct ConnectionInput {
 struct AiPromptInput {
     id: Option<String>,
     agent_type: String,
+    agent_origin: String,
     name: String,
     icon: String,
     prompt_text: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct OpenAiPromptThreadInput {
     ai_prompt_id: String,
     task_id: String,
     path: String,
     branch_mode: String,
+    agent_type: String,
+    agent_origin: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct AiPromptLaunchResult {
+    agent_type: String,
+    agent_origin: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1878,6 +1889,7 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL COLLATE NOCASE UNIQUE,
             agent_type TEXT NOT NULL,
+            agent_origin TEXT NOT NULL DEFAULT 'desktop' CHECK(agent_origin IN ('cli', 'desktop')),
             mode TEXT NOT NULL DEFAULT 'agent' CHECK(mode IN ('agent', 'plan')),
             icon TEXT NOT NULL DEFAULT 'sparkles',
             prompt_text TEXT NOT NULL DEFAULT '',
@@ -2095,6 +2107,12 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
     migrate_ai_prompt_modes(db)?;
     migrate_ai_agents_to_prompts(db)?;
     add_column_if_missing(db, "ai_prompts", "icon", "TEXT NOT NULL DEFAULT 'sparkles'")?;
+    add_column_if_missing(
+        db,
+        "ai_prompts",
+        "agent_origin",
+        "TEXT NOT NULL DEFAULT 'desktop' CHECK(agent_origin IN ('cli', 'desktop'))",
+    )?;
     add_column_if_missing(db, "projects", "color", "TEXT NOT NULL DEFAULT '#2563eb'")?;
     add_column_if_missing(db, "connections", "api_key", "TEXT")?;
     add_column_if_missing(db, "smart_inbox_provider_items", "source_id", "TEXT")?;
@@ -2690,9 +2708,10 @@ fn row_to_ai_prompt(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiPromptRecord>
         name: row.get(1)?,
         icon: row.get(2)?,
         agent_type: row.get(3)?,
-        prompt_text: row.get(4)?,
-        created_at: row.get(5)?,
-        updated_at: row.get(6)?,
+        agent_origin: row.get(4)?,
+        prompt_text: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
     })
 }
 
@@ -5018,7 +5037,7 @@ fn save_connection_in_db(
 fn list_ai_prompts_in_db(db: &SqliteConnection) -> Result<Vec<AiPromptRecord>, String> {
     let mut statement = db
         .prepare(
-            "SELECT id, name, icon, agent_type, prompt_text, created_at, updated_at
+            "SELECT id, name, icon, agent_type, agent_origin, prompt_text, created_at, updated_at
              FROM ai_prompts ORDER BY name COLLATE NOCASE ASC, id ASC",
         )
         .map_err(db_error)?;
@@ -5032,7 +5051,7 @@ fn list_ai_prompts_in_db(db: &SqliteConnection) -> Result<Vec<AiPromptRecord>, S
 
 fn get_ai_prompt_in_db(db: &SqliteConnection, id: &str) -> Result<Option<AiPromptRecord>, String> {
     db.query_row(
-        "SELECT id, name, icon, agent_type, prompt_text, created_at, updated_at FROM ai_prompts WHERE id = ?1",
+        "SELECT id, name, icon, agent_type, agent_origin, prompt_text, created_at, updated_at FROM ai_prompts WHERE id = ?1",
         params![id],
         row_to_ai_prompt,
     )
@@ -5047,6 +5066,10 @@ fn save_ai_prompt_in_db(
     let agent_type = input.agent_type.trim().to_string();
     if !matches!(agent_type.as_str(), "codex" | "claude") {
         return Err("AI Prompt agent must be Codex or Claude.".to_string());
+    }
+    let agent_origin = input.agent_origin.trim().to_string();
+    if !matches!(agent_origin.as_str(), "cli" | "desktop") {
+        return Err("AI Prompt source must be CLI or Desktop.".to_string());
     }
     let icon = input.icon.trim().to_string();
     if !matches!(
@@ -5096,21 +5119,21 @@ fn save_ai_prompt_in_db(
 
     if exists {
         db.execute(
-            "UPDATE ai_prompts SET name = ?1, icon = ?2, agent_type = ?3, mode = 'agent', prompt_text = ?4, updated_at = ?5 WHERE id = ?6",
-            params![name, icon, agent_type, prompt_text, timestamp, id],
+            "UPDATE ai_prompts SET name = ?1, icon = ?2, agent_type = ?3, agent_origin = ?4, mode = 'agent', prompt_text = ?5, updated_at = ?6 WHERE id = ?7",
+            params![name, icon, agent_type, agent_origin, prompt_text, timestamp, id],
         )
         .map_err(db_error)?;
     } else {
         db.execute(
-            "INSERT INTO ai_prompts (id, name, icon, agent_type, mode, prompt_text, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, 'agent', ?5, ?6, ?7)",
-            params![id, name, icon, agent_type, prompt_text, timestamp, timestamp],
+            "INSERT INTO ai_prompts (id, name, icon, agent_type, agent_origin, mode, prompt_text, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'agent', ?6, ?7, ?8)",
+            params![id, name, icon, agent_type, agent_origin, prompt_text, timestamp, timestamp],
         )
         .map_err(db_error)?;
     }
 
     db.query_row(
-        "SELECT id, name, icon, agent_type, prompt_text, created_at, updated_at FROM ai_prompts WHERE id = ?1",
+        "SELECT id, name, icon, agent_type, agent_origin, prompt_text, created_at, updated_at FROM ai_prompts WHERE id = ?1",
         params![id],
         row_to_ai_prompt,
     )
@@ -5465,9 +5488,28 @@ fn prepare_ai_prompt_branch_in_db(
 fn prepare_ai_prompt_thread_in_db(
     db: &SqliteConnection,
     input: &OpenAiPromptThreadInput,
-) -> Result<String, String> {
+) -> Result<(String, String), String> {
     let prompt = get_ai_prompt_in_db(db, &input.ai_prompt_id)?
         .ok_or_else(|| "AI Prompt not found.".to_string())?;
+    if !matches!(input.agent_type.as_str(), "codex" | "claude")
+        || !matches!(input.agent_origin.as_str(), "cli" | "desktop")
+    {
+        return Err("AI Prompt source is not supported.".to_string());
+    }
+    let source_settings = load_ai_session_settings(db)?;
+    let source_enabled = match (input.agent_type.as_str(), input.agent_origin.as_str()) {
+        ("codex", "cli") => source_settings.codex_cli,
+        ("codex", "desktop") => source_settings.codex_desktop,
+        ("claude", "cli") => source_settings.claude_cli,
+        ("claude", "desktop") => source_settings.claude_desktop,
+        _ => false,
+    };
+    if !source_enabled {
+        return Err(
+            "This AI Prompt source is disabled. Enable it in AI Session settings before running the prompt."
+                .to_string(),
+        );
+    }
     let task = get_task(db, &input.task_id)
         .map_err(db_error)?
         .ok_or_else(|| "Task not found.".to_string())?;
@@ -5475,11 +5517,10 @@ fn prepare_ai_prompt_thread_in_db(
     let canonical_path =
         prepare_ai_prompt_branch_in_db(db, &task.id, &input.path, &input.branch_mode)?;
 
-    ai_prompt_deep_link(
-        &prompt.agent_type,
-        &ai_prompt_with_task_context(&prompt.name, &prompt.prompt_text, &task),
-        &canonical_path,
-    )
+    Ok((
+        ai_prompt_with_task_context(&prompt.name, &prompt.prompt_text, &task),
+        canonical_path,
+    ))
 }
 
 fn directory_name_from_path(path: &Path) -> String {
@@ -11033,16 +11074,31 @@ fn inspect_ai_prompt_branches(
 fn open_ai_prompt_thread(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
+    terminal_state: tauri::State<'_, terminal_tabs::TerminalTabsState>,
     input: OpenAiPromptThreadInput,
-) -> Result<String, String> {
-    let deep_link = {
+) -> Result<AiPromptLaunchResult, String> {
+    let (prompt, canonical_path) = {
         let db = state.db.lock().map_err(db_error)?;
         prepare_ai_prompt_thread_in_db(&db, &input)?
     };
-    app.opener()
-        .open_url(&deep_link, None::<&str>)
-        .map_err(|error| format!("Could not open the AI Prompt: {error}"))?;
-    Ok(deep_link)
+    if input.agent_origin == "desktop" {
+        let deep_link = ai_prompt_deep_link(&input.agent_type, &prompt, &canonical_path)?;
+        app.opener()
+            .open_url(&deep_link, None::<&str>)
+            .map_err(|error| format!("Could not open the AI Prompt: {error}"))?;
+    } else {
+        terminal_tabs::open_ai_prompt_terminal(
+            &app,
+            terminal_state.inner(),
+            &input.agent_type,
+            &prompt,
+            canonical_path,
+        )?;
+    }
+    Ok(AiPromptLaunchResult {
+        agent_type: input.agent_type,
+        agent_origin: input.agent_origin,
+    })
 }
 
 #[tauri::command]
@@ -13079,10 +13135,14 @@ mod tests {
         assert!(column_exists(&db, "connections", "api_key"));
         assert!(column_exists(&db, "ai_prompts", "icon"));
         assert!(column_exists(&db, "ai_prompts", "mode"));
+        assert!(column_exists(&db, "ai_prompts", "agent_origin"));
         let migrated_prompts = list_ai_prompts_in_db(&db).expect("list migrated AI Prompts");
         assert!(migrated_prompts
             .iter()
             .all(|prompt| prompt.icon == "sparkles"));
+        assert!(migrated_prompts
+            .iter()
+            .all(|prompt| prompt.agent_origin == "desktop"));
         let non_agent_modes: i64 = db
             .query_row(
                 "SELECT COUNT(*) FROM ai_prompts WHERE mode != 'agent'",
@@ -15899,6 +15959,7 @@ mod tests {
             AiPromptInput {
                 id: None,
                 agent_type: "codex".to_string(),
+                agent_origin: "desktop".to_string(),
                 name: " Implement ticket ".to_string(),
                 icon: "hammer".to_string(),
                 prompt_text: " Fix it carefully. ".to_string(),
@@ -15910,6 +15971,7 @@ mod tests {
             AiPromptInput {
                 id: None,
                 agent_type: "claude".to_string(),
+                agent_origin: "cli".to_string(),
                 name: "Review ticket".to_string(),
                 icon: "review".to_string(),
                 prompt_text: String::new(),
@@ -15934,6 +15996,7 @@ mod tests {
             AiPromptInput {
                 id: Some(codex.id.clone()),
                 agent_type: "claude".to_string(),
+                agent_origin: "desktop".to_string(),
                 name: "Ship ticket".to_string(),
                 icon: "target".to_string(),
                 prompt_text: String::new(),
@@ -15942,6 +16005,7 @@ mod tests {
         .expect("update prompt");
         assert_eq!(updated.id, codex.id);
         assert_eq!(updated.agent_type, "claude");
+        assert_eq!(updated.agent_origin, "desktop");
         assert_eq!(updated.icon, "target");
         assert_eq!(updated.prompt_text, "");
         assert_eq!(updated.created_at, codex.created_at);
@@ -15961,6 +16025,7 @@ mod tests {
             AiPromptInput {
                 id: None,
                 agent_type: "codex".to_string(),
+                agent_origin: "desktop".to_string(),
                 name: "Implement ticket".to_string(),
                 icon: "hammer".to_string(),
                 prompt_text: String::new(),
@@ -15973,6 +16038,7 @@ mod tests {
             AiPromptInput {
                 id: None,
                 agent_type: "other".to_string(),
+                agent_origin: "desktop".to_string(),
                 name: "Other".to_string(),
                 icon: "hammer".to_string(),
                 prompt_text: String::new(),
@@ -15986,6 +16052,7 @@ mod tests {
             AiPromptInput {
                 id: None,
                 agent_type: "codex".to_string(),
+                agent_origin: "desktop".to_string(),
                 name: "Other".to_string(),
                 icon: "other".to_string(),
                 prompt_text: String::new(),
@@ -15994,11 +16061,26 @@ mod tests {
         .unwrap_err();
         assert_eq!(invalid_icon, "AI Prompt icon is not supported.");
 
+        let invalid_origin = save_ai_prompt_in_db(
+            &db,
+            AiPromptInput {
+                id: None,
+                agent_type: "codex".to_string(),
+                agent_origin: "other".to_string(),
+                name: "Other".to_string(),
+                icon: "hammer".to_string(),
+                prompt_text: String::new(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(invalid_origin, "AI Prompt source must be CLI or Desktop.");
+
         let blank_name = save_ai_prompt_in_db(
             &db,
             AiPromptInput {
                 id: None,
                 agent_type: "codex".to_string(),
+                agent_origin: "desktop".to_string(),
                 name: "  ".to_string(),
                 icon: "hammer".to_string(),
                 prompt_text: String::new(),
@@ -16012,6 +16094,7 @@ mod tests {
             AiPromptInput {
                 id: None,
                 agent_type: "claude".to_string(),
+                agent_origin: "desktop".to_string(),
                 name: "implement ticket".to_string(),
                 icon: "review".to_string(),
                 prompt_text: String::new(),
@@ -16025,6 +16108,7 @@ mod tests {
             AiPromptInput {
                 id: Some(existing.id),
                 agent_type: "claude".to_string(),
+                agent_origin: "cli".to_string(),
                 name: "IMPLEMENT TICKET".to_string(),
                 icon: "review".to_string(),
                 prompt_text: String::new(),
@@ -16059,6 +16143,7 @@ mod tests {
                 id: "agent_1".to_string(),
                 name: "Legacy Codex".to_string(),
                 agent_type: "codex".to_string(),
+                agent_origin: "desktop".to_string(),
                 icon: "sparkles".to_string(),
                 prompt_text: String::new(),
                 created_at: 1,
@@ -16233,6 +16318,7 @@ mod tests {
             AiPromptInput {
                 id: None,
                 agent_type: "codex".to_string(),
+                agent_origin: "desktop".to_string(),
                 name: "Implement ticket".to_string(),
                 icon: "hammer".to_string(),
                 prompt_text: "Use the project conventions.".to_string(),
@@ -16248,16 +16334,17 @@ mod tests {
         )
         .expect("create task");
 
-        let deep_link = prepare_ai_prompt_thread_in_db(
-            &db,
-            &OpenAiPromptThreadInput {
-                ai_prompt_id: prompt.id,
-                task_id: task.id.clone(),
-                path: resource.path,
-                branch_mode: "current".to_string(),
-            },
-        )
-        .expect("prepare thread");
+        let launch_input = OpenAiPromptThreadInput {
+            ai_prompt_id: prompt.id,
+            task_id: task.id.clone(),
+            path: resource.path,
+            branch_mode: "current".to_string(),
+            agent_type: "codex".to_string(),
+            agent_origin: "desktop".to_string(),
+        };
+        let deep_link = prepare_ai_prompt_thread_in_db(&db, &launch_input).expect("prepare thread");
+        let deep_link =
+            ai_prompt_deep_link("codex", &deep_link.0, &deep_link.1).expect("build deep link");
         assert!(deep_link.starts_with("codex://threads/new?"));
         let deep_link = reqwest::Url::parse(&deep_link).expect("parse deep link");
         let query = deep_link.query_pairs().collect::<HashMap<_, _>>();
@@ -16275,6 +16362,32 @@ mod tests {
                 .expect("load original task")
                 .is_some(),
             "preparing an AI thread must keep the original task"
+        );
+        let override_input = OpenAiPromptThreadInput {
+            agent_type: "claude".to_string(),
+            agent_origin: "cli".to_string(),
+            ..launch_input.clone()
+        };
+        prepare_ai_prompt_thread_in_db(&db, &override_input).expect("prepare one-run override");
+        let stored_prompt = get_ai_prompt_in_db(&db, &launch_input.ai_prompt_id)
+            .expect("load prompt")
+            .expect("prompt exists");
+        assert_eq!(stored_prompt.agent_type, "codex");
+        assert_eq!(stored_prompt.agent_origin, "desktop");
+
+        let disabled_settings = AiSessionSettings {
+            codex_desktop: false,
+            ..AiSessionSettings::default()
+        };
+        set_app_setting(
+            &db,
+            AI_SESSION_SETTINGS_KEY,
+            Some(&serde_json::to_string(&disabled_settings).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(
+            prepare_ai_prompt_thread_in_db(&db, &launch_input).unwrap_err(),
+            "This AI Prompt source is disabled. Enable it in AI Session settings before running the prompt."
         );
 
         fs::remove_dir_all(repository_path).expect("remove repository");

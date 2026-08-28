@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use rusqlite::{params, Connection as SqliteConnection};
 use serde::{Deserialize, Serialize};
@@ -1163,6 +1165,53 @@ fn ai_session_terminal_command(provider: &str, session_id: &str) -> Result<Strin
         "claude" => Ok(format!("claude --resume {session_id}\r")),
         _ => Err("Unsupported AI session provider.".to_string()),
     }
+}
+
+fn ai_prompt_terminal_command(provider: &str, prompt: &str) -> Result<String, String> {
+    let executable = match provider {
+        "codex" => "codex",
+        "claude" => "claude",
+        _ => return Err("Unsupported AI Prompt agent.".to_string()),
+    };
+    if prompt.contains('\0') {
+        return Err("AI Prompt text contains an unsupported null character.".to_string());
+    }
+
+    #[cfg(not(windows))]
+    {
+        let quoted = prompt.replace('\'', "'\"'\"'");
+        Ok(format!("{executable} '{quoted}'\r"))
+    }
+
+    #[cfg(windows)]
+    {
+        let prompt_base64 = BASE64_STANDARD.encode(prompt.as_bytes());
+        let script = format!(
+            "& {executable} ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{prompt_base64}')))"
+        );
+        let encoded_script = BASE64_STANDARD.encode(
+            script
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        );
+        Ok(format!(
+            "powershell.exe -NoLogo -NoProfile -EncodedCommand {encoded_script}\r"
+        ))
+    }
+}
+
+pub(crate) fn open_ai_prompt_terminal(
+    app: &tauri::AppHandle,
+    state: &TerminalTabsState,
+    provider: &str,
+    prompt: &str,
+    cwd: String,
+) -> Result<(), String> {
+    let command = ai_prompt_terminal_command(provider, prompt)?;
+    let snapshot = create_terminal_tab_inner(app, state, true, Some(cwd))?;
+    complete_terminal_startup_input_inner(app, state, &snapshot.active_tab_id, command)?;
+    show_and_focus_workspace_window(app)
 }
 
 fn parse_process_list(output: &str) -> Vec<ProcessInfo> {
@@ -3714,6 +3763,24 @@ mod tests {
         assert_eq!(
             ai_session_terminal_command("codex", "bad; command").unwrap_err(),
             "Invalid AI session identifier."
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn quotes_ai_prompt_terminal_commands_without_shell_interpolation() {
+        let prompt = "line 1\n' \"$HOME\" `touch bad` $(whoami) ; & | ü";
+        assert_eq!(
+            ai_prompt_terminal_command("codex", prompt).unwrap(),
+            "codex 'line 1\n'\"'\"' \"$HOME\" `touch bad` $(whoami) ; & | ü'\r"
+        );
+        assert_eq!(
+            ai_prompt_terminal_command("other", prompt).unwrap_err(),
+            "Unsupported AI Prompt agent."
+        );
+        assert_eq!(
+            ai_prompt_terminal_command("claude", "bad\0prompt").unwrap_err(),
+            "AI Prompt text contains an unsupported null character."
         );
     }
 

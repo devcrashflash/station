@@ -57,6 +57,24 @@ export const AI_SESSION_SOURCE_OPTIONS = [
   },
 ];
 
+export function enabledAiSessionSourceOptions(settings) {
+  const normalized = normalizeAiSessionSettings(settings);
+  return AI_SESSION_SOURCE_OPTIONS.filter((option) => normalized[option.key]);
+}
+
+export function aiSessionSourceOption(agentType, agentOrigin) {
+  return AI_SESSION_SOURCE_OPTIONS.find((option) => (
+    option.provider === agentType && option.origin === agentOrigin
+  )) || null;
+}
+
+export function preferredAiSessionSource(settings, agentType, agentOrigin) {
+  const enabled = enabledAiSessionSourceOptions(settings);
+  return enabled.find((option) => (
+    option.provider === agentType && option.origin === agentOrigin
+  )) || enabled[0] || null;
+}
+
 export const DEFAULT_AI_SESSION_SETTINGS = {
   codexCli: true,
   codexDesktop: true,

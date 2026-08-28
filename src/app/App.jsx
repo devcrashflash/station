@@ -948,6 +948,7 @@ function App() {
           task={selectedTask}
           project={selectedTaskProject}
           aiPrompts={aiPrompts}
+          aiSessionSettings={aiSessionSettings}
           commandSettings={commandSettings}
           localResources={localResources}
           homeDirectory={terminalSettings.profileDirectory}
@@ -955,7 +956,7 @@ function App() {
           onOpenAiPromptThread={async (payload) => {
             const taskToKeep = selectedTask;
             try {
-              const deepLink = await api.openAiPromptThread(payload);
+              const launchResult = await api.openAiPromptThread(payload);
               const prompt = aiPrompts.find((item) => item.id === payload.aiPromptId);
               setSelectedTask((current) => current || taskToKeep);
               setTasks((current) => (
@@ -964,7 +965,7 @@ function App() {
                   : current
               ));
               showNotice(`Opening ${prompt?.name || "AI Prompt"}. This task remains open here.`);
-              return deepLink;
+              return launchResult;
             } catch (error) {
               reportError(error);
               throw error;
