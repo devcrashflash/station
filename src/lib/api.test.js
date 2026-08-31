@@ -19,6 +19,12 @@ import {
   normalizeProjectColor,
 } from "./projectAvatar.js";
 import { DEFAULT_TERMINAL_SHORTCUTS } from "./terminalShortcuts.js";
+import {
+  TERMINAL_SHELL_INTEGRATION_DESKTOP_REQUIRED_STATUS,
+  terminalShellIntegrationBadgeText,
+  terminalShellIntegrationDetailText,
+  terminalShellIntegrationStatusText,
+} from "./terminalShellIntegration.js";
 import { parseSmartInput } from "./smartInputParser.js";
 
 const connections = [
@@ -339,6 +345,36 @@ test("local fallback stores terminal settings and restores defaults", async () =
     shortcuts: { ...customShortcuts, search: "CommandOrControl+KeyW" },
   }), /cannot replace/);
   assert.deepEqual(await api.listTerminalFonts(), []);
+});
+
+test("local fallback reports Shift+Enter shell integration as desktop-only", async () => {
+  assert.deepEqual(
+    await api.terminalShellIntegrationStatus(),
+    TERMINAL_SHELL_INTEGRATION_DESKTOP_REQUIRED_STATUS,
+  );
+  await assert.rejects(api.installTerminalShellIntegration(), /requires the desktop app/);
+  await assert.rejects(api.uninstallTerminalShellIntegration(), /requires the desktop app/);
+});
+
+test("formats Shift+Enter shell integration status states", () => {
+  assert.equal(terminalShellIntegrationBadgeText(null), "Checking");
+  assert.equal(
+    terminalShellIntegrationStatusText({ supported: false, message: "No supported shell." }),
+    "No supported shell.",
+  );
+  assert.equal(terminalShellIntegrationBadgeText({ supported: false }), "Unsupported");
+  assert.equal(
+    terminalShellIntegrationStatusText({ supported: true, installed: false, shell: "zsh" }),
+    "Available for zsh, not installed.",
+  );
+  assert.equal(
+    terminalShellIntegrationStatusText({ supported: true, installed: true, shell: "fish" }),
+    "Installed for fish.",
+  );
+  assert.match(
+    terminalShellIntegrationDetailText({ supported: true, installed: true }),
+    /Open a new terminal session/,
+  );
 });
 
 test("local fallback stores command settings and defaults Review to enabled", async () => {

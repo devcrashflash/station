@@ -31,6 +31,12 @@ import { formatShortcut, shortcutFromKeyboardEvent, shortcutPreviewFromKeyboardE
 import { quickCaptureShortcutConflict, quickCaptureStatus } from "@/lib/quickCaptureSettings";
 import { terminalFontFamily, terminalFontOptions, terminalFontStyle, terminalFontStyleOptions } from "@/lib/terminalFonts";
 import {
+  terminalShellIntegrationBadgeText,
+  terminalShellIntegrationBadgeVariant,
+  terminalShellIntegrationDetailText,
+  terminalShellIntegrationStatusText,
+} from "@/lib/terminalShellIntegration";
+import {
   DEFAULT_TERMINAL_SHORTCUTS,
   TERMINAL_SHORTCUT_ACTIONS,
   normalizeTerminalShortcuts,
@@ -119,6 +125,7 @@ export function SettingsDialog({
   aiSessionSettings,
   terminalSettings,
   terminalFonts = [],
+  terminalShellIntegration,
   quickCaptureSettings,
   themePreference = "system",
   calendarAccounts = [],
@@ -138,6 +145,9 @@ export function SettingsDialog({
   onSaveCommandSettings,
   onSaveAiSessionSettings,
   onSaveTerminalSettings,
+  onRefreshTerminalShellIntegration,
+  onInstallTerminalShellIntegration,
+  onUninstallTerminalShellIntegration,
   onSaveQuickCaptureSettings,
   onThemePreferenceChange,
   onSaveCalendarSubscription,
@@ -491,8 +501,12 @@ export function SettingsDialog({
               <TerminalTab
                 settings={terminalSettings}
                 fonts={terminalFonts}
+                shellIntegration={terminalShellIntegration}
                 onChooseDirectory={onChooseDirectory}
                 onSave={onSaveTerminalSettings}
+                onRefreshShellIntegration={onRefreshTerminalShellIntegration}
+                onInstallShellIntegration={onInstallTerminalShellIntegration}
+                onUninstallShellIntegration={onUninstallTerminalShellIntegration}
               />
             )}
 
@@ -1598,7 +1612,16 @@ function BrowserTab({
   );
 }
 
-function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
+function TerminalTab({
+  settings,
+  fonts,
+  shellIntegration,
+  onChooseDirectory,
+  onSave,
+  onRefreshShellIntegration,
+  onInstallShellIntegration,
+  onUninstallShellIntegration,
+}) {
   const [newTabDirectory, setNewTabDirectory] = useState(settings?.newTabDirectory || "");
   const [newPaneDirectory, setNewPaneDirectory] = useState(settings?.newPaneDirectory || "");
   const [inactivePaneOpacity, setInactivePaneOpacity] = useState(settings?.inactivePaneOpacity ?? 0.65);
@@ -1616,6 +1639,7 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
   const [shortcutError, setShortcutError] = useState("");
   const [notice, setNotice] = useState("");
   const [isSaving, setIsSaving] = useState(false);
+  const [isShellIntegrationBusy, setIsShellIntegrationBusy] = useState(false);
   const [choosingFor, setChoosingFor] = useState(null);
 
   useEffect(() => {
@@ -1763,6 +1787,48 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
       setNotice(error?.message || String(error));
     } finally {
       setIsSaving(false);
+    }
+  }
+
+  async function refreshShellIntegration() {
+    if (!onRefreshShellIntegration) return;
+    setIsShellIntegrationBusy(true);
+    setNotice("");
+    try {
+      const status = await onRefreshShellIntegration();
+      setNotice(status?.message || "Shift+Enter shell integration status refreshed.");
+    } catch (error) {
+      setNotice(error?.message || String(error));
+    } finally {
+      setIsShellIntegrationBusy(false);
+    }
+  }
+
+  async function installShellIntegration() {
+    if (!onInstallShellIntegration) return;
+    setIsShellIntegrationBusy(true);
+    setNotice("");
+    try {
+      const status = await onInstallShellIntegration();
+      setNotice(status?.message || "Shift+Enter shell integration installed. Open a new terminal session to use it.");
+    } catch (error) {
+      setNotice(error?.message || String(error));
+    } finally {
+      setIsShellIntegrationBusy(false);
+    }
+  }
+
+  async function uninstallShellIntegration() {
+    if (!onUninstallShellIntegration) return;
+    setIsShellIntegrationBusy(true);
+    setNotice("");
+    try {
+      const status = await onUninstallShellIntegration();
+      setNotice(status?.message || "Shift+Enter shell integration removed.");
+    } catch (error) {
+      setNotice(error?.message || String(error));
+    } finally {
+      setIsShellIntegrationBusy(false);
     }
   }
 
@@ -1918,6 +1984,66 @@ function TerminalTab({ settings, fonts, onChooseDirectory, onSave }) {
             </p>
           </div>
         </label>
+
+        <div className="rounded-md border bg-muted/20 p-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="grid gap-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-sm font-medium">Shift+Enter multiline in shells</p>
+                <Badge variant={terminalShellIntegrationBadgeVariant(shellIntegration)}>
+                  {terminalShellIntegrationBadgeText(shellIntegration)}
+                </Badge>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {terminalShellIntegrationStatusText(shellIntegration)}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {terminalShellIntegrationDetailText(shellIntegration)}
+              </p>
+              {shellIntegration?.targetConfigPath && (
+                <p className="break-all text-xs text-muted-foreground">
+                  Managed file: {shellIntegration.targetConfigPath}
+                </p>
+              )}
+              {shellIntegration?.startupFilePath && (
+                <p className="break-all text-xs text-muted-foreground">
+                  Startup file: {shellIntegration.startupFilePath}
+                </p>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={isShellIntegrationBusy || !onRefreshShellIntegration}
+                onClick={refreshShellIntegration}
+              >
+                {isShellIntegrationBusy ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}
+                Refresh
+              </Button>
+              {shellIntegration?.installed ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={isShellIntegrationBusy || !shellIntegration?.supported || !onUninstallShellIntegration}
+                  onClick={uninstallShellIntegration}
+                >
+                  {isShellIntegrationBusy ? <LoaderCircle className="animate-spin" /> : <Trash2 />}
+                  Remove
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  disabled={isShellIntegrationBusy || !shellIntegration?.supported || !onInstallShellIntegration}
+                  onClick={installShellIntegration}
+                >
+                  {isShellIntegrationBusy ? <LoaderCircle className="animate-spin" /> : <SquareTerminal />}
+                  Install
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
       </FieldSet>
 
       <details

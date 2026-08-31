@@ -5,6 +5,7 @@ use rusqlite::{params, Connection as SqliteConnection};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    env, fs,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{mpsc, Mutex, OnceLock},
@@ -58,6 +59,8 @@ const PREFERRED_FONT_FAMILIES: [&str; 5] = [
     "DejaVu Sans Mono",
     "Liberation Mono",
 ];
+const STATION_SHIFT_ENTER_BEGIN: &str = "# >>> Station Shift+Enter integration >>>";
+const STATION_SHIFT_ENTER_END: &str = "# <<< Station Shift+Enter integration <<<";
 
 static TERMINAL_FONT_CATALOG: OnceLock<Vec<TerminalFontFamily>> = OnceLock::new();
 
@@ -156,6 +159,60 @@ pub struct TerminalSettingsInput {
     horizontal_spacing: Option<f64>,
     scrollback_lines: Option<i64>,
     shortcuts: Option<TerminalShortcuts>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalShellKind {
+    Fish,
+    Zsh,
+    Bash,
+}
+
+impl TerminalShellKind {
+    fn name(self) -> &'static str {
+        match self {
+            TerminalShellKind::Fish => "fish",
+            TerminalShellKind::Zsh => "zsh",
+            TerminalShellKind::Bash => "bash",
+        }
+    }
+
+    fn integration_relative_path(self) -> &'static str {
+        match self {
+            TerminalShellKind::Fish => ".config/fish/conf.d/station-shift-enter.fish",
+            TerminalShellKind::Zsh => ".config/station/shell-integration.zsh",
+            TerminalShellKind::Bash => ".config/station/shell-integration.bash",
+        }
+    }
+
+    fn startup_relative_path(self) -> Option<&'static str> {
+        match self {
+            TerminalShellKind::Fish => None,
+            TerminalShellKind::Zsh => Some(".zshrc"),
+            TerminalShellKind::Bash => Some(".bashrc"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DetectedTerminalShell {
+    kind: Option<TerminalShellKind>,
+    shell: Option<String>,
+    shell_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalShellIntegrationStatus {
+    shell: Option<String>,
+    shell_path: Option<String>,
+    supported: bool,
+    target_config_path: Option<String>,
+    startup_file_path: Option<String>,
+    installed: bool,
+    managed_file_installed: bool,
+    source_block_installed: bool,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2559,6 +2616,298 @@ fn terminal_shortcuts(db: &SqliteConnection) -> TerminalShortcuts {
     validate_terminal_shortcuts(&shortcuts).map_or(defaults, |_| shortcuts)
 }
 
+fn detect_terminal_shell_from_path(shell_path: Option<&str>) -> DetectedTerminalShell {
+    let shell_path = shell_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let shell = shell_path.as_deref().and_then(|path| {
+        Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.trim_start_matches('-').to_ascii_lowercase())
+    });
+    let kind = match shell.as_deref() {
+        Some("fish") => Some(TerminalShellKind::Fish),
+        Some("zsh") => Some(TerminalShellKind::Zsh),
+        Some("bash") => Some(TerminalShellKind::Bash),
+        _ => None,
+    };
+    DetectedTerminalShell {
+        kind,
+        shell,
+        shell_path,
+    }
+}
+
+fn detected_login_shell() -> DetectedTerminalShell {
+    detect_terminal_shell_from_path(env::var("SHELL").ok().as_deref())
+}
+
+fn shell_integration_snippet(kind: TerminalShellKind) -> &'static str {
+    match kind {
+        TerminalShellKind::Fish => {
+            r#"# Station Shift+Enter integration
+# Installed by Station. Remove from Station settings to uninstall.
+bind \e\[13\;2u insert-line-under
+bind -M insert \e\[13\;2u insert-line-under 2>/dev/null
+"#
+        }
+        TerminalShellKind::Zsh => {
+            r#"# Station Shift+Enter integration
+# Installed by Station. Remove from Station settings to uninstall.
+station_shift_enter_newline() {
+  LBUFFER+=$'\n'
+}
+zle -N station_shift_enter_newline
+bindkey $'\e[13;2u' station_shift_enter_newline
+bindkey -M emacs $'\e[13;2u' station_shift_enter_newline 2>/dev/null
+bindkey -M viins $'\e[13;2u' station_shift_enter_newline 2>/dev/null
+"#
+        }
+        TerminalShellKind::Bash => {
+            r#"# Station Shift+Enter integration
+# Installed by Station. Remove from Station settings to uninstall.
+__station_shift_enter_newline() {
+  READLINE_LINE="${READLINE_LINE:0:READLINE_POINT}"$'\n'"${READLINE_LINE:READLINE_POINT}"
+  READLINE_POINT=$((READLINE_POINT + 1))
+}
+bind -x '"\e[13;2u": __station_shift_enter_newline'
+"#
+        }
+    }
+}
+
+fn managed_source_block(kind: TerminalShellKind) -> Option<String> {
+    let extension = match kind {
+        TerminalShellKind::Zsh => "zsh",
+        TerminalShellKind::Bash => "bash",
+        TerminalShellKind::Fish => return None,
+    };
+    Some(format!(
+        "{STATION_SHIFT_ENTER_BEGIN}\n[ -r \"$HOME/.config/station/shell-integration.{extension}\" ] && . \"$HOME/.config/station/shell-integration.{extension}\"\n{STATION_SHIFT_ENTER_END}\n"
+    ))
+}
+
+fn shell_integration_target_path(home: &Path, kind: TerminalShellKind) -> PathBuf {
+    home.join(kind.integration_relative_path())
+}
+
+fn shell_integration_startup_path(home: &Path, kind: TerminalShellKind) -> Option<PathBuf> {
+    kind.startup_relative_path()
+        .map(|relative| home.join(relative))
+}
+
+fn contains_managed_source_block(contents: &str) -> bool {
+    contents.contains(STATION_SHIFT_ENTER_BEGIN) && contents.contains(STATION_SHIFT_ENTER_END)
+}
+
+fn managed_block_range(contents: &str) -> Result<Option<(usize, usize)>, String> {
+    let begin = contents.find(STATION_SHIFT_ENTER_BEGIN);
+    let end = contents.find(STATION_SHIFT_ENTER_END);
+    match (begin, end) {
+        (None, None) => Ok(None),
+        (Some(begin), Some(end)) if begin <= end => {
+            let mut range_end = end + STATION_SHIFT_ENTER_END.len();
+            if contents[range_end..].starts_with('\n') {
+                range_end += 1;
+            }
+            Ok(Some((begin, range_end)))
+        }
+        _ => Err(
+            "The shell startup file contains a partial Station Shift+Enter block. Remove that block manually and retry."
+                .to_string(),
+        ),
+    }
+}
+
+fn install_managed_source_block(contents: &str, block: &str) -> Result<String, String> {
+    if let Some((start, end)) = managed_block_range(contents)? {
+        let mut next = String::with_capacity(contents.len() - (end - start) + block.len());
+        next.push_str(&contents[..start]);
+        next.push_str(block);
+        next.push_str(&contents[end..]);
+        return Ok(next);
+    }
+
+    let mut next = contents.to_string();
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    if !next.is_empty() {
+        next.push('\n');
+    }
+    next.push_str(block);
+    Ok(next)
+}
+
+fn uninstall_managed_source_block(contents: &str) -> Result<String, String> {
+    if let Some((start, end)) = managed_block_range(contents)? {
+        let mut next = String::with_capacity(contents.len() - (end - start));
+        next.push_str(&contents[..start]);
+        next.push_str(&contents[end..]);
+        return Ok(next);
+    }
+    Ok(contents.to_string())
+}
+
+fn read_optional_utf8_file(path: &Path, file_label: &str) -> Result<Option<String>, String> {
+    match fs::read(path) {
+        Ok(bytes) => String::from_utf8(bytes).map(Some).map_err(|_| {
+            format!("{file_label} is not valid UTF-8, so Station did not rewrite it.")
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("Could not read {}: {error}", path.display())),
+    }
+}
+
+fn write_utf8_file(path: &Path, contents: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+    }
+    fs::write(path, contents)
+        .map_err(|error| format!("Could not write {}: {error}", path.display()))
+}
+
+fn remove_managed_file(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Could not remove {}: {error}", path.display())),
+    }
+}
+
+fn terminal_shell_integration_status_for_home(
+    home: &Path,
+    detected: DetectedTerminalShell,
+) -> Result<TerminalShellIntegrationStatus, String> {
+    let Some(kind) = detected.kind else {
+        let shell = detected.shell.clone();
+        return Ok(TerminalShellIntegrationStatus {
+            shell,
+            shell_path: detected.shell_path,
+            supported: false,
+            target_config_path: None,
+            startup_file_path: None,
+            installed: false,
+            managed_file_installed: false,
+            source_block_installed: false,
+            message: match detected.shell {
+                Some(shell) => {
+                    format!("Shift+Enter shell integration is not available for {shell}.")
+                }
+                None => {
+                    "Could not detect a login shell for Shift+Enter shell integration.".to_string()
+                }
+            },
+        });
+    };
+
+    let target_config_path = shell_integration_target_path(home, kind);
+    let startup_file_path = shell_integration_startup_path(home, kind);
+    let managed_file_installed = target_config_path.is_file();
+    let mut status_warning = None;
+    let source_block_installed = if let Some(path) = startup_file_path.as_deref() {
+        match read_optional_utf8_file(path, "The shell startup file") {
+            Ok(contents) => contents
+                .as_deref()
+                .is_some_and(contains_managed_source_block),
+            Err(error) => {
+                status_warning = Some(error);
+                false
+            }
+        }
+    } else {
+        false
+    };
+    let installed =
+        managed_file_installed && (kind == TerminalShellKind::Fish || source_block_installed);
+    let message = if let Some(warning) = status_warning {
+        warning
+    } else if installed {
+        format!(
+            "Shift+Enter shell integration is installed for {}. Open a new terminal or source the startup file to use it.",
+            kind.name()
+        )
+    } else {
+        format!(
+            "Shift+Enter shell integration is available for {} but not installed.",
+            kind.name()
+        )
+    };
+
+    Ok(TerminalShellIntegrationStatus {
+        shell: Some(kind.name().to_string()),
+        shell_path: detected.shell_path,
+        supported: true,
+        target_config_path: Some(target_config_path.to_string_lossy().into_owned()),
+        startup_file_path: startup_file_path.map(|path| path.to_string_lossy().into_owned()),
+        installed,
+        managed_file_installed,
+        source_block_installed,
+        message,
+    })
+}
+
+fn install_terminal_shell_integration_for_home(
+    home: &Path,
+    detected: DetectedTerminalShell,
+) -> Result<TerminalShellIntegrationStatus, String> {
+    let Some(kind) = detected.kind else {
+        return Err(match detected.shell {
+            Some(shell) => format!("Shift+Enter shell integration is not available for {shell}."),
+            None => "Could not detect a supported login shell.".to_string(),
+        });
+    };
+
+    let target_path = shell_integration_target_path(home, kind);
+    let startup_update = if let (Some(startup_path), Some(block)) = (
+        shell_integration_startup_path(home, kind),
+        managed_source_block(kind),
+    ) {
+        let contents =
+            read_optional_utf8_file(&startup_path, "The shell startup file")?.unwrap_or_default();
+        Some((
+            startup_path,
+            install_managed_source_block(&contents, &block)?,
+        ))
+    } else {
+        None
+    };
+
+    write_utf8_file(&target_path, shell_integration_snippet(kind))?;
+    if let Some((startup_path, contents)) = startup_update {
+        write_utf8_file(&startup_path, &contents)?;
+    }
+
+    terminal_shell_integration_status_for_home(home, detected)
+}
+
+fn uninstall_terminal_shell_integration_for_home(
+    home: &Path,
+    detected: DetectedTerminalShell,
+) -> Result<TerminalShellIntegrationStatus, String> {
+    let Some(kind) = detected.kind else {
+        return Err(match detected.shell {
+            Some(shell) => format!("Shift+Enter shell integration is not available for {shell}."),
+            None => "Could not detect a supported login shell.".to_string(),
+        });
+    };
+
+    remove_managed_file(&shell_integration_target_path(home, kind))?;
+    if let Some(startup_path) = shell_integration_startup_path(home, kind) {
+        if let Some(contents) = read_optional_utf8_file(&startup_path, "The shell startup file")? {
+            let next = uninstall_managed_source_block(&contents)?;
+            if next != contents {
+                write_utf8_file(&startup_path, &next)?;
+            }
+        }
+    }
+
+    terminal_shell_integration_status_for_home(home, detected)
+}
+
 #[tauri::command]
 pub fn list_terminal_settings(
     app: tauri::AppHandle,
@@ -2601,6 +2950,30 @@ pub fn list_terminal_settings(
         shortcuts: terminal_shortcuts(&db),
         profile_directory: profile_directory.to_string_lossy().into_owned(),
     })
+}
+
+#[tauri::command]
+pub fn terminal_shell_integration_status(
+    app: tauri::AppHandle,
+) -> Result<TerminalShellIntegrationStatus, String> {
+    let home = app.path().home_dir().map_err(db_error)?;
+    terminal_shell_integration_status_for_home(&home, detected_login_shell())
+}
+
+#[tauri::command]
+pub fn install_terminal_shell_integration(
+    app: tauri::AppHandle,
+) -> Result<TerminalShellIntegrationStatus, String> {
+    let home = app.path().home_dir().map_err(db_error)?;
+    install_terminal_shell_integration_for_home(&home, detected_login_shell())
+}
+
+#[tauri::command]
+pub fn uninstall_terminal_shell_integration(
+    app: tauri::AppHandle,
+) -> Result<TerminalShellIntegrationStatus, String> {
+    let home = app.path().home_dir().map_err(db_error)?;
+    uninstall_terminal_shell_integration_for_home(&home, detected_login_shell())
 }
 
 #[tauri::command]
@@ -3547,6 +3920,155 @@ mod tests {
             persistence_degraded: false,
             persistence_worker_running: false,
         }
+    }
+
+    fn temp_shell_home(name: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("devcrashflash-{name}-{suffix}"));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn detects_supported_terminal_shells_from_shell_paths() {
+        assert_eq!(
+            detect_terminal_shell_from_path(Some("/opt/homebrew/bin/fish")).kind,
+            Some(TerminalShellKind::Fish)
+        );
+        assert_eq!(
+            detect_terminal_shell_from_path(Some("/bin/-zsh")).kind,
+            Some(TerminalShellKind::Zsh)
+        );
+        assert_eq!(
+            detect_terminal_shell_from_path(Some("/usr/local/bin/bash")).kind,
+            Some(TerminalShellKind::Bash)
+        );
+        assert_eq!(
+            detect_terminal_shell_from_path(Some("/bin/tcsh")).kind,
+            None
+        );
+        assert_eq!(detect_terminal_shell_from_path(None).kind, None);
+    }
+
+    #[test]
+    fn generates_exact_shift_enter_shell_snippets() {
+        assert_eq!(
+            managed_source_block(TerminalShellKind::Zsh).unwrap(),
+            "# >>> Station Shift+Enter integration >>>\n[ -r \"$HOME/.config/station/shell-integration.zsh\" ] && . \"$HOME/.config/station/shell-integration.zsh\"\n# <<< Station Shift+Enter integration <<<\n"
+        );
+        assert!(shell_integration_snippet(TerminalShellKind::Zsh)
+            .contains("bindkey $'\\e[13;2u' station_shift_enter_newline"));
+        assert!(shell_integration_snippet(TerminalShellKind::Bash)
+            .contains("bind -x '\"\\e[13;2u\": __station_shift_enter_newline'"));
+        assert!(shell_integration_snippet(TerminalShellKind::Fish)
+            .contains("bind \\e\\[13\\;2u insert-line-under"));
+    }
+
+    #[test]
+    fn installs_zsh_integration_idempotently_without_duplicate_source_blocks() {
+        let home = temp_shell_home("zsh-shift-enter-install");
+        std::fs::write(home.join(".zshrc"), "export PATH=/example/bin:$PATH\n").unwrap();
+        let shell = detect_terminal_shell_from_path(Some("/bin/zsh"));
+
+        let first = install_terminal_shell_integration_for_home(&home, shell.clone()).unwrap();
+        let second = install_terminal_shell_integration_for_home(&home, shell).unwrap();
+        let zshrc = std::fs::read_to_string(home.join(".zshrc")).unwrap();
+
+        assert!(first.installed);
+        assert!(second.installed);
+        assert_eq!(zshrc.matches(STATION_SHIFT_ENTER_BEGIN).count(), 1);
+        assert_eq!(zshrc.matches(STATION_SHIFT_ENTER_END).count(), 1);
+        assert!(
+            std::fs::read_to_string(home.join(".config/station/shell-integration.zsh"))
+                .unwrap()
+                .contains("LBUFFER+=$'\\n'")
+        );
+
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn installs_fish_integration_as_a_managed_conf_file_only() {
+        let home = temp_shell_home("fish-shift-enter-install");
+        let status = install_terminal_shell_integration_for_home(
+            &home,
+            detect_terminal_shell_from_path(Some("/usr/local/bin/fish")),
+        )
+        .unwrap();
+
+        assert!(status.installed);
+        assert!(status.managed_file_installed);
+        assert!(!status.source_block_installed);
+        assert!(
+            std::fs::read_to_string(home.join(".config/fish/conf.d/station-shift-enter.fish"))
+                .unwrap()
+                .contains("insert-line-under")
+        );
+
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn uninstalls_only_station_managed_shell_integration() {
+        let home = temp_shell_home("bash-shift-enter-uninstall");
+        std::fs::write(home.join(".bashrc"), "alias ll='ls -la'\n").unwrap();
+        let shell = detect_terminal_shell_from_path(Some("/bin/bash"));
+        install_terminal_shell_integration_for_home(&home, shell.clone()).unwrap();
+
+        let status = uninstall_terminal_shell_integration_for_home(&home, shell).unwrap();
+        let bashrc = std::fs::read_to_string(home.join(".bashrc")).unwrap();
+
+        assert!(!status.installed);
+        assert!(!home.join(".config/station/shell-integration.bash").exists());
+        assert!(bashrc.contains("alias ll='ls -la'"));
+        assert!(!bashrc.contains(STATION_SHIFT_ENTER_BEGIN));
+
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn rejects_unsupported_shells_and_non_utf8_startup_files_safely() {
+        let home = temp_shell_home("unsupported-shift-enter");
+        let unsupported = install_terminal_shell_integration_for_home(
+            &home,
+            detect_terminal_shell_from_path(Some("/bin/tcsh")),
+        );
+        assert!(unsupported.unwrap_err().contains("not available"));
+
+        std::fs::write(home.join(".zshrc"), [0xff, 0xfe, 0xfd]).unwrap();
+        let invalid_utf8 = install_terminal_shell_integration_for_home(
+            &home,
+            detect_terminal_shell_from_path(Some("/bin/zsh")),
+        );
+        assert!(invalid_utf8.unwrap_err().contains("not valid UTF-8"));
+        assert_eq!(
+            std::fs::read(home.join(".zshrc")).unwrap(),
+            [0xff, 0xfe, 0xfd]
+        );
+        assert!(!home.join(".config/station/shell-integration.zsh").exists());
+
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn status_reports_non_utf8_startup_files_without_failing_app_startup() {
+        let home = temp_shell_home("non-utf8-shift-enter-status");
+        std::fs::write(home.join(".bashrc"), [0xff, 0xfe, 0xfd]).unwrap();
+
+        let status = terminal_shell_integration_status_for_home(
+            &home,
+            detect_terminal_shell_from_path(Some("/bin/bash")),
+        )
+        .unwrap();
+
+        assert!(status.supported);
+        assert!(!status.installed);
+        assert!(status.message.contains("not valid UTF-8"));
+
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

@@ -21,6 +21,7 @@ import {
   normalizeTerminalShortcuts,
   terminalShortcutConflict,
 } from "./terminalShortcuts.js";
+import { TERMINAL_SHELL_INTEGRATION_DESKTOP_REQUIRED_STATUS } from "./terminalShellIntegration.js";
 
 const STORAGE_KEY = "devcrashflash-station-state";
 const LEGACY_STORAGE_KEY = "dev-crash-flash-ai-studio-state";
@@ -112,6 +113,12 @@ export const api = {
   listTerminalFonts: () => call("list_terminal_fonts", {}, local.listTerminalFonts),
   saveTerminalSettings: (payload) =>
     call("save_terminal_settings", { input: payload }, () => local.saveTerminalSettings(payload)),
+  terminalShellIntegrationStatus: () =>
+    call("terminal_shell_integration_status", {}, local.terminalShellIntegrationStatus),
+  installTerminalShellIntegration: () =>
+    call("install_terminal_shell_integration", {}, local.installTerminalShellIntegration),
+  uninstallTerminalShellIntegration: () =>
+    call("uninstall_terminal_shell_integration", {}, local.uninstallTerminalShellIntegration),
   listAiSessionSettings: () =>
     call("list_ai_session_settings", {}, local.listAiSessionSettings),
   saveAiSessionSettings: (payload) =>
@@ -943,6 +950,18 @@ const local = {
     };
     writeState(state);
     return state.terminalSettings;
+  },
+
+  terminalShellIntegrationStatus() {
+    return { ...TERMINAL_SHELL_INTEGRATION_DESKTOP_REQUIRED_STATUS };
+  },
+
+  installTerminalShellIntegration() {
+    throw new Error("Installing Shift+Enter shell integration requires the desktop app.");
+  },
+
+  uninstallTerminalShellIntegration() {
+    throw new Error("Removing Shift+Enter shell integration requires the desktop app.");
   },
 
   listBrowserSettings() {

@@ -186,6 +186,7 @@ function App() {
     profileDirectory: "~",
   });
   const [terminalFonts, setTerminalFonts] = useState([]);
+  const [terminalShellIntegration, setTerminalShellIntegration] = useState(null);
   const [quickCaptureSettings, setQuickCaptureSettings] = useState({
     enabled: true,
     shortcut: "CommandOrControl+Shift+Space",
@@ -555,7 +556,7 @@ function App() {
   }, [selectedProjectId]);
 
   async function refreshShell() {
-    const [projectList, connectionList, calendarAccountList, aiPromptList, directoryList, browserSettingsResult, commandSettingsResult, aiSessionSettingsResult, terminalSettingsResult, terminalFontList, quickCaptureSettingsResult, recentFileList, todoList] = await Promise.all([
+    const [projectList, connectionList, calendarAccountList, aiPromptList, directoryList, browserSettingsResult, commandSettingsResult, aiSessionSettingsResult, terminalSettingsResult, terminalFontList, terminalShellIntegrationResult, quickCaptureSettingsResult, recentFileList, todoList] = await Promise.all([
       api.listProjects(),
       api.listConnections(),
       api.listCalendarAccounts(),
@@ -566,6 +567,7 @@ function App() {
       api.listAiSessionSettings(),
       api.listTerminalSettings(),
       api.listTerminalFonts(),
+      api.terminalShellIntegrationStatus(),
       api.quickCaptureSettings(),
       api.listRecentDirectoryFiles(),
       api.listSmartInboxTodos(),
@@ -581,6 +583,7 @@ function App() {
     setAiSessionSettingsReady(true);
     setTerminalSettings(terminalSettingsResult);
     setTerminalFonts(terminalFontList);
+    setTerminalShellIntegration(terminalShellIntegrationResult);
     setQuickCaptureSettings(quickCaptureSettingsResult);
     if (quickCaptureSettingsResult.error) showNotice(quickCaptureSettingsResult.error);
     setRecentDirectoryFiles(recentFileList);
@@ -1295,6 +1298,7 @@ function App() {
           aiSessionSettings={aiSessionSettings}
           terminalSettings={terminalSettings}
           terminalFonts={terminalFonts}
+          terminalShellIntegration={terminalShellIntegration}
           quickCaptureSettings={quickCaptureSettings}
           themePreference={themePreference}
           calendarAccounts={calendarAccounts}
@@ -1392,6 +1396,23 @@ function App() {
             setTerminalSettings(nextTerminalSettings);
             showNotice("Terminal settings saved.");
             return nextTerminalSettings;
+          }}
+          onRefreshTerminalShellIntegration={async () => {
+            const status = await api.terminalShellIntegrationStatus();
+            setTerminalShellIntegration(status);
+            return status;
+          }}
+          onInstallTerminalShellIntegration={async () => {
+            const status = await api.installTerminalShellIntegration();
+            setTerminalShellIntegration(status);
+            showNotice("Shift+Enter shell integration installed.");
+            return status;
+          }}
+          onUninstallTerminalShellIntegration={async () => {
+            const status = await api.uninstallTerminalShellIntegration();
+            setTerminalShellIntegration(status);
+            showNotice("Shift+Enter shell integration removed.");
+            return status;
           }}
           onSaveQuickCaptureSettings={async (payload) => {
             try {
