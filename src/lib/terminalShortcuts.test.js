@@ -6,6 +6,7 @@ import {
   matchesTerminalShortcut,
   normalizeTerminalShortcuts,
   shortcutsMatch,
+  terminalShiftEnterSequence,
   terminalShortcutConflict,
   terminalZoomDelta,
 } from "./terminalShortcuts.js";
@@ -20,6 +21,31 @@ test("matches shortcuts with exact platform modifiers", () => {
   assert.equal(matchesTerminalShortcut(event({ metaKey: true, shiftKey: true }), "CommandOrControl+KeyD", "MacIntel"), false);
   assert.equal(matchesTerminalShortcut(event({ metaKey: true, code: "KeyF" }), "CommandOrControl+KeyD", "MacIntel"), false);
   assert.equal(matchesTerminalShortcut(event({ metaKey: true, repeat: true }), "CommandOrControl+KeyD", "MacIntel"), false);
+});
+
+test("encodes exact Shift+Enter keydown as a distinct CSI-u event", () => {
+  assert.equal(terminalShiftEnterSequence(event({
+    code: "Enter",
+    key: "Enter",
+    shiftKey: true,
+  })), "\x1b[13;2u");
+  assert.equal(terminalShiftEnterSequence(event({
+    code: "NumpadEnter",
+    key: "Enter",
+    shiftKey: true,
+    repeat: true,
+  })), "\x1b[13;2u");
+});
+
+test("leaves other Enter events and modifier combinations to xterm", () => {
+  const shiftEnter = { code: "Enter", key: "Enter", shiftKey: true };
+  assert.equal(terminalShiftEnterSequence(event({ code: "Enter", key: "Enter" })), null);
+  assert.equal(terminalShiftEnterSequence(event({ ...shiftEnter, ctrlKey: true })), null);
+  assert.equal(terminalShiftEnterSequence(event({ ...shiftEnter, altKey: true })), null);
+  assert.equal(terminalShiftEnterSequence(event({ ...shiftEnter, metaKey: true })), null);
+  assert.equal(terminalShiftEnterSequence(event({ ...shiftEnter, type: "keypress" })), null);
+  assert.equal(terminalShiftEnterSequence(event({ ...shiftEnter, type: "keyup" })), null);
+  assert.equal(terminalShiftEnterSequence(event({ code: "KeyD", key: "d", shiftKey: true })), null);
 });
 
 test("compares equivalent shortcuts after resolving the platform primary modifier", () => {

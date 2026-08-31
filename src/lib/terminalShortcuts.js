@@ -16,6 +16,8 @@ export const TERMINAL_SHORTCUT_ACTIONS = Object.freeze([
   { id: "zoomOut", label: "Decrease font size" },
 ]);
 
+const SHIFT_ENTER_SEQUENCE = "\x1b[13;2u";
+
 const MODIFIER_TOKENS = new Set([
   "alt",
   "option",
@@ -113,6 +115,16 @@ export function matchesTerminalShortcut(event, shortcut, platform) {
     && Boolean(event.shiftKey) === parts.shift
     && Boolean(event.metaKey) === parts.meta
     && String(event.code || "").toLowerCase() === parts.code;
+}
+
+export function terminalShiftEnterSequence(event) {
+  if (event.type !== "keydown"
+    || event.key !== "Enter"
+    || !event.shiftKey
+    || event.ctrlKey
+    || event.altKey
+    || event.metaKey) return null;
+  return SHIFT_ENTER_SEQUENCE;
 }
 
 export function terminalShortcutConflict(shortcuts, platform) {

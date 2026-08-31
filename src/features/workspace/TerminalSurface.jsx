@@ -24,6 +24,7 @@ import {
   DEFAULT_TERMINAL_SHORTCUTS,
   matchesTerminalShortcut,
   normalizeTerminalShortcuts,
+  terminalShiftEnterSequence,
   terminalZoomDelta,
 } from "@/lib/terminalShortcuts";
 import { openExternalUrl } from "@/lib/externalLinks";
@@ -379,6 +380,13 @@ function TerminalPane({
         terminal.clear();
         syncTerminalScrollbackState(terminal);
         terminal.focus();
+        return false;
+      }
+      const shiftEnterSequence = terminalShiftEnterSequence(event);
+      if (shiftEnterSequence !== null) {
+        event.preventDefault();
+        event.stopPropagation();
+        terminal.input(shiftEnterSequence);
         return false;
       }
       return true;
