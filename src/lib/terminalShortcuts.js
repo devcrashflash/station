@@ -1,11 +1,20 @@
-export const DEFAULT_TERMINAL_SHORTCUTS = Object.freeze({
-  splitColumns: "CommandOrControl+KeyD",
-  splitRows: "CommandOrControl+Shift+KeyD",
-  search: "CommandOrControl+KeyF",
-  clear: "Super+KeyK",
-  zoomIn: "CommandOrControl+Equal",
-  zoomOut: "CommandOrControl+Minus",
-});
+export function defaultTerminalShortcuts(platform) {
+  const paneFocusModifier = platformIsMac(platform) ? "Super+Alt" : "Alt";
+  return {
+    splitColumns: "CommandOrControl+KeyD",
+    splitRows: "CommandOrControl+Shift+KeyD",
+    search: "CommandOrControl+KeyF",
+    clear: "Super+KeyK",
+    zoomIn: "CommandOrControl+Equal",
+    zoomOut: "CommandOrControl+Minus",
+    focusPaneLeft: `${paneFocusModifier}+ArrowLeft`,
+    focusPaneRight: `${paneFocusModifier}+ArrowRight`,
+    focusPaneUp: `${paneFocusModifier}+ArrowUp`,
+    focusPaneDown: `${paneFocusModifier}+ArrowDown`,
+  };
+}
+
+export const DEFAULT_TERMINAL_SHORTCUTS = Object.freeze(defaultTerminalShortcuts());
 
 export const TERMINAL_SHORTCUT_ACTIONS = Object.freeze([
   { id: "splitColumns", label: "Split pane right" },
@@ -14,6 +23,10 @@ export const TERMINAL_SHORTCUT_ACTIONS = Object.freeze([
   { id: "clear", label: "Clear terminal" },
   { id: "zoomIn", label: "Increase font size" },
   { id: "zoomOut", label: "Decrease font size" },
+  { id: "focusPaneLeft", label: "Focus pane left" },
+  { id: "focusPaneRight", label: "Focus pane right" },
+  { id: "focusPaneUp", label: "Focus pane up" },
+  { id: "focusPaneDown", label: "Focus pane down" },
 ]);
 
 const SHIFT_ENTER_SEQUENCE = "\x1b[13;2u";
@@ -99,22 +112,36 @@ export function shortcutsMatch(left, right, platform) {
   return leftSignature !== null && leftSignature === shortcutSignature(right, platform);
 }
 
-export function normalizeTerminalShortcuts(shortcuts = {}) {
-  return Object.fromEntries(Object.entries(DEFAULT_TERMINAL_SHORTCUTS).map(([id, fallback]) => [
+export function normalizeTerminalShortcuts(shortcuts = {}, platform) {
+  const defaults = defaultTerminalShortcuts(platform);
+  return Object.fromEntries(Object.entries(defaults).map(([id, fallback]) => [
     id,
     shortcutParts(shortcuts?.[id]) ? shortcuts[id] : fallback,
   ]));
 }
 
-export function matchesTerminalShortcut(event, shortcut, platform) {
+export function matchesTerminalShortcut(event, shortcut, platform, { allowRepeat = false } = {}) {
   if (event.type && event.type !== "keydown") return false;
   const parts = resolvedParts(shortcut, platform);
-  if (!parts || event.repeat) return false;
+  if (!parts || (event.repeat && !allowRepeat)) return false;
   return Boolean(event.ctrlKey) === parts.control
     && Boolean(event.altKey) === parts.alt
     && Boolean(event.shiftKey) === parts.shift
     && Boolean(event.metaKey) === parts.meta
     && String(event.code || "").toLowerCase() === parts.code;
+}
+
+export function terminalPaneFocusDirection(event, shortcuts, platform) {
+  const normalized = normalizeTerminalShortcuts(shortcuts, platform);
+  const actions = [
+    ["left", normalized.focusPaneLeft],
+    ["right", normalized.focusPaneRight],
+    ["up", normalized.focusPaneUp],
+    ["down", normalized.focusPaneDown],
+  ];
+  return actions.find(([, shortcut]) => (
+    matchesTerminalShortcut(event, shortcut, platform, { allowRepeat: true })
+  ))?.[0] || null;
 }
 
 export function terminalShiftEnterSequence(event) {

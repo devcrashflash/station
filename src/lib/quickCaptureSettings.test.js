@@ -49,6 +49,10 @@ test("warns about configured terminal shortcuts and allows unused shortcuts", ()
     quickCaptureShortcutConflict("Alt+KeyS", terminalShortcuts, "Linux x86_64"),
     { kind: "terminal", label: "Split pane right" },
   );
+  assert.deepEqual(
+    quickCaptureShortcutConflict("Super+Alt+ArrowLeft", terminalShortcuts, "MacIntel"),
+    { kind: "terminal", label: "Focus pane left" },
+  );
   assert.equal(
     quickCaptureShortcutConflict("Alt+KeyQ", terminalShortcuts, "Linux x86_64"),
     null,

@@ -88,6 +88,59 @@ export function flattenPaneLayout(node, ratioOverrides = {}, bounds = { left: 0,
   };
 }
 
+export function adjacentTerminalPaneId(node, currentPaneId, direction, ratioOverrides = {}) {
+  if (!node || !["left", "right", "up", "down"].includes(direction)) return null;
+  const panes = flattenPaneLayout(node, ratioOverrides).panes;
+  if (panes.length < 2) return null;
+  const current = panes.find(({ pane }) => pane.paneId === currentPaneId);
+  if (!current) return null;
+
+  const epsilon = 1e-9;
+  const horizontal = direction === "left" || direction === "right";
+  const start = (bounds) => horizontal ? bounds.left : bounds.top;
+  const end = (bounds) => start(bounds) + (horizontal ? bounds.width : bounds.height);
+  const crossStart = (bounds) => horizontal ? bounds.top : bounds.left;
+  const crossEnd = (bounds) => crossStart(bounds) + (horizontal ? bounds.height : bounds.width);
+  const crossCenter = (bounds) => (crossStart(bounds) + crossEnd(bounds)) / 2;
+  const negative = direction === "left" || direction === "up";
+  const candidates = panes.filter(({ pane }) => pane.paneId !== currentPaneId);
+  let directional = candidates.filter((candidate) => (
+    negative
+      ? end(candidate) <= start(current) + epsilon
+      : start(candidate) >= end(current) - epsilon
+  ));
+  let wrapped = false;
+
+  if (directional.length === 0) {
+    wrapped = true;
+    const extreme = negative
+      ? Math.max(...candidates.map(end))
+      : Math.min(...candidates.map(start));
+    directional = candidates.filter((candidate) => (
+      Math.abs((negative ? end(candidate) : start(candidate)) - extreme) <= epsilon
+    ));
+  }
+
+  const score = (candidate, index) => {
+    const overlap = Math.min(crossEnd(current), crossEnd(candidate))
+      - Math.max(crossStart(current), crossStart(candidate));
+    const gap = wrapped ? 0 : negative
+      ? start(current) - end(candidate)
+      : start(candidate) - end(current);
+    return [overlap > epsilon ? 0 : 1, gap, Math.abs(crossCenter(candidate) - crossCenter(current)), index];
+  };
+  const ranked = directional.map((candidate) => ({
+    candidate,
+    score: score(candidate, panes.indexOf(candidate)),
+  })).sort((left, right) => {
+    for (let index = 0; index < left.score.length; index += 1) {
+      if (left.score[index] !== right.score[index]) return left.score[index] - right.score[index];
+    }
+    return 0;
+  });
+  return ranked[0]?.candidate.pane.paneId || null;
+}
+
 export function paneHasHorizontalSplitBelow(paneBounds, splits) {
   if (!paneBounds || !Array.isArray(splits)) return false;
   const epsilon = 1e-9;

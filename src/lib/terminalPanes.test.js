@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   TERMINAL_WORD_SEPARATORS,
+  adjacentTerminalPaneId,
   clampSplitRatio,
   copyableTerminalSelection,
   flattenPaneLayout,
@@ -165,6 +166,90 @@ test("walks nested pane layouts in visible order", () => {
     flattened.panes.map((pane) => paneHasHorizontalSplitBelow(pane, flattened.splits)),
     [false, true, false],
   );
+});
+
+test("moves focus spatially through a nested pane grid", () => {
+  const root = {
+    type: "split",
+    splitId: "columns",
+    axis: "columns",
+    ratio: 0.5,
+    first: {
+      type: "split",
+      splitId: "left-rows",
+      axis: "rows",
+      ratio: 0.5,
+      first: { type: "pane", paneId: "top-left" },
+      second: { type: "pane", paneId: "bottom-left", running: false },
+    },
+    second: {
+      type: "split",
+      splitId: "right-rows",
+      axis: "rows",
+      ratio: 0.25,
+      first: { type: "pane", paneId: "top-right" },
+      second: { type: "pane", paneId: "bottom-right" },
+    },
+  };
+
+  assert.equal(adjacentTerminalPaneId(root, "top-left", "right"), "top-right");
+  assert.equal(adjacentTerminalPaneId(root, "top-left", "down"), "bottom-left");
+  assert.equal(adjacentTerminalPaneId(root, "bottom-right", "left"), "bottom-left");
+  assert.equal(adjacentTerminalPaneId(root, "bottom-right", "up"), "top-right");
+});
+
+test("wraps pane focus to the opposite aligned edge", () => {
+  const root = {
+    type: "split",
+    splitId: "columns",
+    axis: "columns",
+    ratio: 0.5,
+    first: {
+      type: "split",
+      splitId: "left-rows",
+      axis: "rows",
+      ratio: 0.5,
+      first: { type: "pane", paneId: "top-left" },
+      second: { type: "pane", paneId: "bottom-left" },
+    },
+    second: {
+      type: "split",
+      splitId: "right-rows",
+      axis: "rows",
+      ratio: 0.5,
+      first: { type: "pane", paneId: "top-right" },
+      second: { type: "pane", paneId: "bottom-right" },
+    },
+  };
+
+  assert.equal(adjacentTerminalPaneId(root, "top-left", "left"), "top-right");
+  assert.equal(adjacentTerminalPaneId(root, "bottom-right", "right"), "bottom-left");
+  assert.equal(adjacentTerminalPaneId(root, "top-right", "up"), "bottom-right");
+  assert.equal(adjacentTerminalPaneId(root, "bottom-left", "down"), "top-left");
+});
+
+test("uses deterministic spatial fallbacks and rejects invalid layouts", () => {
+  const root = {
+    type: "split",
+    splitId: "columns",
+    axis: "columns",
+    ratio: 0.5,
+    first: { type: "pane", paneId: "left" },
+    second: {
+      type: "split",
+      splitId: "rows",
+      axis: "rows",
+      ratio: 0.5,
+      first: { type: "pane", paneId: "top-right" },
+      second: { type: "pane", paneId: "bottom-right" },
+    },
+  };
+
+  assert.equal(adjacentTerminalPaneId(root, "left", "right"), "top-right");
+  assert.equal(adjacentTerminalPaneId(root, "left", "right", { rows: 0.25 }), "bottom-right");
+  assert.equal(adjacentTerminalPaneId({ type: "pane", paneId: "only" }, "only", "left"), null);
+  assert.equal(adjacentTerminalPaneId(root, "missing", "left"), null);
+  assert.equal(adjacentTerminalPaneId(root, "left", "diagonal"), null);
 });
 
 test("detects only panes directly above horizontal split boundaries", () => {

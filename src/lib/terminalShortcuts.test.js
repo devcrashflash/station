@@ -3,11 +3,13 @@ import test from "node:test";
 
 import {
   DEFAULT_TERMINAL_SHORTCUTS,
+  defaultTerminalShortcuts,
   matchesTerminalShortcut,
   normalizeTerminalShortcuts,
   shortcutsMatch,
   terminalShiftEnterSequence,
   terminalShortcutConflict,
+  terminalPaneFocusDirection,
   terminalZoomDelta,
 } from "./terminalShortcuts.js";
 
@@ -21,6 +23,54 @@ test("matches shortcuts with exact platform modifiers", () => {
   assert.equal(matchesTerminalShortcut(event({ metaKey: true, shiftKey: true }), "CommandOrControl+KeyD", "MacIntel"), false);
   assert.equal(matchesTerminalShortcut(event({ metaKey: true, code: "KeyF" }), "CommandOrControl+KeyD", "MacIntel"), false);
   assert.equal(matchesTerminalShortcut(event({ metaKey: true, repeat: true }), "CommandOrControl+KeyD", "MacIntel"), false);
+});
+
+test("uses native pane focus defaults on each platform", () => {
+  assert.deepEqual(
+    Object.values(defaultTerminalShortcuts("MacIntel")).slice(-4),
+    [
+      "Super+Alt+ArrowLeft",
+      "Super+Alt+ArrowRight",
+      "Super+Alt+ArrowUp",
+      "Super+Alt+ArrowDown",
+    ],
+  );
+  assert.deepEqual(
+    Object.values(defaultTerminalShortcuts("Win32")).slice(-4),
+    ["Alt+ArrowLeft", "Alt+ArrowRight", "Alt+ArrowUp", "Alt+ArrowDown"],
+  );
+  assert.deepEqual(
+    Object.values(defaultTerminalShortcuts("Linux x86_64")).slice(-4),
+    ["Alt+ArrowLeft", "Alt+ArrowRight", "Alt+ArrowUp", "Alt+ArrowDown"],
+  );
+});
+
+test("maps exact pane focus shortcuts and recognizes repeats for consumption", () => {
+  const macShortcuts = defaultTerminalShortcuts("MacIntel");
+  const windowsShortcuts = defaultTerminalShortcuts("Win32");
+  assert.equal(terminalPaneFocusDirection(event({
+    code: "ArrowLeft",
+    key: "ArrowLeft",
+    metaKey: true,
+    altKey: true,
+  }), macShortcuts, "MacIntel"), "left");
+  assert.equal(terminalPaneFocusDirection(event({
+    code: "ArrowDown",
+    key: "ArrowDown",
+    altKey: true,
+    repeat: true,
+  }), windowsShortcuts, "Win32"), "down");
+  assert.equal(terminalPaneFocusDirection(event({
+    code: "ArrowRight",
+    key: "ArrowRight",
+    metaKey: true,
+  }), macShortcuts, "MacIntel"), null);
+  assert.equal(terminalPaneFocusDirection(event({
+    code: "ArrowUp",
+    key: "ArrowUp",
+    ctrlKey: true,
+    altKey: true,
+  }), windowsShortcuts, "Win32"), null);
 });
 
 test("encodes exact Shift+Enter keydown as a distinct CSI-u event", () => {
@@ -61,6 +111,10 @@ test("normalizes missing and malformed terminal shortcuts independently", () => 
     ...DEFAULT_TERMINAL_SHORTCUTS,
     search: "Alt+KeyS",
   });
+  assert.deepEqual(normalizeTerminalShortcuts({ search: "Alt+KeyS" }, "MacIntel"), {
+    ...defaultTerminalShortcuts("MacIntel"),
+    search: "Alt+KeyS",
+  });
 });
 
 test("rejects duplicate and reserved terminal shortcuts", () => {
@@ -88,6 +142,15 @@ test("rejects duplicate and reserved terminal shortcuts", () => {
     action: "search",
     reserved: false,
     invalid: true,
+  });
+  assert.deepEqual(terminalShortcutConflict({
+    ...defaultTerminalShortcuts("Win32"),
+    focusPaneRight: "Alt+ArrowLeft",
+  }, "Win32"), {
+    action: "focusPaneRight",
+    otherAction: "focusPaneLeft",
+    reserved: false,
+    invalid: false,
   });
 });
 

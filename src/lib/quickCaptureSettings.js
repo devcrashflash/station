@@ -33,7 +33,7 @@ export function quickCaptureShortcutConflict(shortcut, terminalShortcuts, platfo
   ));
   if (workspaceConflict) return { kind: "workspace", label: workspaceConflict.label };
 
-  const normalizedTerminalShortcuts = normalizeTerminalShortcuts(terminalShortcuts);
+  const normalizedTerminalShortcuts = normalizeTerminalShortcuts(terminalShortcuts, platform);
   const terminalConflict = TERMINAL_SHORTCUT_ACTIONS.find((action) => (
     shortcutsMatch(shortcut, normalizedTerminalShortcuts[action.id], platform)
   ));

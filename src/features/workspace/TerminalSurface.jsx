@@ -10,6 +10,7 @@ import "@xterm/xterm/css/xterm.css";
 
 import {
   TERMINAL_WORD_SEPARATORS,
+  adjacentTerminalPaneId,
   clampSplitRatio,
   copyableTerminalSelection,
   flattenPaneLayout,
@@ -24,6 +25,7 @@ import {
   DEFAULT_TERMINAL_SHORTCUTS,
   matchesTerminalShortcut,
   normalizeTerminalShortcuts,
+  terminalPaneFocusDirection,
   terminalShiftEnterSequence,
   terminalZoomDelta,
 } from "@/lib/terminalShortcuts";
@@ -1032,6 +1034,34 @@ export function TerminalWorkspace() {
     window.addEventListener("keydown", handleFontZoom, true);
     return () => window.removeEventListener("keydown", handleFontZoom, true);
   }, [settings.shortcuts, settings.typography.fontSize]);
+
+  useEffect(() => {
+    function handlePaneFocus(event) {
+      const activeTab = snapshot.tabs.find((tab) => (
+        tab.id === snapshot.activeTabId && tab.kind === "terminal"
+      ));
+      if (!activeTab) return;
+      const direction = terminalPaneFocusDirection(event, settings.shortcuts);
+      if (!direction) return;
+
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.repeat) return;
+
+      const layout = layouts[activeTab.id];
+      const paneId = layout && adjacentTerminalPaneId(
+        layout.root,
+        layout.focusedPaneId,
+        direction,
+      );
+      if (paneId) {
+        invoke("focus_terminal_pane", { tabId: activeTab.id, paneId }).catch(console.error);
+      }
+    }
+
+    window.addEventListener("keydown", handlePaneFocus, true);
+    return () => window.removeEventListener("keydown", handlePaneFocus, true);
+  }, [layouts, settings.shortcuts, snapshot]);
 
   useEffect(() => {
     let disposed = false;

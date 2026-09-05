@@ -120,7 +120,7 @@ pub struct TerminalSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct TerminalShortcuts {
     split_columns: String,
     split_rows: String,
@@ -128,6 +128,10 @@ pub struct TerminalShortcuts {
     clear: String,
     zoom_in: String,
     zoom_out: String,
+    focus_pane_left: String,
+    focus_pane_right: String,
+    focus_pane_up: String,
+    focus_pane_down: String,
 }
 
 impl Default for TerminalShortcuts {
@@ -139,8 +143,20 @@ impl Default for TerminalShortcuts {
             clear: "Super+KeyK".into(),
             zoom_in: "CommandOrControl+Equal".into(),
             zoom_out: "CommandOrControl+Minus".into(),
+            focus_pane_left: default_pane_focus_shortcut("ArrowLeft"),
+            focus_pane_right: default_pane_focus_shortcut("ArrowRight"),
+            focus_pane_up: default_pane_focus_shortcut("ArrowUp"),
+            focus_pane_down: default_pane_focus_shortcut("ArrowDown"),
         }
     }
+}
+
+fn default_pane_focus_shortcut(key: &str) -> String {
+    #[cfg(target_os = "macos")]
+    let modifier = "Super+Alt";
+    #[cfg(not(target_os = "macos"))]
+    let modifier = "Alt";
+    format!("{modifier}+{key}")
 }
 
 #[derive(Debug, Deserialize)]
@@ -2549,7 +2565,7 @@ fn terminal_shortcut_signature(shortcut: &str) -> Option<String> {
     ))
 }
 
-fn terminal_shortcut_entries(shortcuts: &TerminalShortcuts) -> [(&'static str, &str); 6] {
+fn terminal_shortcut_entries(shortcuts: &TerminalShortcuts) -> [(&'static str, &str); 10] {
     [
         ("Split pane right", &shortcuts.split_columns),
         ("Split pane down", &shortcuts.split_rows),
@@ -2557,6 +2573,10 @@ fn terminal_shortcut_entries(shortcuts: &TerminalShortcuts) -> [(&'static str, &
         ("Clear terminal", &shortcuts.clear),
         ("Increase font size", &shortcuts.zoom_in),
         ("Decrease font size", &shortcuts.zoom_out),
+        ("Focus pane left", &shortcuts.focus_pane_left),
+        ("Focus pane right", &shortcuts.focus_pane_right),
+        ("Focus pane up", &shortcuts.focus_pane_up),
+        ("Focus pane down", &shortcuts.focus_pane_down),
     ]
 }
 
@@ -2612,6 +2632,10 @@ fn terminal_shortcuts(db: &SqliteConnection) -> TerminalShortcuts {
         clear: valid_or("clear", &defaults.clear),
         zoom_in: valid_or("zoomIn", &defaults.zoom_in),
         zoom_out: valid_or("zoomOut", &defaults.zoom_out),
+        focus_pane_left: valid_or("focusPaneLeft", &defaults.focus_pane_left),
+        focus_pane_right: valid_or("focusPaneRight", &defaults.focus_pane_right),
+        focus_pane_up: valid_or("focusPaneUp", &defaults.focus_pane_up),
+        focus_pane_down: valid_or("focusPaneDown", &defaults.focus_pane_down),
     };
     validate_terminal_shortcuts(&shortcuts).map_or(defaults, |_| shortcuts)
 }
@@ -5000,6 +5024,23 @@ mod tests {
         assert_eq!(shortcuts.split_columns, "Alt+KeyS");
         assert_eq!(shortcuts.search, TerminalShortcuts::default().search);
         assert_eq!(shortcuts.zoom_out, TerminalShortcuts::default().zoom_out);
+        assert_eq!(
+            shortcuts.focus_pane_left,
+            TerminalShortcuts::default().focus_pane_left
+        );
+
+        let legacy_shortcuts: TerminalShortcuts = serde_json::from_str(
+            r#"{"splitColumns":"Control+KeyD","splitRows":"Control+Shift+KeyD","search":"Control+KeyF","clear":"Super+KeyK","zoomIn":"Control+Equal","zoomOut":"Control+Minus"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            legacy_shortcuts.focus_pane_down,
+            TerminalShortcuts::default().focus_pane_down
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(legacy_shortcuts.focus_pane_left, "Super+Alt+ArrowLeft");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(legacy_shortcuts.focus_pane_left, "Alt+ArrowLeft");
 
         let mut duplicate = TerminalShortcuts::default();
         duplicate.search = duplicate.split_columns.clone();
