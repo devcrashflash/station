@@ -88,7 +88,7 @@ export function flattenPaneLayout(node, ratioOverrides = {}, bounds = { left: 0,
   };
 }
 
-export function adjacentTerminalPaneId(node, currentPaneId, direction, ratioOverrides = {}) {
+function spatialTerminalPaneId(node, currentPaneId, direction, ratioOverrides, allowWrap) {
   if (!node || !["left", "right", "up", "down"].includes(direction)) return null;
   const panes = flattenPaneLayout(node, ratioOverrides).panes;
   if (panes.length < 2) return null;
@@ -112,6 +112,7 @@ export function adjacentTerminalPaneId(node, currentPaneId, direction, ratioOver
   let wrapped = false;
 
   if (directional.length === 0) {
+    if (!allowWrap) return null;
     wrapped = true;
     const extreme = negative
       ? Math.max(...candidates.map(end))
@@ -139,6 +140,40 @@ export function adjacentTerminalPaneId(node, currentPaneId, direction, ratioOver
     return 0;
   });
   return ranked[0]?.candidate.pane.paneId || null;
+}
+
+export function adjacentTerminalPaneId(node, currentPaneId, direction, ratioOverrides = {}) {
+  return spatialTerminalPaneId(node, currentPaneId, direction, ratioOverrides, true);
+}
+
+export function directlyReachableTerminalPaneId(node, currentPaneId, direction, ratioOverrides = {}) {
+  return spatialTerminalPaneId(node, currentPaneId, direction, ratioOverrides, false);
+}
+
+export function terminalPaneShortcutTargets(node, currentPaneId, ratioOverrides = {}) {
+  const targets = new Map();
+  for (const direction of ["left", "right", "up", "down"]) {
+    const directPaneId = directlyReachableTerminalPaneId(
+      node,
+      currentPaneId,
+      direction,
+      ratioOverrides,
+    );
+    const paneId = directPaneId || adjacentTerminalPaneId(
+      node,
+      currentPaneId,
+      direction,
+      ratioOverrides,
+    );
+    if (!paneId) continue;
+
+    const current = targets.get(paneId);
+    const direct = Boolean(directPaneId);
+    if (!current || (direct && !current.direct)) {
+      targets.set(paneId, { paneId, direction, direct });
+    }
+  }
+  return [...targets.values()];
 }
 
 export function paneHasHorizontalSplitBelow(paneBounds, splits) {

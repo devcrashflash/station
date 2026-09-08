@@ -8,6 +8,7 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 
+import { Kbd } from "@/components/ui/kbd";
 import {
   TERMINAL_WORD_SEPARATORS,
   adjacentTerminalPaneId,
@@ -20,6 +21,7 @@ import {
   parseOsc7Cwd,
   terminalFontSizeWithZoom,
   terminalPaneDropTarget,
+  terminalPaneShortcutTargets,
 } from "@/lib/terminalPanes";
 import {
   DEFAULT_TERMINAL_SHORTCUTS,
@@ -29,6 +31,7 @@ import {
   terminalShiftEnterSequence,
   terminalZoomDelta,
 } from "@/lib/terminalShortcuts";
+import { formatShortcut } from "@/lib/keyboardShortcut";
 import { openExternalUrl } from "@/lib/externalLinks";
 import {
   createTerminalFileLinkProvider,
@@ -85,6 +88,13 @@ const TERMINAL_SEARCH_OPTIONS = {
     activeMatchBorder: "#93c5fd",
     activeMatchColorOverviewRuler: "#3b82f6",
   },
+};
+
+const PANE_FOCUS_SHORTCUT_IDS = {
+  left: "focusPaneLeft",
+  right: "focusPaneRight",
+  up: "focusPaneUp",
+  down: "focusPaneDown",
 };
 
 function bytesFromChannel(payload) {
@@ -193,6 +203,7 @@ function TerminalPane({
   bounds,
   dragging,
   onMoveStart,
+  shortcutHint,
   searchOpen,
   onRequestSearch,
   onCloseSearch,
@@ -625,7 +636,14 @@ function TerminalPane({
           title={`${pane.title} — drag to move pane`}
           onPointerDown={(event) => onMoveStart(event, pane.paneId)}
         >
-          {pane.title}
+          <span className="terminal-pane-title-text">{pane.title}</span>
+          {shortcutHint && (
+            <span className="terminal-pane-shortcuts">
+              <Kbd className="terminal-pane-shortcut">
+                {formatShortcut(shortcutHint)}
+              </Kbd>
+            </span>
+          )}
         </div>
       )}
       <div ref={hostRef} className="terminal-host" />
@@ -844,6 +862,16 @@ function TerminalTabSurface({
 
   const flattened = flattenPaneLayout(layout.root, ratioOverrides);
   const panesAreSplit = flattened.panes.length > 1;
+  const paneShortcutHints = new Map();
+  if (panesAreSplit) {
+    for (const { paneId, direction } of terminalPaneShortcutTargets(
+      layout.root,
+      layout.focusedPaneId,
+      ratioOverrides,
+    )) {
+      paneShortcutHints.set(paneId, shortcuts[PANE_FOCUS_SHORTCUT_IDS[direction]]);
+    }
+  }
   const previewPane = paneDrag?.targetPaneId
     ? flattened.panes.find(({ pane }) => pane.paneId === paneDrag.targetPaneId)
     : null;
@@ -977,6 +1005,7 @@ function TerminalTabSurface({
           splitBelow={paneHasHorizontalSplitBelow(bounds, flattened.splits)}
           dragging={pane.paneId === paneDrag?.sourcePaneId}
           onMoveStart={startPaneMove}
+          shortcutHint={paneShortcutHints.get(pane.paneId) || null}
           searchOpen={searchTarget?.tabId === tabId && searchTarget?.paneId === pane.paneId}
           onRequestSearch={() => onRequestSearch(tabId, pane.paneId)}
           onCloseSearch={() => onCloseSearch(tabId, pane.paneId)}

@@ -6,6 +6,7 @@ import {
   adjacentTerminalPaneId,
   clampSplitRatio,
   copyableTerminalSelection,
+  directlyReachableTerminalPaneId,
   flattenPaneLayout,
   isTerminalClearShortcut,
   isTerminalSearchShortcut,
@@ -17,6 +18,7 @@ import {
   terminalFontSizeWithZoom,
   terminalFontZoomDelta,
   terminalPaneDropTarget,
+  terminalPaneShortcutTargets,
 } from "./terminalPanes.js";
 
 test("separates prompt metadata without splitting branch names and paths", () => {
@@ -226,6 +228,112 @@ test("wraps pane focus to the opposite aligned edge", () => {
   assert.equal(adjacentTerminalPaneId(root, "bottom-right", "right"), "bottom-left");
   assert.equal(adjacentTerminalPaneId(root, "top-right", "up"), "bottom-right");
   assert.equal(adjacentTerminalPaneId(root, "bottom-left", "down"), "top-left");
+});
+
+test("finds only directly reachable panes without wrapping", () => {
+  const root = {
+    type: "split",
+    splitId: "columns",
+    axis: "columns",
+    ratio: 0.5,
+    first: {
+      type: "split",
+      splitId: "left-rows",
+      axis: "rows",
+      ratio: 0.5,
+      first: { type: "pane", paneId: "top-left" },
+      second: { type: "pane", paneId: "bottom-left" },
+    },
+    second: {
+      type: "split",
+      splitId: "right-rows",
+      axis: "rows",
+      ratio: 0.25,
+      first: { type: "pane", paneId: "top-right" },
+      second: { type: "pane", paneId: "bottom-right" },
+    },
+  };
+
+  assert.equal(directlyReachableTerminalPaneId(root, "top-left", "right"), "top-right");
+  assert.equal(directlyReachableTerminalPaneId(root, "top-left", "down"), "bottom-left");
+  assert.equal(directlyReachableTerminalPaneId(root, "top-left", "left"), null);
+  assert.equal(directlyReachableTerminalPaneId(root, "top-left", "up"), null);
+  assert.equal(directlyReachableTerminalPaneId(root, "bottom-right", "right"), null);
+  assert.equal(directlyReachableTerminalPaneId(root, "bottom-right", "down"), null);
+});
+
+test("uses current split ratios for directly reachable pane hints", () => {
+  const root = {
+    type: "split",
+    splitId: "columns",
+    axis: "columns",
+    ratio: 0.5,
+    first: { type: "pane", paneId: "left" },
+    second: {
+      type: "split",
+      splitId: "rows",
+      axis: "rows",
+      ratio: 0.5,
+      first: { type: "pane", paneId: "top-right" },
+      second: { type: "pane", paneId: "bottom-right" },
+    },
+  };
+
+  assert.equal(directlyReachableTerminalPaneId(root, "left", "right"), "top-right");
+  assert.equal(
+    directlyReachableTerminalPaneId(root, "left", "right", { rows: 0.25 }),
+    "bottom-right",
+  );
+  assert.equal(directlyReachableTerminalPaneId(root, "missing", "right"), null);
+  assert.equal(directlyReachableTerminalPaneId(root, "left", "diagonal"), null);
+});
+
+test("deduplicates pane shortcut targets and prefers direct navigation", () => {
+  const horizontal = {
+    type: "split",
+    splitId: "columns",
+    axis: "columns",
+    ratio: 0.5,
+    first: { type: "pane", paneId: "left" },
+    second: { type: "pane", paneId: "right" },
+  };
+
+  assert.deepEqual(terminalPaneShortcutTargets(horizontal, "left"), [
+    { paneId: "right", direction: "right", direct: true },
+  ]);
+  assert.deepEqual(terminalPaneShortcutTargets(horizontal, "right"), [
+    { paneId: "left", direction: "left", direct: true },
+  ]);
+  assert.deepEqual(terminalPaneShortcutTargets(null, "missing"), []);
+});
+
+test("retains unique wraparound pane shortcut targets", () => {
+  const root = {
+    type: "split",
+    splitId: "outer-columns",
+    axis: "columns",
+    ratio: 0.4,
+    first: {
+      type: "split",
+      splitId: "left-rows",
+      axis: "rows",
+      ratio: 0.3,
+      first: { type: "pane", paneId: "top-left" },
+      second: { type: "pane", paneId: "bottom-left" },
+    },
+    second: {
+      type: "split",
+      splitId: "right-columns",
+      axis: "columns",
+      ratio: 0.5,
+      first: { type: "pane", paneId: "middle" },
+      second: { type: "pane", paneId: "right" },
+    },
+  };
+
+  const targets = terminalPaneShortcutTargets(root, "top-left");
+  assert.equal(new Set(targets.map(({ paneId }) => paneId)).size, targets.length);
+  assert.ok(targets.some(({ direct }) => !direct));
 });
 
 test("uses deterministic spatial fallbacks and rejects invalid layouts", () => {

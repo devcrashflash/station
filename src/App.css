@@ -490,6 +490,9 @@ body.terminal-window #root {
 }
 
 .terminal-pane-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   box-sizing: border-box;
   height: 24px;
   flex: none;
@@ -499,11 +502,34 @@ body.terminal-window #root {
   background: var(--muted);
   color: var(--muted-foreground);
   font: 11px/23px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  text-overflow: ellipsis;
   white-space: nowrap;
   cursor: grab;
   touch-action: none;
   user-select: none;
+}
+
+.terminal-pane-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.terminal-pane-shortcuts {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  pointer-events: none;
+}
+
+.terminal-pane-title .terminal-pane-shortcut {
+  height: 16px;
+  min-width: 16px;
+  padding: 0 4px;
+  background: color-mix(in srgb, var(--background) 72%, transparent);
+  font-size: 10px;
+  line-height: 16px;
 }
 
 .terminal-pane-title:active,
