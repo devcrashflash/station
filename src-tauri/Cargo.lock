@@ -783,7 +783,7 @@ dependencies = [
 
 [[package]]
 name = "devcrashflash-station"
-version = "0.10.10"
+version = "0.10.11"
 dependencies = [
  "base64 0.22.1",
  "chrono",
