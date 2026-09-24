@@ -36,9 +36,20 @@ export function validateReleaseVersion(tag, versions) {
   return tag;
 }
 
-export function validateUpdaterManifest(manifest, assetNames, version) {
+export function validateUpdaterManifest(manifest, assets, version) {
   if (manifest.version !== version) {
     throw new Error(`Updater manifest version ${JSON.stringify(manifest.version)} does not match ${version}.`);
+  }
+
+  const assetNames = new Set();
+  const assetIds = new Set();
+  for (const asset of assets) {
+    if (typeof asset === "string") {
+      assetNames.add(asset);
+    } else if (asset && typeof asset.name === "string") {
+      assetNames.add(asset.name);
+      if (asset.id !== undefined && asset.id !== null) assetIds.add(String(asset.id));
+    }
   }
 
   for (const platform of ["darwin-aarch64", "darwin-x86_64"]) {
@@ -46,12 +57,26 @@ export function validateUpdaterManifest(manifest, assetNames, version) {
     if (!entry || typeof entry.signature !== "string" || !entry.signature.trim()) {
       throw new Error(`Updater manifest is missing a signature for ${platform}.`);
     }
-    if (typeof entry.url !== "string" || !entry.url.startsWith("https://github.com/")) {
+    if (typeof entry.url !== "string") {
       throw new Error(`Updater manifest is missing a GitHub asset URL for ${platform}.`);
     }
-    const assetName = decodeURIComponent(new URL(entry.url).pathname.split("/").at(-1));
-    if (!assetNames.has(assetName)) {
-      throw new Error(`Updater manifest references missing release asset ${assetName}.`);
+
+    const assetUrl = new URL(entry.url);
+    if (assetUrl.protocol !== "https:") {
+      throw new Error(`Updater manifest is missing a GitHub asset URL for ${platform}.`);
+    }
+    if (assetUrl.hostname === "github.com") {
+      const assetName = decodeURIComponent(assetUrl.pathname.split("/").at(-1));
+      if (!assetNames.has(assetName)) {
+        throw new Error(`Updater manifest references missing release asset ${assetName}.`);
+      }
+    } else if (assetUrl.hostname === "api.github.com") {
+      const assetId = assetUrl.pathname.match(/^\/repos\/[^/]+\/[^/]+\/releases\/assets\/(\d+)$/)?.[1];
+      if (!assetId || !assetIds.has(assetId)) {
+        throw new Error(`Updater manifest references missing release asset ID ${assetId || "unknown"}.`);
+      }
+    } else {
+      throw new Error(`Updater manifest is missing a GitHub asset URL for ${platform}.`);
     }
   }
   return manifest;

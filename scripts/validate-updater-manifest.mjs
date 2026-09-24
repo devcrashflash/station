@@ -11,5 +11,5 @@ const [manifestText, assetsText] = await Promise.all([
   readFile(manifestPath, "utf8"),
   readFile(assetsPath, "utf8"),
 ]);
-validateUpdaterManifest(JSON.parse(manifestText), new Set(JSON.parse(assetsText)), version);
+validateUpdaterManifest(JSON.parse(manifestText), JSON.parse(assetsText), version);
 console.log(`Updater manifest ${version} contains valid Intel and Apple Silicon assets.`);

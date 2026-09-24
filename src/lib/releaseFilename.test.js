@@ -67,4 +67,19 @@ test("validates both macOS updater entries against release assets", () => {
     () => validateUpdaterManifest(manifest, new Set(["Station_aarch64.app.tar.gz"]), "0.10.12"),
     /missing release asset Station_x64/,
   );
+
+  const apiManifest = structuredClone(manifest);
+  apiManifest.platforms["darwin-aarch64"].url =
+    "https://api.github.com/repos/devcrashflash/station/releases/assets/101";
+  apiManifest.platforms["darwin-x86_64"].url =
+    "https://api.github.com/repos/devcrashflash/station/releases/assets/102";
+  const apiAssets = [
+    { id: 101, name: "Station_aarch64.app.tar.gz" },
+    { id: 102, name: "Station_x64.app.tar.gz" },
+  ];
+  assert.equal(validateUpdaterManifest(apiManifest, apiAssets, "0.10.12"), apiManifest);
+  assert.throws(
+    () => validateUpdaterManifest(apiManifest, apiAssets.slice(0, 1), "0.10.12"),
+    /missing release asset ID 102/,
+  );
 });
