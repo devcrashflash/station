@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "updater",
+  "description": "Allow only the main application webview to check, install, and relaunch for signed updates.",
+  "webviews": ["main-content"],
+  "permissions": [
+    "updater:default",
+    "process:allow-restart"
+  ]
+}

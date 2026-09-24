@@ -1514,6 +1514,10 @@ pub fn run() {
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_nspanel::init());
+    #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+    let builder = builder
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build());
 
     builder
         .plugin(tauri_plugin_opener::init())

@@ -96,7 +96,14 @@ await Promise.all([
 
 console.log(`Building ${packageJson.name} ${nextVersion}…`);
 try {
-  await run("pnpm", ["tauri", "build", "--bundles", "app"]);
+  await run("pnpm", [
+    "tauri",
+    "build",
+    "--bundles",
+    "app",
+    "--config",
+    JSON.stringify({ bundle: { createUpdaterArtifacts: false } }),
+  ]);
 } catch (error) {
   fail(error.message);
 }

@@ -28,6 +28,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -39,6 +40,17 @@
       "../LICENSE": "legal/LICENSE",
       "../COMMERCIAL_LICENSE.md": "legal/COMMERCIAL_LICENSE.md",
       "../THIRD_PARTY_NOTICES.md": "legal/THIRD_PARTY_NOTICES.md"
+    },
+    "macOS": {
+      "signingIdentity": "-"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDcwRjM3QzU0MTUwRkRGQUEKUldTcTN3OFZWSHp6Y0dlQmlmQmo0QjNtSWNCN2JkeVVJaWVUQVpmVXhHMlhkRWRaejhsSEN1cHMK",
+      "endpoints": [
+        "https://github.com/devcrashflash/station/releases/latest/download/latest.json"
+      ]
     }
   }
 }

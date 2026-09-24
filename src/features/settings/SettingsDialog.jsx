@@ -106,6 +106,7 @@ const settingsSections = [
   { id: "appearance", label: "Appearance", description: "Color theme", icon: Palette },
   { id: "terminal", label: "Terminal", description: "Typography and behavior", icon: SquareTerminal },
   { id: "browser", label: "Browser", description: "New tab behavior", icon: Monitor },
+  { id: "updates", label: "Updates", description: "Version and updates", icon: RefreshCw },
 ];
 
 const aiSessionSourceGroups = Array.from(
@@ -127,6 +128,7 @@ export function SettingsDialog({
   terminalFonts = [],
   terminalShellIntegration,
   quickCaptureSettings,
+  appUpdater,
   themePreference = "system",
   calendarAccounts = [],
   calendarSyncRuns = [],
@@ -524,10 +526,46 @@ export function SettingsDialog({
                 onThemePreferenceChange={onThemePreferenceChange}
               />
             )}
+
+            {activeTab === "updates" && <UpdatesTab updater={appUpdater} />}
           </div>
         </main>
       </div>
     </Modal>
+  );
+}
+
+function UpdatesTab({ updater }) {
+  const checking = updater?.phase === "checking";
+  const installing = updater?.phase === "installing";
+
+  return (
+    <FieldSet className="gap-4 rounded-lg border p-4">
+      <FieldLegend className="mb-0 px-1">Application updates</FieldLegend>
+      <div className="grid gap-1 rounded-md border bg-muted/20 p-3">
+        <p className="text-sm font-medium">Installed version</p>
+        <p className="font-mono text-sm text-muted-foreground">
+          {updater?.currentVersion || (updater?.supported ? "Loading…" : "Desktop app required")}
+        </p>
+      </div>
+      <p className={cn("text-sm", updater?.phase === "error" ? "text-destructive" : "text-muted-foreground")}>
+        {updater?.message || "Updates are checked automatically."}
+      </p>
+      <div>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={!updater?.supported || checking || installing}
+          onClick={() => updater.check({ manual: true })}
+        >
+          <RefreshCw className={cn(checking && "animate-spin")} />
+          {checking ? "Checking…" : "Check for updates"}
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Station checks for signed updates when it starts and every six hours while it is running.
+      </p>
+    </FieldSet>
   );
 }
 

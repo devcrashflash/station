@@ -16,6 +16,8 @@ import { SettingsDialog } from "@/features/settings/SettingsDialog";
 import { useCalendarData } from "@/features/calendar/useCalendarData";
 import { useAiSessionMonitor } from "@/features/ai-sessions/useAiSessionMonitor";
 import { TodoEditDialog } from "@/features/smart-input/TodoEditDialog";
+import { UpdateDialog } from "@/features/updates/UpdateDialog";
+import { useAppUpdater } from "@/features/updates/useAppUpdater";
 import { api, toParsedPayload } from "@/lib/api";
 import {
   activityLocation,
@@ -147,6 +149,7 @@ function FileDropPreview({ fileDrop }) {
 
 function App() {
   const { preference: themePreference, setPreference: setThemePreference } = useTheme();
+  const appUpdater = useAppUpdater();
   const [projects, setProjects] = useState([]);
   const [selectedProjectId, setSelectedProjectId] = useState(null);
   const [tasks, setTasks] = useState([]);
@@ -1300,6 +1303,7 @@ function App() {
           terminalFonts={terminalFonts}
           terminalShellIntegration={terminalShellIntegration}
           quickCaptureSettings={quickCaptureSettings}
+          appUpdater={appUpdater}
           themePreference={themePreference}
           calendarAccounts={calendarAccounts}
           calendarSyncRuns={todayCalendarData.syncRuns}
@@ -1467,6 +1471,7 @@ function App() {
           }}
         />
       )}
+      <UpdateDialog updater={appUpdater} />
     </AppShell>
   );
 }
