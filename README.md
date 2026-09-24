@@ -51,7 +51,7 @@ and the Rust package files before building. DMG releases must be built on macOS.
 The local DMG build deliberately skips updater artifacts; public updater artifacts
 are always built from a committed version by GitHub Actions.
 
-Public releases are created only from bare stable version tags such as `0.10.6`:
+Public releases are created only from bare stable version tags such as `0.10.12`:
 
 1. Run `pnpm release <version>`, review and commit the synchronized version files.
 2. Push the commit, create a tag matching the configured version exactly, and push
@@ -66,7 +66,7 @@ The release workflow requires a repository secret named
 Back up the private key securely: losing it prevents installed versions from
 accepting future updates. macOS bundles currently use ad-hoc signing, so users may
 need to approve Station in Privacy & Security after the initial manual install.
-Versions up to `0.10.5` do not contain the updater and require that one manual
+Versions up to `0.10.11` do not contain the updater and require that one manual
 bootstrap installation.
 
 The application bundle includes the BSL, commercial license, and third-party

@@ -13,7 +13,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function fakeUpdate(version = "0.10.6") {
+function fakeUpdate(version = "0.10.12") {
   return {
     version,
     body: "Changes",
@@ -53,7 +53,7 @@ test("startup checks immediately and schedules the six-hour interval", async () 
   const manager = new AppUpdateManager({
     desktop: true,
     adapter: {
-      async getVersion() { return "0.10.5"; },
+      async getVersion() { return "0.10.11"; },
       async check() { checks += 1; return null; },
     },
     setIntervalFn(callback, delay) {
@@ -67,7 +67,7 @@ test("startup checks immediately and schedules the six-hour interval", async () 
   await manager.start();
   assert.equal(checks, 1);
   assert.equal(scheduledDelay, UPDATE_CHECK_INTERVAL_MS);
-  assert.equal(manager.snapshot().currentVersion, "0.10.5");
+  assert.equal(manager.snapshot().currentVersion, "0.10.11");
 
   intervalCallback();
   await new Promise((resolve) => setImmediate(resolve));
@@ -99,7 +99,7 @@ test("restarting the manager replaces a stale startup check", async () => {
   const manager = new AppUpdateManager({
     desktop: true,
     adapter: {
-      async getVersion() { return "0.10.5"; },
+      async getVersion() { return "0.10.11"; },
       async check() {
         checks += 1;
         return checks === 1 ? firstResult.promise : null;
@@ -142,7 +142,7 @@ test("automatic prompts occur once per version while manual checks can re-offer"
   updates.push(fakeUpdate());
   await manager.check({ manual: true });
   assert.equal(manager.snapshot().promptOpen, true);
-  assert.equal(manager.snapshot().update.version, "0.10.6");
+  assert.equal(manager.snapshot().update.version, "0.10.12");
 });
 
 test("automatic check errors stay silent and manual errors are reported", async () => {

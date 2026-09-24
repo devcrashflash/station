@@ -4,7 +4,7 @@ export function dmgFilename(version, architecture) {
 }
 
 const STABLE_SEMVER_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
-const FIRST_UPDATER_VERSION = [0, 10, 6];
+const FIRST_UPDATER_VERSION = [0, 10, 12];
 
 function stableVersionParts(version) {
   return version.split(".").map(Number);
@@ -25,7 +25,7 @@ export function validateReleaseVersion(tag, versions) {
     throw new Error(`Release tag ${JSON.stringify(tag)} must be a stable x.y.z version.`);
   }
   if (isBeforeFirstUpdaterVersion(tag)) {
-    throw new Error(`Release tag ${tag} predates the first updater-enabled version 0.10.6.`);
+    throw new Error(`Release tag ${tag} predates the first updater-enabled version 0.10.12.`);
   }
 
   const mismatches = Object.entries(versions).filter(([, version]) => version !== tag);
