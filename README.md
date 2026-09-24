@@ -4,19 +4,58 @@ Station is a local-first desktop workspace for turning scattered developer work 
 
 ![Station Smart Inbox showing captured work, review requests, meetings, and recent tasks](docs/assets/station-overview.png)
 
+## One shortcut, wherever you are
+
+Press `Cmd/Ctrl+Shift+Space` to open Station's global overlay without leaving your current app. Capture something for the Smart Inbox, jump back into an active AI agent, or launch an installed program entirely from the keyboard.
+
+![Station global overlay with Inbox, AI Agents, and Programs tabs](docs/assets/station-global-overlay.png)
+
+### Resume AI agents without context switching
+
+The same overlay surfaces recent Codex and Claude sessions, prioritizes agents waiting for input, and lets you reopen the right desktop or terminal session with the keyboard.
+
+![Station global overlay showing fictional Codex and Claude sessions with one agent waiting for input](docs/assets/station-global-agents.png)
+
 ## What Station brings together
 
-- **Capture work from anywhere.** Save a thought, file, Trello card, GitHub pull request, or GitLab merge request to the Smart Inbox and route it when you are ready.
+- **Capture work from anywhere.** Open the global overlay from any app to save a thought, file, Trello card, GitHub pull request, or GitLab merge request to the Smart Inbox.
 - **Keep project context close.** Group tasks with repositories, boards, local checkouts, related work, and external conversation history.
+- **Run tools beside your work.** Keep persistent built-in terminal tabs, split panes, searchable output, and detected file links inside the workspace.
 - **Review and delegate.** Open pull-request reviews inside Station or hand a task to reusable Codex and Claude prompts.
 - **See the shape of your day.** Combine calendar events with GitHub, GitLab, and Trello activity in a searchable timeline and Markdown summary.
 - **Stay productive offline.** Projects, tasks, resources, and most organization workflows load from the local database first.
 
+## A complete developer workspace
+
+### Built-in terminals
+
+Keep persistent terminal tabs beside the main workspace, split them into multiple panes, move between panes from the keyboard, search output, and open detected file paths without leaving Station.
+
+![Station's built-in terminal workspace with persistent tabs and two split terminal panes](docs/assets/station-terminal.png)
+
+### AI Commands on every task
+
+Turn reusable Codex and Claude prompts into task-level commands. The task retains its description, provider context, related work, and local repositories while the agent runs in the configured desktop or CLI environment.
+
+![A Station task with pull request context and reusable Codex and Claude AI Commands](docs/assets/station-ai-commands.png)
+
+### Pull-request review
+
+Check out a linked GitHub pull request or GitLab merge request, inspect the real diff, select exact lines, and keep inline or overall comments as local drafts until the review is ready to submit.
+
+![Station's pull-request review workspace with a syntax-highlighted diff, inline draft, and AI Commands](docs/assets/station-review.png)
+
+### Connected services
+
+Connect GitHub, GitLab, Trello, Google Calendar, CalDAV, or calendar URLs. Connections are enabled per project so each workspace syncs only the context it needs.
+
+![Station settings showing synthetic GitHub, GitLab, Trello, and CalDAV connections](docs/assets/station-connections.png)
+
 ## From capture to action
 
-Promote a GitHub pull request from the Smart Inbox, choose its project, and continue with the full task context:
+Capture a GitHub pull request from the global overlay, promote it into Launchpad, start a prepared Codex CLI command, and continue in Station's built-in terminal with the full task context:
 
-![Animated Station workflow routing a GitHub pull request from the Smart Inbox into the Launchpad project](docs/assets/station-workflow.gif)
+![Animated Station workflow capturing a GitHub pull request, adding it to Launchpad, starting a Codex CLI command, and showing the prepared prompt running in the built-in terminal](docs/assets/station-workflow.gif)
 
 ## License and time evaluation
 
@@ -51,7 +90,7 @@ With the development server running, regenerate both assets with:
 pnpm capture:readme
 ```
 
-The capture script uses a 1440×900 light-theme viewport, writes the overview PNG at that resolution, and produces an optimized 1200×750, 10 fps workflow GIF. Set `CHROME_PATH` when Chrome is not installed in a standard location, or `STATION_DEMO_URL` when the development server uses another URL.
+The capture script uses a 1440×900 light-theme viewport for the main feature images and produces an optimized 1200×750, 10 fps workflow GIF covering overlay capture, project routing, Codex CLI launch, and the running terminal prompt. It captures the Inbox overlay at its native 640×228 size and the AI Agents overlay at 640×480. Set `CHROME_PATH` when Chrome is not installed in a standard location, or `STATION_DEMO_URL` when the development server uses another URL.
 
 ### Google Calendar sign-in
 

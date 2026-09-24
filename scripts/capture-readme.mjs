@@ -163,26 +163,114 @@ try {
 
   const heroPath = join(OUTPUT_DIR, "station-overview.png");
   await screenshot(heroPath);
-  await frame(15, 90);
 
+  // 1. Open the global overlay and capture a pull request for the Smart Inbox.
+  const workflowOverlayUrl = new URL(DEMO_URL);
+  workflowOverlayUrl.searchParams.set("demo", "readme");
+  workflowOverlayUrl.searchParams.set("quick-capture", "1");
+  await command("Page.navigate", { url: workflowOverlayUrl.toString() });
+  await command("Emulation.setDeviceMetricsOverride", VIEWPORT);
+  await delay(900);
+  await evaluate(`(() => {
+    document.body.style.background = "linear-gradient(135deg, #e8eef8 0%, #f5f3ff 52%, #e7f5f1 100%)";
+    document.body.style.display = "grid";
+    document.body.style.placeItems = "center";
+    const surface = document.querySelector("main");
+    Object.assign(surface.style, { width: "640px", height: "228px", padding: "12px 24px" });
+    const input = document.querySelector('[aria-label="Quick capture"]');
+    const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set;
+    valueSetter.call(input, "https://github.com/launchpad-labs/orbit/pull/507");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.focus();
+  })()`);
+  await frame(10, 80);
+  const addToInboxButton = `document.querySelector('[aria-label="Add to Smart Inbox"]')`;
+  await moveCursor(addToInboxButton);
+  await frame(4, 80);
+  await click(addToInboxButton);
+  await frame(5, 80);
+
+  // 2. Move into Station's dashboard.
+  await command("Page.navigate", { url: DEMO_URL });
+  await command("Emulation.setDeviceMetricsOverride", VIEWPORT);
+  await delay(1000);
+  await frame(10, 80);
+
+  // 3. Promote the captured pull request into the Launchpad project.
   const createTaskButton = `[...document.querySelectorAll("button")].find((button) => button.textContent.trim() === "Create task")`;
   await moveCursor(createTaskButton);
-  await frame(10, 90);
+  await frame(5, 80);
   await click(createTaskButton);
   await delay(250);
-  await frame(12, 90);
+  await frame(5, 80);
 
   const launchpadButton = `[...document.querySelectorAll('[role="dialog"] button')].find((button) => button.textContent.trim() === "Launchpad")`;
   await moveCursor(launchpadButton);
-  await frame(8, 90);
+  await frame(5, 80);
   await click(launchpadButton);
-  await delay(650);
+  await delay(40);
+  await evaluate(`(() => {
+    const notice = document.createElement("div");
+    notice.id = "readme-github-fetch";
+    notice.innerHTML = '<span style="display:inline-block;width:14px;height:14px;border:2px solid #a78bfa;border-top-color:#6d28d9;border-radius:999px"></span><span><strong>Fetching from GitHub</strong><br><small style="color:#64748b">Loading pull request content, changed files, and comments…</small></span>';
+    Object.assign(notice.style, {
+      position: "fixed", zIndex: "99998", top: "28px", left: "50%", transform: "translateX(-50%)",
+      display: "flex", alignItems: "center", gap: "10px", minWidth: "360px", padding: "12px 16px",
+      border: "1px solid #ddd6fe", borderRadius: "10px", background: "rgba(255,255,255,.97)",
+      boxShadow: "0 12px 35px rgba(15,23,42,.18)", color: "#1e293b", font: "13px/1.35 system-ui, sans-serif"
+    });
+    document.body.appendChild(notice);
+    notice.firstElementChild.animate([{ transform: "rotate(0deg)" }, { transform: "rotate(360deg)" }], { duration: 700, iterations: Infinity });
+  })()`);
+  await frame(7, 80);
+  await delay(250);
+  await evaluate('document.getElementById("readme-github-fetch")?.remove()');
   await evaluate(`(() => {
     const browserOnlyNotice = [...document.querySelectorAll("p")]
       .find((node) => node.textContent.trim() === "Live external refresh requires the desktop app.");
     browserOnlyNotice?.remove();
   })()`);
-  await frame(35, 90);
+  await screenshot(join(OUTPUT_DIR, "station-ai-commands.png"));
+  await frame(8, 80);
+
+  // 4. Start the prepared Codex CLI command from the task.
+  const aiCommandButton = `[...document.querySelectorAll("button")].find((button) => button.textContent.includes("Implement with Codex"))`;
+  await moveCursor(aiCommandButton);
+  await frame(4, 80);
+  await click(aiCommandButton);
+  await delay(250);
+  await frame(5, 80);
+
+  const orbitWorkspaceButton = `document.querySelector('[role="dialog"] button[title="/Users/demo/Projects/orbit"]')`;
+  await moveCursor(orbitWorkspaceButton);
+  await frame(3, 80);
+  await click(orbitWorkspaceButton);
+  const wizardContinueButton = `[...document.querySelectorAll('[role="dialog"] button')].find((button) => button.textContent.trim() === "Continue")`;
+  await click(wizardContinueButton);
+  await delay(250);
+
+  const newBranchButton = `[...document.querySelectorAll('[role="dialog"] button')].find((button) => button.textContent.includes("New Branch (codex/streamline-checkout)"))`;
+  await moveCursor(newBranchButton);
+  await frame(3, 80);
+  await click(newBranchButton);
+  await click(wizardContinueButton);
+  await delay(150);
+  await frame(4, 80);
+
+  const openCodexButton = `[...document.querySelectorAll('[role="dialog"] button')].find((button) => button.textContent.trim() === "Open Implement with Codex")`;
+  await moveCursor(openCodexButton);
+  await frame(3, 80);
+  await click(openCodexButton);
+  await delay(200);
+
+  // 5. Finish in Station's full terminal window with the prepared prompt running.
+  const terminalCommandUrl = new URL(DEMO_URL);
+  terminalCommandUrl.searchParams.set("demo", "readme");
+  terminalCommandUrl.searchParams.set("showcase", "terminal-command");
+  await command("Page.navigate", { url: terminalCommandUrl.toString() });
+  await command("Emulation.setDeviceMetricsOverride", VIEWPORT);
+  await delay(700);
+  await frame(24, 80);
 
   const palettePath = join(tempDir, "palette.png");
   const gifPath = join(OUTPUT_DIR, "station-workflow.gif");
@@ -197,6 +285,65 @@ try {
   if (optimize.status === 0) {
     await writeFile(gifPath, await readFile(optimizedPath));
   }
+
+  const settingsUrl = new URL(DEMO_URL);
+  settingsUrl.searchParams.set("demo", "readme");
+  await command("Page.navigate", { url: settingsUrl.toString() });
+  await command("Emulation.setDeviceMetricsOverride", VIEWPORT);
+  await delay(1200);
+  await evaluate(`(() => {
+    const button = document.querySelector('[title="Global settings"]');
+    if (!button) throw new Error("Global settings button not found");
+    button.click();
+  })()`);
+  await delay(450);
+  await screenshot(join(OUTPUT_DIR, "station-connections.png"));
+
+  for (const showcase of ["terminal", "review"]) {
+    const showcaseUrl = new URL(DEMO_URL);
+    showcaseUrl.searchParams.set("demo", "readme");
+    showcaseUrl.searchParams.set("showcase", showcase);
+    await command("Page.navigate", { url: showcaseUrl.toString() });
+    await delay(900);
+    await screenshot(join(OUTPUT_DIR, `station-${showcase}.png`));
+  }
+
+  const overlayUrl = new URL(DEMO_URL);
+  overlayUrl.searchParams.set("demo", "readme");
+  overlayUrl.searchParams.set("quick-capture", "1");
+  await command("Emulation.setDeviceMetricsOverride", {
+    width: 640,
+    height: 228,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await command("Page.navigate", { url: overlayUrl.toString() });
+  await delay(1200);
+  await evaluate(`(() => {
+    const input = document.querySelector('[aria-label="Quick capture"]');
+    if (!input) throw new Error("Quick Capture input not found");
+    const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set;
+    valueSetter.call(input, "Capture launch retrospective notes and route them to Launchpad");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.focus();
+  })()`);
+  await delay(250);
+  await screenshot(join(OUTPUT_DIR, "station-global-overlay.png"));
+
+  await command("Emulation.setDeviceMetricsOverride", {
+    width: 640,
+    height: 480,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await evaluate(`(() => {
+    const button = [...document.querySelectorAll("button")]
+      .find((candidate) => candidate.textContent.includes("AI Agents"));
+    if (!button) throw new Error("AI Agents tab not found");
+    button.click();
+  })()`);
+  await delay(500);
+  await screenshot(join(OUTPUT_DIR, "station-global-agents.png"));
 
   const assets = await readdir(OUTPUT_DIR);
   console.log(`Captured ${assets.filter((name) => name.startsWith("station-")).join(", ")}`);

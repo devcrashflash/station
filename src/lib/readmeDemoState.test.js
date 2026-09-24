@@ -11,6 +11,9 @@ test("builds a populated README fixture relative to the capture day", () => {
   assert.ok(state.tasks.length >= 4);
   assert.ok(state.smartInboxTodos.length >= 2);
   assert.ok(state.smartInboxProviderItems.some((item) => item.provider === "github"));
+  assert.ok(state.readmeDemoAiSessions.some((session) => session.state === "waiting"));
+  assert.ok(state.readmeDemoAiSessions.some((session) => session.provider === "claude"));
+  assert.equal(state.readmeDemoExternalDetails["launchpad-labs/orbit#507"].comments.length, 2);
   assert.ok(state.activities.every((item) => new Date(item.occurredAt).getDate() === day.getDate()));
   assert.ok(state.calendarEvents.every((item) => new Date(item.startAt).getDate() === day.getDate()));
   assert.ok(JSON.stringify(state).includes("/Users/demo/"));

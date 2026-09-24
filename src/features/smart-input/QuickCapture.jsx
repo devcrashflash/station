@@ -40,6 +40,7 @@ import { isWorkspaceShortcut } from "@/lib/workspaceTabs";
 import { shortcutModifier } from "@/lib/keyboardShortcut";
 import { quickCaptureTitle } from "@/lib/quickCapture";
 import { resetQuickCaptureTab } from "@/lib/quickCaptureLifecycle";
+import { isDesktopApp } from "@/lib/ocr";
 import {
   filterPrograms,
   highlightedProgramId as resolvedHighlightedProgramId,
@@ -105,7 +106,20 @@ export function QuickCapture() {
     setAgentsLoading(true);
     try {
       const settings = normalizeAiSessionSettings(await api.listAiSessionSettings());
-      const result = await api.latestAiSessions();
+      let result;
+      if (import.meta.env.DEV && new URLSearchParams(window.location.search).get("demo") === "readme") {
+        const { createReadmeDemoState } = await import("@/demo/readmeDemoState");
+        const sessions = createReadmeDemoState().readmeDemoAiSessions;
+        result = {
+          sessions,
+          revision: "readme-demo",
+          loadedAt: Date.now(),
+          lastRefreshedAt: Date.now(),
+          waitingSessionCount: sessions.filter((session) => session.state === "waiting").length,
+        };
+      } else {
+        result = await api.latestAiSessions();
+      }
       if (agentLoadRun.current !== run) return;
       setAgentSettings(settings);
       const normalized = normalizeAiSessionSnapshot(result);
@@ -154,6 +168,11 @@ export function QuickCapture() {
   }, [loadAgents, loadPrograms]);
 
   useEffect(() => {
+    if (!isDesktopApp()) {
+      activateTab("inbox", { refresh: false });
+      return undefined;
+    }
+
     const currentWindow = getCurrentWindow();
     let active = true;
     const unlisteners = [];
@@ -212,6 +231,8 @@ export function QuickCapture() {
   }, [highlightedProgramId]);
 
   useEffect(() => {
+    if (!isDesktopApp()) return undefined;
+
     let disposed = false;
     let unlisten = null;
     listen(AI_SESSION_MONITOR_UPDATED_EVENT, ({ payload }) => {

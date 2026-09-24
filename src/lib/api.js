@@ -196,8 +196,13 @@ export const api = {
     const selected = await open({ directory: true, multiple: false });
     return typeof selected === "string" ? selected : null;
   },
-  createTaskFromInput: (payload) =>
-    call("create_task_from_input", payload, () => local.createTaskFromInput(payload)),
+  createTaskFromInput: async (payload) => {
+    if (import.meta.env?.DEV && typeof window !== "undefined"
+      && new URLSearchParams(window.location.search).get("demo") === "readme") {
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    }
+    return call("create_task_from_input", payload, () => local.createTaskFromInput(payload));
+  },
   listSmartInboxProviderItems: (payload) =>
     call("list_smart_inbox_provider_items", payload, () => local.listSmartInboxProviderItems(payload)),
   syncSmartInboxProviderItems: (payload) =>
@@ -249,12 +254,29 @@ export const api = {
   listAiPrompts: () => call("list_ai_prompts", {}, local.listAiPrompts),
   saveAiPrompt: (payload) => call("save_ai_prompt", { input: payload }, () => local.saveAiPrompt(payload)),
   deleteAiPrompt: (payload) => call("delete_ai_prompt", payload, () => local.deleteAiPrompt(payload)),
-  inspectAiPromptBranches: (payload) => call("inspect_ai_prompt_branches", { input: payload }, () => {
-    throw new Error("Inspecting AI Prompt branches requires the desktop app.");
-  }),
-  openAiPromptThread: (payload) => call("open_ai_prompt_thread", { input: payload }, () => {
-    throw new Error("Opening an AI Prompt thread requires the desktop app.");
-  }),
+  inspectAiPromptBranches: (payload) => {
+    if (import.meta.env?.DEV && typeof window !== "undefined"
+      && new URLSearchParams(window.location.search).get("demo") === "readme") {
+      return Promise.resolve({
+        currentBranch: "main",
+        newBranch: "codex/streamline-checkout",
+        checkoutBranch: "feature/checkout-confirmation",
+        isClean: true,
+      });
+    }
+    return call("inspect_ai_prompt_branches", { input: payload }, () => {
+      throw new Error("Inspecting AI Prompt branches requires the desktop app.");
+    });
+  },
+  openAiPromptThread: (payload) => {
+    if (import.meta.env?.DEV && typeof window !== "undefined"
+      && new URLSearchParams(window.location.search).get("demo") === "readme") {
+      return Promise.resolve({ agentType: payload.agentType, agentOrigin: payload.agentOrigin });
+    }
+    return call("open_ai_prompt_thread", { input: payload }, () => {
+      throw new Error("Opening an AI Prompt thread requires the desktop app.");
+    });
+  },
   listProjectConnections: (payload) =>
     call("list_project_connections", payload, () => local.listProjectConnections(payload)),
   setProjectConnections: (payload) =>
@@ -1474,12 +1496,16 @@ const local = {
       };
     }
 
+    const readmeExternalDetails = import.meta.env?.DEV
+      ? state.readmeDemoExternalDetails?.[parsed.externalId]
+      : null;
     const timestamp = now();
     const task = {
       id: id("task"),
       projectId: targetProjectId,
-      title: parsed.title,
-      body: parsed.kind === "text" ? plainTextTaskBody(input, parsed.title) : input.trim(),
+      title: readmeExternalDetails?.externalTitle || parsed.title,
+      body: readmeExternalDetails?.externalBody
+        || (parsed.kind === "text" ? plainTextTaskBody(input, parsed.title) : input.trim()),
       status: "open",
       sourceUrl: parsed.url,
       createdAt: timestamp,
@@ -1499,13 +1525,13 @@ const local = {
         externalId: parsed.externalId,
         url: parsed.url,
         connectionId: connection?.id || null,
-        externalTitle: null,
-        externalBody: null,
-        externalState: null,
-        fetchedAt: null,
-        files: [],
-        comments: [],
-        labels: [],
+        externalTitle: readmeExternalDetails?.externalTitle || null,
+        externalBody: readmeExternalDetails?.externalBody || null,
+        externalState: readmeExternalDetails?.externalState || null,
+        fetchedAt: readmeExternalDetails?.fetchedAt || null,
+        files: readmeExternalDetails?.files || [],
+        comments: readmeExternalDetails?.comments || [],
+        labels: readmeExternalDetails?.labels || [],
       });
     }
 

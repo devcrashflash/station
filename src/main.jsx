@@ -9,9 +9,14 @@ const App = lazy(() => import("./app/App"));
 const QuickCapture = lazy(() => import("./features/smart-input/QuickCapture").then((module) => ({ default: module.QuickCapture })));
 const TabBar = lazy(() => import("./features/workspace/TabBar").then((module) => ({ default: module.TabBar })));
 const TerminalWorkspace = lazy(() => import("./features/workspace/TerminalSurface").then((module) => ({ default: module.TerminalWorkspace })));
+const ReadmeFeatureShowcase = import.meta.env.DEV
+  ? lazy(() => import("./demo/ReadmeFeatureShowcase").then((module) => ({ default: module.ReadmeFeatureShowcase })))
+  : null;
 
 const searchParams = new URLSearchParams(window.location.search);
-const isQuickCapture = Boolean(window.__TAURI_INTERNALS__)
+const isReadmeDemo = import.meta.env.DEV && searchParams.get("demo") === "readme";
+const readmeShowcase = isReadmeDemo ? searchParams.get("showcase") : null;
+const isQuickCapture = (Boolean(window.__TAURI_INTERNALS__) || isReadmeDemo)
   && searchParams.get("quick-capture") === "1";
 const surface = searchParams.get("surface") || "main";
 
@@ -47,7 +52,9 @@ function RootErrorFallback({ error, reset }) {
   );
 }
 
-const surfaceElement = isQuickCapture ? <QuickCapture /> : surface === "tab-bar" ? (
+const surfaceElement = ReadmeFeatureShowcase && ["terminal", "terminal-command", "review"].includes(readmeShowcase) ? (
+  <ReadmeFeatureShowcase view={readmeShowcase} />
+) : isQuickCapture ? <QuickCapture /> : surface === "tab-bar" ? (
   <>
     <WorkspaceShortcuts />
     <TabBar />
@@ -79,7 +86,7 @@ function renderApp() {
   );
 }
 
-if (import.meta.env.DEV && searchParams.get("demo") === "readme") {
+if (isReadmeDemo) {
   import("./demo/readmeDemoState").then(({ seedReadmeDemoState }) => {
     seedReadmeDemoState();
     renderApp();
