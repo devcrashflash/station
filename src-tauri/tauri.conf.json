@@ -47,7 +47,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE4RUExRUM0RUQwOEE2QzQKUldURXBnanR4QjdxR015TXl0QXZPaTE5M3czbTJ5UldxbnRlUGNTbzl5VnBGdlZ5WGhjK3BTN3UK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDcwRjM3QzU0MTUwRkRGQUEKUldTcTN3OFZWSHp6Y0dlQmlmQmo0QjNtSWNCN2JkeVVJaWVUQVpmVXhHMlhkRWRaejhsSEN1cHMK",
       "endpoints": [
         "https://github.com/devcrashflash/station/releases/latest/download/latest.json"
       ]
