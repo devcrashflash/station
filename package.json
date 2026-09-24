@@ -2,7 +2,7 @@
   "name": "devcrashflash-station",
   "private": true,
   "license": "BUSL-1.1",
-  "version": "0.10.12",
+  "version": "0.10.13",
   "type": "module",
   "scripts": {
     "dev": "vite",
