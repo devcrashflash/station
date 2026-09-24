@@ -10,8 +10,6 @@ const QuickCapture = lazy(() => import("./features/smart-input/QuickCapture").th
 const TabBar = lazy(() => import("./features/workspace/TabBar").then((module) => ({ default: module.TabBar })));
 const TerminalWorkspace = lazy(() => import("./features/workspace/TerminalSurface").then((module) => ({ default: module.TerminalWorkspace })));
 
-initializeTheme();
-
 const searchParams = new URLSearchParams(window.location.search);
 const isQuickCapture = Boolean(window.__TAURI_INTERNALS__)
   && searchParams.get("quick-capture") === "1";
@@ -72,8 +70,20 @@ const content = (
   </ErrorBoundary>
 );
 
-ReactDOM.createRoot(document.getElementById("root")).render(
-  surface === "main" || isQuickCapture ? (
-    <React.StrictMode>{content}</React.StrictMode>
-  ) : content,
-);
+function renderApp() {
+  initializeTheme();
+  ReactDOM.createRoot(document.getElementById("root")).render(
+    surface === "main" || isQuickCapture ? (
+      <React.StrictMode>{content}</React.StrictMode>
+    ) : content,
+  );
+}
+
+if (import.meta.env.DEV && searchParams.get("demo") === "readme") {
+  import("./demo/readmeDemoState").then(({ seedReadmeDemoState }) => {
+    seedReadmeDemoState();
+    renderApp();
+  });
+} else {
+  renderApp();
+}

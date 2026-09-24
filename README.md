@@ -1,6 +1,22 @@
 # Station by DevCrashFlash
 
-Minimal Tauri v2 starter using React, JavaScript, Vite, Tailwind CSS, and shadcn/ui.
+Station is a local-first desktop workspace for turning scattered developer work into focused, actionable projects. Capture ideas and links, route work to the right project, review pull requests, launch AI-assisted commands, and reconstruct your day without waiting for remote services to load.
+
+![Station Smart Inbox showing captured work, review requests, meetings, and recent tasks](docs/assets/station-overview.png)
+
+## What Station brings together
+
+- **Capture work from anywhere.** Save a thought, file, Trello card, GitHub pull request, or GitLab merge request to the Smart Inbox and route it when you are ready.
+- **Keep project context close.** Group tasks with repositories, boards, local checkouts, related work, and external conversation history.
+- **Review and delegate.** Open pull-request reviews inside Station or hand a task to reusable Codex and Claude prompts.
+- **See the shape of your day.** Combine calendar events with GitHub, GitLab, and Trello activity in a searchable timeline and Markdown summary.
+- **Stay productive offline.** Projects, tasks, resources, and most organization workflows load from the local database first.
+
+## From capture to action
+
+Promote a GitHub pull request from the Smart Inbox, choose its project, and continue with the full task context:
+
+![Animated Station workflow routing a GitHub pull request from the Smart Inbox into the Launchpad project](docs/assets/station-workflow.gif)
 
 ## License and time evaluation
 
@@ -24,6 +40,18 @@ Code contributions require acceptance of the
 - Install dependencies with `pnpm install`.
 - Start the frontend with `pnpm dev`.
 - Start the desktop app with `pnpm tauri dev`.
+
+### README demo captures
+
+The README media uses synthetic data and never needs a real Station database or provider credentials. Start the frontend, then open [`http://127.0.0.1:1420/?demo=readme`](http://127.0.0.1:1420/?demo=readme). The development-only query parameter replaces browser storage with the deterministic capture fixture on each refresh; normal development URLs and production builds are unaffected.
+
+With the development server running, regenerate both assets with:
+
+```sh
+pnpm capture:readme
+```
+
+The capture script uses a 1440×900 light-theme viewport, writes the overview PNG at that resolution, and produces an optimized 1200×750, 10 fps workflow GIF. Set `CHROME_PATH` when Chrome is not installed in a standard location, or `STATION_DEMO_URL` when the development server uses another URL.
 
 ### Google Calendar sign-in
 
