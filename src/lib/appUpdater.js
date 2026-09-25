@@ -1,5 +1,6 @@
 export const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 export const LAST_AUTOMATIC_UPDATE_CHECK_STORAGE_KEY = "dcf-last-automatic-update-check-v1";
+export const BUILD_VERSION = typeof __APP_VERSION__ === "string" ? __APP_VERSION__ : null;
 
 export function readLastAutomaticUpdateCheck(storage = globalThis.window?.localStorage) {
   try {
@@ -72,6 +73,7 @@ export class AppUpdateManager {
     clearIntervalFn = globalThis.clearInterval,
     storage = globalThis.window?.localStorage,
     nowFn = Date.now,
+    currentVersion = BUILD_VERSION,
   }) {
     this.desktop = desktop;
     this.adapter = adapter;
@@ -90,7 +92,7 @@ export class AppUpdateManager {
     this.running = false;
     this.state = {
       supported: desktop,
-      currentVersion: null,
+      currentVersion: desktop ? currentVersion : null,
       lastAutomaticCheckAt: desktop ? readLastAutomaticUpdateCheck(storage) : null,
       phase: "idle",
       message: desktop ? "Updates are checked automatically." : "Updates require the desktop app.",
@@ -120,12 +122,6 @@ export class AppUpdateManager {
       this.check({ manual: false }).catch(() => {});
     }, this.intervalMs);
 
-    try {
-      const currentVersion = await this.adapter.getVersion();
-      if (this.running && runId === this.runId) this.emit({ currentVersion });
-    } catch {
-      // The updater can still compare versions even if the display value is unavailable.
-    }
     if (this.running && runId === this.runId) {
       await this.check({ manual: false });
     }
@@ -279,7 +275,6 @@ export function createTauriUpdateAdapter() {
   let modulesPromise;
   const modules = () => {
     modulesPromise ||= Promise.all([
-      import("@tauri-apps/api/app"),
       import("@tauri-apps/plugin-updater"),
       import("@tauri-apps/plugin-process"),
     ]);
@@ -287,16 +282,12 @@ export function createTauriUpdateAdapter() {
   };
 
   return {
-    async getVersion() {
-      const [app] = await modules();
-      return app.getVersion();
-    },
     async check() {
-      const [, updater] = await modules();
+      const [updater] = await modules();
       return updater.check();
     },
     async relaunch() {
-      const [, , process] = await modules();
+      const [, process] = await modules();
       return process.relaunch();
     },
   };

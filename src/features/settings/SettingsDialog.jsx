@@ -546,7 +546,7 @@ function UpdatesTab({ updater }) {
       <div className="grid gap-1 rounded-md border bg-muted/20 p-3">
         <p className="text-sm font-medium">Installed version</p>
         <p className="font-mono text-sm text-muted-foreground">
-          {updater?.currentVersion || (updater?.supported ? "Loading…" : "Desktop app required")}
+          {updater?.currentVersion || (updater?.supported ? "Unknown" : "Desktop app required")}
         </p>
       </div>
       <div className="grid gap-1 rounded-md border bg-muted/20 p-3">

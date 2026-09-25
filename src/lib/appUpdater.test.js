@@ -69,8 +69,8 @@ test("startup checks immediately and schedules the six-hour interval", async () 
   let now = 1_800_000_000_000;
   const manager = new AppUpdateManager({
     desktop: true,
+    currentVersion: "0.10.11",
     adapter: {
-      async getVersion() { return "0.10.11"; },
       async check() { checks += 1; return null; },
     },
     setIntervalFn(callback, delay) {
@@ -83,6 +83,7 @@ test("startup checks immediately and schedules the six-hour interval", async () 
     nowFn: () => now,
   });
 
+  assert.equal(manager.snapshot().currentVersion, "0.10.11");
   await manager.start();
   assert.equal(checks, 1);
   assert.equal(scheduledDelay, UPDATE_CHECK_INTERVAL_MS);
@@ -161,8 +162,8 @@ test("restarting the manager replaces a stale startup check", async () => {
   let checks = 0;
   const manager = new AppUpdateManager({
     desktop: true,
+    currentVersion: "0.10.11",
     adapter: {
-      async getVersion() { return "0.10.11"; },
       async check() {
         checks += 1;
         return checks === 1 ? firstResult.promise : null;
