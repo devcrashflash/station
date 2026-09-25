@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AppUpdateManager, UPDATE_CHECK_INTERVAL_MS, updateProgress } from "./appUpdater.js";
+import {
+  AppUpdateManager,
+  LAST_AUTOMATIC_UPDATE_CHECK_STORAGE_KEY,
+  UPDATE_CHECK_INTERVAL_MS,
+  formatLastAutomaticUpdateCheck,
+  readLastAutomaticUpdateCheck,
+  updateProgress,
+} from "./appUpdater.js";
 
 function deferred() {
   let resolve;
@@ -23,6 +30,14 @@ function fakeUpdate(version = "0.10.12") {
       this.closeCalls += 1;
     },
     async downloadAndInstall() {},
+  };
+}
+
+function memoryStorage(initial = {}) {
+  const values = new Map(Object.entries(initial));
+  return {
+    getItem(key) { return values.has(key) ? values.get(key) : null; },
+    setItem(key, value) { values.set(key, value); },
   };
 }
 
@@ -50,6 +65,8 @@ test("startup checks immediately and schedules the six-hour interval", async () 
   let checks = 0;
   let scheduledDelay = null;
   let intervalCallback = null;
+  const storage = memoryStorage();
+  let now = 1_800_000_000_000;
   const manager = new AppUpdateManager({
     desktop: true,
     adapter: {
@@ -62,17 +79,63 @@ test("startup checks immediately and schedules the six-hour interval", async () 
       return 1;
     },
     clearIntervalFn() {},
+    storage,
+    nowFn: () => now,
   });
 
   await manager.start();
   assert.equal(checks, 1);
   assert.equal(scheduledDelay, UPDATE_CHECK_INTERVAL_MS);
   assert.equal(manager.snapshot().currentVersion, "0.10.11");
+  assert.equal(manager.snapshot().lastAutomaticCheckAt, now);
+  assert.equal(readLastAutomaticUpdateCheck(storage), now);
 
+  now += UPDATE_CHECK_INTERVAL_MS;
   intervalCallback();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(checks, 2);
+  assert.equal(manager.snapshot().lastAutomaticCheckAt, now);
   await manager.stop();
+});
+
+test("restores the last automatic check and does not replace it for manual checks or failures", async () => {
+  const previous = 1_700_000_000_000;
+  const storage = memoryStorage({
+    [LAST_AUTOMATIC_UPDATE_CHECK_STORAGE_KEY]: String(previous),
+  });
+  let fail = false;
+  const manager = new AppUpdateManager({
+    desktop: true,
+    adapter: {
+      async check() {
+        if (fail) throw new Error("offline");
+        return null;
+      },
+    },
+    storage,
+    nowFn: () => 1_800_000_000_000,
+  });
+
+  assert.equal(manager.snapshot().lastAutomaticCheckAt, previous);
+  await manager.check({ manual: true });
+  assert.equal(manager.snapshot().lastAutomaticCheckAt, previous);
+
+  fail = true;
+  await manager.check();
+  assert.equal(manager.snapshot().lastAutomaticCheckAt, previous);
+  assert.equal(readLastAutomaticUpdateCheck(storage), previous);
+});
+
+test("formats automatic update checks in local time and handles missing values", () => {
+  const value = Date.UTC(2026, 8, 24, 17, 30);
+  const expected = new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(value));
+
+  assert.equal(formatLastAutomaticUpdateCheck(value), expected);
+  assert.equal(formatLastAutomaticUpdateCheck(null), "Never");
+  assert.equal(formatLastAutomaticUpdateCheck("invalid"), "Never");
 });
 
 test("concurrent automatic checks share one updater request", async () => {

@@ -1,4 +1,36 @@
 export const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+export const LAST_AUTOMATIC_UPDATE_CHECK_STORAGE_KEY = "dcf-last-automatic-update-check-v1";
+
+export function readLastAutomaticUpdateCheck(storage = globalThis.window?.localStorage) {
+  try {
+    const value = Number(storage?.getItem(LAST_AUTOMATIC_UPDATE_CHECK_STORAGE_KEY));
+    return Number.isFinite(value) && value > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeLastAutomaticUpdateCheck(value, storage = globalThis.window?.localStorage) {
+  const timestamp = Number(value);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return null;
+  try {
+    storage?.setItem(LAST_AUTOMATIC_UPDATE_CHECK_STORAGE_KEY, String(timestamp));
+  } catch {
+    // The in-memory timestamp still updates when persistent storage is unavailable.
+  }
+  return timestamp;
+}
+
+export function formatLastAutomaticUpdateCheck(value) {
+  const timestamp = Number(value);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return "Never";
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "Never";
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
+}
 
 export function updateProgress(current, event) {
   if (event?.event === "Started") {
@@ -38,12 +70,16 @@ export class AppUpdateManager {
     intervalMs = UPDATE_CHECK_INTERVAL_MS,
     setIntervalFn = globalThis.setInterval,
     clearIntervalFn = globalThis.clearInterval,
+    storage = globalThis.window?.localStorage,
+    nowFn = Date.now,
   }) {
     this.desktop = desktop;
     this.adapter = adapter;
     this.intervalMs = intervalMs;
     this.setIntervalFn = setIntervalFn;
     this.clearIntervalFn = clearIntervalFn;
+    this.storage = storage;
+    this.nowFn = nowFn;
     this.listeners = new Set();
     this.promptedVersions = new Set();
     this.updateResource = null;
@@ -55,6 +91,7 @@ export class AppUpdateManager {
     this.state = {
       supported: desktop,
       currentVersion: null,
+      lastAutomaticCheckAt: desktop ? readLastAutomaticUpdateCheck(storage) : null,
       phase: "idle",
       message: desktop ? "Updates are checked automatically." : "Updates require the desktop app.",
       update: null,
@@ -150,6 +187,11 @@ export class AppUpdateManager {
       if (checkRunId !== this.runId) {
         await update?.close?.();
         return null;
+      }
+
+      if (!manual) {
+        const lastAutomaticCheckAt = writeLastAutomaticUpdateCheck(this.nowFn(), this.storage);
+        if (lastAutomaticCheckAt) this.emit({ lastAutomaticCheckAt });
       }
 
       if (!update) {

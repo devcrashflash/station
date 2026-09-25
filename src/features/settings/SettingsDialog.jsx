@@ -24,6 +24,7 @@ import {
   normalizeAiSessionSettings,
   preferredAiSessionSource,
 } from "@/lib/aiSessions";
+import { formatLastAutomaticUpdateCheck } from "@/lib/appUpdater";
 import { calendarWarnings } from "@/lib/calendar";
 import { api } from "@/lib/api";
 import { TRELLO_CREDENTIAL_URLS, credentialUrl } from "@/lib/credentialLinks";
@@ -546,6 +547,12 @@ function UpdatesTab({ updater }) {
         <p className="text-sm font-medium">Installed version</p>
         <p className="font-mono text-sm text-muted-foreground">
           {updater?.currentVersion || (updater?.supported ? "Loading…" : "Desktop app required")}
+        </p>
+      </div>
+      <div className="grid gap-1 rounded-md border bg-muted/20 p-3">
+        <p className="text-sm font-medium">Last automatic check</p>
+        <p className="text-sm text-muted-foreground">
+          {formatLastAutomaticUpdateCheck(updater?.lastAutomaticCheckAt)}
         </p>
       </div>
       <p className={cn("text-sm", updater?.phase === "error" ? "text-destructive" : "text-muted-foreground")}>
