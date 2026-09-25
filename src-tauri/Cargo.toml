@@ -1,6 +1,6 @@
 [package]
 name = "devcrashflash-station"
-version = "0.10.13"
+version = "0.10.14"
 description = "Station by DevCrashFlash"
 authors = ["Alexander Schranz"]
 license = "BUSL-1.1"
