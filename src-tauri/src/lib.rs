@@ -31,6 +31,7 @@ use tauri_nspanel::{tauri_panel, ManagerExt as PanelManagerExt, StyleMask, Webvi
 
 mod ai_sessions;
 mod calendar;
+mod lifecycle;
 mod programs;
 mod terminal_tabs;
 
@@ -1511,9 +1512,19 @@ pub fn run() {
     NSUserDefaults::standardUserDefaults()
         .setBool_forKey(false, ns_string!("ApplePressAndHoldEnabled"));
 
+    #[cfg(target_os = "macos")]
+    let background_launch = lifecycle::is_background_launch(std::env::args());
+    #[cfg(not(target_os = "macos"))]
+    let background_launch = false;
+
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_nspanel::init());
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_plugin_autostart::init(
+        tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+        Some(vec!["--background"]),
+    ));
     #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
     let builder = builder
         .plugin(tauri_plugin_process::init())
@@ -1522,7 +1533,7 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .setup(|app| {
+        .setup(move |app| {
             #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
             app.handle().plugin(
                 tauri_plugin_global_shortcut::Builder::new()
@@ -1601,6 +1612,8 @@ pub fn run() {
                 shortcut_registration_suspended: false,
                 error: Some("Quick capture is available in the desktop app only.".to_string()),
             };
+            let quick_capture_available =
+                quick_capture_settings.enabled && quick_capture_settings.registered;
 
             app.manage(AppState {
                 db: Mutex::new(db),
@@ -1623,7 +1636,8 @@ pub fn run() {
             app.manage(ai_session_monitor);
             #[cfg(target_os = "macos")]
             install_workspace_menu(app)?;
-            terminal_tabs::setup_workspace_window(app)?;
+            lifecycle::setup(app, background_launch, quick_capture_available)?;
+            terminal_tabs::setup_workspace_window(app, !background_launch)?;
             ai_sessions::setup_monitor_window_events(app.handle())
                 .map_err(std::io::Error::other)?;
             #[cfg(not(target_os = "macos"))]
@@ -1642,6 +1656,8 @@ pub fn run() {
             quick_capture_settings,
             set_quick_capture_shortcut_recording,
             save_quick_capture_settings,
+            lifecycle::lifecycle_settings,
+            lifecycle::save_lifecycle_settings,
             hide_quick_capture,
             resize_quick_capture,
             programs::list_programs,
@@ -1766,8 +1782,9 @@ pub fn run() {
             sync_activities,
             resolve_trello_tickets
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| lifecycle::handle_run_event(app, &event));
 }
 
 #[cfg(target_os = "macos")]
@@ -2652,7 +2669,9 @@ fn apply_quick_capture_settings(
         shortcut_registration_suspended: false,
         error: None,
     };
-    Ok(quick_capture_settings_from_runtime(&runtime))
+    let settings = quick_capture_settings_from_runtime(&runtime);
+    lifecycle::set_quick_capture_available(app, settings.enabled && settings.registered)?;
+    Ok(settings)
 }
 
 #[tauri::command]

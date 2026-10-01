@@ -17,7 +17,9 @@ use tauri::{
 };
 use tauri_plugin_opener::OpenerExt;
 
-use super::{ai_sessions, db_error, get_app_setting, now_millis, set_app_setting, AppState};
+use super::{
+    ai_sessions, db_error, get_app_setting, lifecycle, now_millis, set_app_setting, AppState,
+};
 
 pub const MAIN_TAB_ID: &str = "main";
 const MAIN_WEBVIEW_LABEL: &str = "main-content";
@@ -890,7 +892,10 @@ fn layout_webviews(window: &Window) -> Result<(), String> {
     Ok(())
 }
 
-pub fn setup_workspace_window(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+pub fn setup_workspace_window(
+    app: &mut tauri::App,
+    show_on_startup: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let window = tauri::window::WindowBuilder::new(app, "main")
         .title(app_window_title())
         .inner_size(1400.0, 900.0)
@@ -941,6 +946,11 @@ pub fn setup_workspace_window(app: &mut tauri::App) -> Result<(), Box<dyn std::e
             }
         } else if let WindowEvent::CloseRequested { api, .. } = event {
             api.prevent_close();
+            #[cfg(target_os = "macos")]
+            if let Err(error) = lifecycle::hide_workspace(&cleanup_app) {
+                eprintln!("Could not hide Station: {error}");
+            }
+            #[cfg(not(target_os = "macos"))]
             cleanup_app.exit(0);
         } else if matches!(event, WindowEvent::Destroyed) {
             let state = cleanup_app.state::<TerminalTabsState>();
@@ -952,7 +962,9 @@ pub fn setup_workspace_window(app: &mut tauri::App) -> Result<(), Box<dyn std::e
             };
         }
     });
-    window.show()?;
+    if show_on_startup {
+        window.show()?;
+    }
     Ok(())
 }
 

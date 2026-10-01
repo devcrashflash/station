@@ -14,6 +14,7 @@ import {
   sortArchivedAiSessions,
 } from "./aiSessions.js";
 import { normalizeExternalLabelColor } from "./externalLabels.js";
+import { DEFAULT_LIFECYCLE_SETTINGS } from "./lifecycleSettings.js";
 import { normalizeProjectColor } from "./projectAvatar.js";
 import { parseSmartInput, plainTextTaskBody } from "./smartInputParser.js";
 import {
@@ -76,6 +77,12 @@ const defaultState = {
 };
 
 export const api = {
+  lifecycleSettings: () => call("lifecycle_settings", {}, () => ({
+    ...DEFAULT_LIFECYCLE_SETTINGS,
+  })),
+  saveLifecycleSettings: (payload) => call("save_lifecycle_settings", { input: payload }, () => ({
+    ...DEFAULT_LIFECYCLE_SETTINGS,
+  })),
   quickCaptureSettings: () => call("quick_capture_settings", {}, () => ({
     enabled: false,
     shortcut: "CommandOrControl+Shift+Space",

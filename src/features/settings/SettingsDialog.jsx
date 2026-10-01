@@ -128,6 +128,7 @@ export function SettingsDialog({
   terminalSettings,
   terminalFonts = [],
   terminalShellIntegration,
+  lifecycleSettings,
   quickCaptureSettings,
   appUpdater,
   themePreference = "system",
@@ -151,6 +152,7 @@ export function SettingsDialog({
   onRefreshTerminalShellIntegration,
   onInstallTerminalShellIntegration,
   onUninstallTerminalShellIntegration,
+  onSaveLifecycleSettings,
   onSaveQuickCaptureSettings,
   onThemePreferenceChange,
   onSaveCalendarSubscription,
@@ -516,8 +518,10 @@ export function SettingsDialog({
             {activeTab === "quick-capture" && (
               <QuickCaptureSettingsTab
                 settings={quickCaptureSettings}
+                lifecycleSettings={lifecycleSettings}
                 terminalShortcuts={terminalSettings?.shortcuts}
                 onSave={onSaveQuickCaptureSettings}
+                onSaveLifecycle={onSaveLifecycleSettings}
               />
             )}
 
@@ -834,7 +838,13 @@ function AiSessionSettingsTab({ settings, onSave }) {
   );
 }
 
-function QuickCaptureSettingsTab({ settings, terminalShortcuts, onSave }) {
+function QuickCaptureSettingsTab({
+  settings,
+  lifecycleSettings,
+  terminalShortcuts,
+  onSave,
+  onSaveLifecycle,
+}) {
   const [candidate, setCandidate] = useState(settings?.shortcut || "CommandOrControl+Shift+Space");
   const [isRecording, setIsRecording] = useState(false);
   const [isStartingRecording, setIsStartingRecording] = useState(false);
@@ -842,6 +852,7 @@ function QuickCaptureSettingsTab({ settings, terminalShortcuts, onSave }) {
   const [notice, setNotice] = useState(settings?.error || "");
   const [noticeIsError, setNoticeIsError] = useState(Boolean(settings?.error));
   const [isSaving, setIsSaving] = useState(false);
+  const [isLifecycleSaving, setIsLifecycleSaving] = useState(false);
   const recorderMountedRef = useRef(true);
   const nativeRecordingRequestedRef = useRef(false);
   const supported = settings?.supported === true;
@@ -1022,8 +1033,47 @@ function QuickCaptureSettingsTab({ settings, terminalShortcuts, onSave }) {
     }
   }
 
+  async function toggleLaunchAtLogin(launchAtLogin) {
+    setIsLifecycleSaving(true);
+    setNotice("");
+    setNoticeIsError(false);
+    try {
+      const nextSettings = await onSaveLifecycle({ launchAtLogin });
+      setNotice(nextSettings.launchAtLogin
+        ? "Station will launch in the background when you log in."
+        : "Launch at login disabled.");
+    } catch (error) {
+      setNotice(error?.message || String(error));
+      setNoticeIsError(true);
+    } finally {
+      setIsLifecycleSaving(false);
+    }
+  }
+
   return (
     <div className="grid gap-5">
+      {lifecycleSettings?.supported === true && (
+        <FieldSet className="gap-4 rounded-lg border p-4">
+          <FieldLegend className="mb-0 px-1">Station lifecycle</FieldLegend>
+          <p className="text-xs text-muted-foreground">
+            Keep Station available from the menu bar as soon as you log in to macOS.
+          </p>
+          <label className="flex items-start gap-3 rounded-lg border bg-muted/20 p-4">
+            <Checkbox
+              checked={lifecycleSettings.launchAtLogin}
+              disabled={isLifecycleSaving}
+              onCheckedChange={(checked) => toggleLaunchAtLogin(checked === true)}
+            />
+            <span className="grid gap-1">
+              <span className="text-sm font-medium">Launch Station at login</span>
+              <span className="text-xs text-muted-foreground">
+                Start Station quietly in the menu bar without opening the workspace.
+              </span>
+            </span>
+          </label>
+        </FieldSet>
+      )}
+
       <FieldSet className="gap-4 rounded-lg border p-4">
         <FieldLegend className="mb-0 px-1">Quick Capture overlay</FieldLegend>
         <p className="text-xs text-muted-foreground">
