@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{
     menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder},
     tray::{TrayIcon, TrayIconBuilder},
-    ActivationPolicy, Manager,
+    ActivationPolicy, Emitter, Manager,
 };
 #[cfg(target_os = "macos")]
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
@@ -17,6 +17,8 @@ const OPEN_OVERLAY_MENU_ID: &str = "lifecycle_open_overlay";
 const LAUNCH_AT_LOGIN_MENU_ID: &str = "lifecycle_launch_at_login";
 #[cfg(target_os = "macos")]
 const QUIT_STATION_MENU_ID: &str = "lifecycle_quit_station";
+#[cfg(target_os = "macos")]
+const LIFECYCLE_SETTINGS_CHANGED_EVENT: &str = "lifecycle-settings-changed";
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -87,6 +89,13 @@ fn sync_launch_at_login_menu(app: &tauri::AppHandle, enabled: bool) -> Result<()
             .map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn publish_launch_at_login(app: &tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    sync_launch_at_login_menu(app, enabled)?;
+    app.emit(LIFECYCLE_SETTINGS_CHANGED_EVENT, settings(enabled, true))
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -193,7 +202,7 @@ pub fn setup(
                     .and_then(|enabled| apply_launch_at_login(app, !enabled));
                 match result {
                     Ok(enabled) => {
-                        if let Err(error) = sync_launch_at_login_menu(app, enabled) {
+                        if let Err(error) = publish_launch_at_login(app, enabled) {
                             eprintln!("Could not update the Launch at Login menu: {error}");
                         }
                     }
@@ -232,13 +241,21 @@ pub fn setup(
 
 pub fn handle_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent) {
     #[cfg(target_os = "macos")]
-    if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
-        if should_hide_for_exit_request(*code) {
-            api.prevent_exit();
-            if let Err(error) = hide_workspace(app) {
-                eprintln!("Could not hide Station: {error}");
+    match event {
+        tauri::RunEvent::Reopen { .. } => {
+            if let Err(error) = show_workspace(app) {
+                eprintln!("Could not reopen Station: {error}");
             }
         }
+        tauri::RunEvent::ExitRequested { code, api, .. } => {
+            if should_hide_for_exit_request(*code) {
+                api.prevent_exit();
+                if let Err(error) = hide_workspace(app) {
+                    eprintln!("Could not hide Station: {error}");
+                }
+            }
+        }
+        _ => {}
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -265,7 +282,7 @@ pub fn save_lifecycle_settings(
     #[cfg(target_os = "macos")]
     {
         let enabled = apply_launch_at_login(&app, input.launch_at_login)?;
-        sync_launch_at_login_menu(&app, enabled)?;
+        publish_launch_at_login(&app, enabled)?;
         return Ok(settings(enabled, true));
     }
 

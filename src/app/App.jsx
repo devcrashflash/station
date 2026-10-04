@@ -59,7 +59,12 @@ import { parseSmartInboxTodo, parseSmartInput } from "@/lib/smartInputParser";
 import { DEFAULT_TERMINAL_SHORTCUTS } from "@/lib/terminalShortcuts";
 import { useTheme } from "@/lib/theme";
 import { isWorkspaceShortcut, workspaceTabsApi } from "@/lib/workspaceTabs";
-import { DEFAULT_LIFECYCLE_SETTINGS, normalizeLifecycleSettings } from "@/lib/lifecycleSettings";
+import {
+  DEFAULT_LIFECYCLE_SETTINGS,
+  LIFECYCLE_SETTINGS_CHANGED_EVENT,
+  lifecycleSettingsFromChangePayload,
+  normalizeLifecycleSettings,
+} from "@/lib/lifecycleSettings";
 import { InboxView } from "@/views/inbox/InboxView";
 import { ActivityView, useActivityData } from "@/views/activity/ActivityView";
 import { ProjectWorkspaceView } from "@/views/projects/ProjectWorkspaceView";
@@ -465,6 +470,33 @@ function App() {
           if (active) showNotice(error?.message || String(error));
         }
       })
+      .then((cleanup) => {
+        if (!active) {
+          cleanup();
+        } else {
+          unlisten = cleanup;
+        }
+      })
+      .catch((error) => {
+        if (active) showNotice(error?.message || String(error));
+      });
+
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [showNotice]);
+
+  useEffect(() => {
+    if (!isDesktopApp()) return undefined;
+
+    let active = true;
+    let unlisten = null;
+    listen(LIFECYCLE_SETTINGS_CHANGED_EVENT, ({ payload }) => {
+      if (active) {
+        setLifecycleSettings(lifecycleSettingsFromChangePayload(payload));
+      }
+    })
       .then((cleanup) => {
         if (!active) {
           cleanup();
