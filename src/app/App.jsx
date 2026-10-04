@@ -59,6 +59,12 @@ import { parseSmartInboxTodo, parseSmartInput } from "@/lib/smartInputParser";
 import { DEFAULT_TERMINAL_SHORTCUTS } from "@/lib/terminalShortcuts";
 import { useTheme } from "@/lib/theme";
 import { isWorkspaceShortcut, workspaceTabsApi } from "@/lib/workspaceTabs";
+import {
+  DEFAULT_LIFECYCLE_SETTINGS,
+  LIFECYCLE_SETTINGS_CHANGED_EVENT,
+  lifecycleSettingsFromChangePayload,
+  normalizeLifecycleSettings,
+} from "@/lib/lifecycleSettings";
 import { InboxView } from "@/views/inbox/InboxView";
 import { ActivityView, useActivityData } from "@/views/activity/ActivityView";
 import { ProjectWorkspaceView } from "@/views/projects/ProjectWorkspaceView";
@@ -190,6 +196,7 @@ function App() {
   });
   const [terminalFonts, setTerminalFonts] = useState([]);
   const [terminalShellIntegration, setTerminalShellIntegration] = useState(null);
+  const [lifecycleSettings, setLifecycleSettings] = useState(DEFAULT_LIFECYCLE_SETTINGS);
   const [quickCaptureSettings, setQuickCaptureSettings] = useState({
     enabled: true,
     shortcut: "CommandOrControl+Shift+Space",
@@ -482,6 +489,33 @@ function App() {
 
   useEffect(() => {
     if (!isDesktopApp()) return undefined;
+
+    let active = true;
+    let unlisten = null;
+    listen(LIFECYCLE_SETTINGS_CHANGED_EVENT, ({ payload }) => {
+      if (active) {
+        setLifecycleSettings(lifecycleSettingsFromChangePayload(payload));
+      }
+    })
+      .then((cleanup) => {
+        if (!active) {
+          cleanup();
+        } else {
+          unlisten = cleanup;
+        }
+      })
+      .catch((error) => {
+        if (active) showNotice(error?.message || String(error));
+      });
+
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [showNotice]);
+
+  useEffect(() => {
+    if (!isDesktopApp()) return undefined;
     let active = true;
     let unlisten = null;
     listen(APP_NAVIGATION_REQUEST_EVENT, async ({ payload }) => {
@@ -559,7 +593,7 @@ function App() {
   }, [selectedProjectId]);
 
   async function refreshShell() {
-    const [projectList, connectionList, calendarAccountList, aiPromptList, directoryList, browserSettingsResult, commandSettingsResult, aiSessionSettingsResult, terminalSettingsResult, terminalFontList, terminalShellIntegrationResult, quickCaptureSettingsResult, recentFileList, todoList] = await Promise.all([
+    const [projectList, connectionList, calendarAccountList, aiPromptList, directoryList, browserSettingsResult, commandSettingsResult, aiSessionSettingsResult, terminalSettingsResult, terminalFontList, terminalShellIntegrationResult, lifecycleSettingsResult, quickCaptureSettingsResult, recentFileList, todoList] = await Promise.all([
       api.listProjects(),
       api.listConnections(),
       api.listCalendarAccounts(),
@@ -571,6 +605,7 @@ function App() {
       api.listTerminalSettings(),
       api.listTerminalFonts(),
       api.terminalShellIntegrationStatus(),
+      api.lifecycleSettings(),
       api.quickCaptureSettings(),
       api.listRecentDirectoryFiles(),
       api.listSmartInboxTodos(),
@@ -587,6 +622,7 @@ function App() {
     setTerminalSettings(terminalSettingsResult);
     setTerminalFonts(terminalFontList);
     setTerminalShellIntegration(terminalShellIntegrationResult);
+    setLifecycleSettings(normalizeLifecycleSettings(lifecycleSettingsResult));
     setQuickCaptureSettings(quickCaptureSettingsResult);
     if (quickCaptureSettingsResult.error) showNotice(quickCaptureSettingsResult.error);
     setRecentDirectoryFiles(recentFileList);
@@ -1302,6 +1338,7 @@ function App() {
           terminalSettings={terminalSettings}
           terminalFonts={terminalFonts}
           terminalShellIntegration={terminalShellIntegration}
+          lifecycleSettings={lifecycleSettings}
           quickCaptureSettings={quickCaptureSettings}
           appUpdater={appUpdater}
           themePreference={themePreference}
@@ -1428,6 +1465,14 @@ function App() {
               setQuickCaptureSettings(await api.quickCaptureSettings());
               throw error;
             }
+          }}
+          onSaveLifecycleSettings={async (payload) => {
+            const settings = normalizeLifecycleSettings(await api.saveLifecycleSettings(payload));
+            setLifecycleSettings(settings);
+            showNotice(settings.launchAtLogin
+              ? "Station will launch when you log in."
+              : "Station will no longer launch when you log in.");
+            return settings;
           }}
           onSaveCalendarSubscription={async (payload) => {
             const account = await api.saveCalendarSubscription(payload);
