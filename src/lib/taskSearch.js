@@ -31,8 +31,8 @@ export function preserveTaskOrder(tasks = [], taskIds = []) {
   if (!orderedTasks.length && tasks.length) return orderTasksByCompletion(tasks);
 
   const knownTaskIds = new Set(taskIds);
-  return [
+  return orderTasksByCompletion([
     ...orderedTasks,
     ...tasks.filter((task) => !knownTaskIds.has(task.id)),
-  ];
+  ]);
 }

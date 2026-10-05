@@ -50,7 +50,7 @@ test("dashboard tasks exclude locally completed tasks before sorting and limitin
   );
 });
 
-test("dashboard tasks keep provider-backed tasks with externally completed statuses", () => {
+test("dashboard tasks exclude completed reviews and keep other provider-backed tasks", () => {
   const tasks = [
     { id: "local-done", status: "done", createdAt: 300 },
     {
@@ -59,6 +59,20 @@ test("dashboard tasks keep provider-backed tasks with externally completed statu
       sourceProvider: "github",
       sourceKind: "github_issue",
       createdAt: 200,
+    },
+    {
+      id: "github-pr-merged",
+      status: "merged",
+      sourceProvider: "github",
+      sourceKind: "pull_request",
+      createdAt: 250,
+    },
+    {
+      id: "gitlab-mr-closed",
+      status: "closed",
+      sourceProvider: "gitlab",
+      sourceKind: "merge_request",
+      createdAt: 150,
     },
     {
       id: "trello-done",

@@ -51,7 +51,7 @@ test("orders open tasks before done tasks while preserving each group's order", 
   );
 });
 
-test("keeps provider-backed tasks in the open group regardless of external status", () => {
+test("puts completed review requests after active provider-backed tasks", () => {
   const unorderedTasks = [
     { id: "local-done", status: "done" },
     {
@@ -61,16 +61,28 @@ test("keeps provider-backed tasks in the open group regardless of external statu
       sourceKind: "trello_card",
     },
     {
-      id: "github-closed",
+      id: "github-issue-closed",
       status: "closed",
       sourceProvider: "github",
       sourceKind: "github_issue",
+    },
+    {
+      id: "github-pr-merged",
+      status: "merged",
+      sourceProvider: "github",
+      sourceKind: "pull_request",
+    },
+    {
+      id: "gitlab-mr-closed",
+      status: "closed",
+      sourceProvider: "gitlab",
+      sourceKind: "merge_request",
     },
   ];
 
   assert.deepEqual(
     orderTasksByCompletion(unorderedTasks).map((task) => task.id),
-    ["trello-done", "github-closed", "local-done"],
+    ["trello-done", "github-issue-closed", "local-done", "github-pr-merged", "gitlab-mr-closed"],
   );
 });
 
@@ -87,20 +99,22 @@ test("orders search-filtered tasks with matching done tasks last", () => {
   );
 });
 
-test("preserves the opened task order when statuses update", () => {
+test("regroups tasks when statuses update while preserving order within each group", () => {
   const openedTasks = orderTasksByCompletion([
     { id: "done", status: "done" },
+    { id: "changing", status: "open" },
     { id: "open", status: "open" },
   ]);
   const taskIds = openedTasks.map((task) => task.id);
   const updatedTasks = [
     { id: "done", status: "done" },
-    { id: "open", status: "done" },
+    { id: "changing", status: "done" },
+    { id: "open", status: "open" },
   ];
 
   assert.deepEqual(
     preserveTaskOrder(updatedTasks, taskIds).map((task) => task.id),
-    ["open", "done"],
+    ["open", "changing", "done"],
   );
 });
 
@@ -121,7 +135,7 @@ test("sorts a newly opened task collection and appends later additions without m
   assert.deepEqual(
     preserveTaskOrder([...openedTasks, { id: "new", status: "open" }], ["open", "done"])
       .map((task) => task.id),
-    ["open", "done", "new"],
+    ["open", "new", "done"],
   );
   assert.deepEqual(
     preserveTaskOrder(replacementTasks, ["open", "done"]).map((task) => task.id),

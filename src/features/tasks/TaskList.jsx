@@ -29,10 +29,27 @@ export function TaskList({
         const isDone = isTaskDone(task);
         const statusBadgeLabel = taskStatusBadgeLabel(task);
         const statusBadgeStyle = taskStatusBadgeStyle(task);
+        const providerLabel = {
+          github: "GitHub",
+          gitlab: "GitLab",
+          trello: "Trello",
+        }[task.sourceProvider] || "Provider";
 
         return (
           <div key={task.id} className="flex min-w-0 items-start gap-3 rounded-md border bg-card p-3">
-            {!isProviderBacked && (
+            {isProviderBacked ? (
+              <span
+                className={cn(
+                  "mt-0.5 flex size-5 shrink-0 items-center justify-center text-muted-foreground",
+                  isDone && "text-emerald-600 dark:text-emerald-400",
+                )}
+                role="img"
+                aria-label={`${providerLabel} manages this task's completion status`}
+                title={`Completion status is managed by ${providerLabel}`}
+              >
+                <CheckCircle2 className="size-5" />
+              </span>
+            ) : (
               <Button
                 className={cn(
                   "mt-0.5 size-auto rounded-full p-0 text-muted-foreground hover:bg-transparent",

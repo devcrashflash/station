@@ -18,8 +18,21 @@ test("detects provider-backed task statuses", () => {
   assert.equal(isProviderBackedTask({ sourceProvider: null, sourceKind: null }), false);
 });
 
-test("only plain done tasks use local done state", () => {
+test("uses local done state for plain tasks", () => {
   assert.equal(isTaskDone({ status: "done" }), true);
+  assert.equal(isTaskDone({ status: "open" }), false);
+});
+
+test("treats closed GitHub pull requests and GitLab merge requests as done", () => {
+  assert.equal(isTaskDone({ status: "open", sourceProvider: "github", sourceKind: "pull_request" }), false);
+  assert.equal(isTaskDone({ status: "merged", sourceProvider: "github", sourceKind: "pull_request" }), true);
+  assert.equal(isTaskDone({ status: " CLOSED ", sourceProvider: "github", sourceKind: "pull_request" }), true);
+  assert.equal(isTaskDone({ status: "opened", sourceProvider: "gitlab", sourceKind: "merge_request" }), false);
+  assert.equal(isTaskDone({ status: "MERGED", sourceProvider: "gitlab", sourceKind: "merge_request" }), true);
+  assert.equal(isTaskDone({ status: "closed", sourceProvider: "gitlab", sourceKind: "merge_request" }), true);
+});
+
+test("keeps other provider-backed tasks out of the local done state", () => {
   assert.equal(isTaskDone({ status: "closed", sourceProvider: "github", sourceKind: "github_issue" }), false);
   assert.equal(isTaskDone({ status: "Done", sourceProvider: "trello", sourceKind: "trello_card" }), false);
 });

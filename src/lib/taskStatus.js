@@ -1,4 +1,5 @@
 import { externalLabelStyle } from "./externalLabels.js";
+import { isClosedReviewState } from "./reviewSession.js";
 
 export function isProviderBackedTask(task) {
   return (
@@ -9,6 +10,11 @@ export function isProviderBackedTask(task) {
 }
 
 export function isTaskDone(task) {
+  const isReviewRequest =
+    (task?.sourceProvider === "github" && task?.sourceKind === "pull_request") ||
+    (task?.sourceProvider === "gitlab" && task?.sourceKind === "merge_request");
+
+  if (isReviewRequest) return isClosedReviewState(task?.status);
   return !isProviderBackedTask(task) && task?.status === "done";
 }
 
