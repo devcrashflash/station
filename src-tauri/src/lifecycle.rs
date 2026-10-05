@@ -99,20 +99,29 @@ fn publish_launch_at_login(app: &tauri::AppHandle, enabled: bool) -> Result<(), 
 }
 
 #[cfg(target_os = "macos")]
-pub fn set_quick_capture_available(app: &tauri::AppHandle, available: bool) -> Result<(), String> {
+pub fn sync_quick_capture_menu(
+    app: &tauri::AppHandle,
+    available: bool,
+    shortcut: &str,
+) -> Result<(), String> {
     if let Some(state) = app.try_state::<LifecycleMenuState>() {
         state
             .open_overlay
             .set_enabled(available)
+            .map_err(|error| error.to_string())?;
+        state
+            .open_overlay
+            .set_accelerator(Some(shortcut))
             .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn set_quick_capture_available(
+pub fn sync_quick_capture_menu(
     _app: &tauri::AppHandle,
     _available: bool,
+    _shortcut: &str,
 ) -> Result<(), String> {
     Ok(())
 }
@@ -152,6 +161,7 @@ pub fn setup(
     app: &mut tauri::App,
     background_launch: bool,
     quick_capture_available: bool,
+    quick_capture_shortcut: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if background_launch {
         app.set_activation_policy(ActivationPolicy::Accessory);
@@ -166,6 +176,7 @@ pub fn setup(
         MenuItemBuilder::with_id(OPEN_STATION_MENU_ID, "Open Station").build(app.handle())?;
     let open_overlay = MenuItemBuilder::with_id(OPEN_OVERLAY_MENU_ID, "Open Overlay")
         .enabled(quick_capture_available)
+        .accelerator(quick_capture_shortcut)
         .build(app.handle())?;
     let launch_at_login = CheckMenuItemBuilder::with_id(LAUNCH_AT_LOGIN_MENU_ID, "Launch at Login")
         .checked(launch_at_login_enabled)
@@ -235,6 +246,7 @@ pub fn setup(
     _app: &mut tauri::App,
     _background_launch: bool,
     _quick_capture_available: bool,
+    _quick_capture_shortcut: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }

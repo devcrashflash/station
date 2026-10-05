@@ -1614,6 +1614,7 @@ pub fn run() {
             };
             let quick_capture_available =
                 quick_capture_settings.enabled && quick_capture_settings.registered;
+            let quick_capture_shortcut = quick_capture_settings.shortcut.clone();
 
             app.manage(AppState {
                 db: Mutex::new(db),
@@ -1636,7 +1637,12 @@ pub fn run() {
             app.manage(ai_session_monitor);
             #[cfg(target_os = "macos")]
             install_workspace_menu(app)?;
-            lifecycle::setup(app, background_launch, quick_capture_available)?;
+            lifecycle::setup(
+                app,
+                background_launch,
+                quick_capture_available,
+                &quick_capture_shortcut,
+            )?;
             terminal_tabs::setup_workspace_window(app, !background_launch)?;
             ai_sessions::setup_monitor_window_events(app.handle())
                 .map_err(std::io::Error::other)?;
@@ -2670,7 +2676,11 @@ fn apply_quick_capture_settings(
         error: None,
     };
     let settings = quick_capture_settings_from_runtime(&runtime);
-    lifecycle::set_quick_capture_available(app, settings.enabled && settings.registered)?;
+    lifecycle::sync_quick_capture_menu(
+        app,
+        settings.enabled && settings.registered,
+        &settings.shortcut,
+    )?;
     Ok(settings)
 }
 
