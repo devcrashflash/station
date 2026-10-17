@@ -1731,6 +1731,8 @@ function TerminalTab({
   const [scrollbackLines, setScrollbackLines] = useState(String(settings?.scrollbackLines ?? 10_000));
   const [shortcuts, setShortcuts] = useState(() => normalizeTerminalShortcuts(settings?.shortcuts));
   const [recordingAction, setRecordingAction] = useState(null);
+  const recordingActionRef = useRef(null);
+  const recordingButtonRef = useRef(null);
   const [shortcutError, setShortcutError] = useState("");
   const [notice, setNotice] = useState("");
   const [isSaving, setIsSaving] = useState(false);
@@ -1776,11 +1778,52 @@ function TerminalTab({
   }
 
   function stopShortcutRecording() {
+    recordingActionRef.current = null;
     setRecordingAction(null);
     setTerminalShortcutRecording(false);
   }
 
-  function startShortcutRecording(action) {
+  function cancelShortcutRecording() {
+    stopShortcutRecording();
+    setShortcutError("");
+    setNotice("Shortcut recording cancelled.");
+  }
+
+  // Radix handles Escape at document capture, before the button's key handler.
+  // Consume the full Escape press here, including repeats after cancellation.
+  useEffect(() => {
+    let escapeHeld = false;
+    function handleKeyDown(event) {
+      if (event.key !== "Escape" || (!recordingActionRef.current && !escapeHeld)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      escapeHeld = true;
+      if (recordingActionRef.current) {
+        cancelShortcutRecording();
+        recordingButtonRef.current?.focus();
+      }
+    }
+    function handleKeyUp(event) {
+      if (event.key === "Escape") escapeHeld = false;
+    }
+    function handleWindowBlur() {
+      escapeHeld = false;
+      if (recordingActionRef.current) cancelShortcutRecording();
+    }
+    window.addEventListener("keydown", handleKeyDown, true);
+    window.addEventListener("keyup", handleKeyUp, true);
+    window.addEventListener("blur", handleWindowBlur);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown, true);
+      window.removeEventListener("keyup", handleKeyUp, true);
+      window.removeEventListener("blur", handleWindowBlur);
+    };
+  }, []);
+
+  function startShortcutRecording(action, button) {
+    recordingActionRef.current = action;
+    recordingButtonRef.current = button;
+    button.focus();
     setRecordingAction(action);
     setShortcutError("");
     setNotice("Press the new shortcut. Escape cancels.");
@@ -1789,12 +1832,16 @@ function TerminalTab({
 
   function recordShortcut(event, action) {
     if (recordingAction !== action) return;
+    if (event.key === "Tab") return;
+    // Keep native keyboard activation of the Cancel button available.
+    if (!event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey
+      && (event.key === "Enter" || event.key === " ") && !event.repeat) return;
     event.preventDefault();
     event.stopPropagation();
+    if (event.repeat) return;
     const result = shortcutFromKeyboardEvent(event);
     if (result.status === "cancel") {
-      stopShortcutRecording();
-      setNotice("Shortcut recording cancelled.");
+      cancelShortcutRecording();
       return;
     }
     if (result.status === "recording") {
@@ -2144,7 +2191,7 @@ function TerminalTab({
       <details
         className="group rounded-lg border"
         onToggle={(event) => {
-          if (!event.currentTarget.open && recordingAction !== null) stopShortcutRecording();
+          if (!event.currentTarget.open && recordingAction !== null) cancelShortcutRecording();
         }}
       >
         <summary className="flex cursor-pointer list-none items-center justify-between gap-3 p-4 text-sm font-medium marker:hidden">
@@ -2165,19 +2212,25 @@ function TerminalTab({
                 <span className="text-sm">{action.label}</span>
                 <div className="flex items-center gap-2">
                   <Kbd className="h-7 px-2 text-sm">{formatShortcut(shortcuts[action.id])}</Kbd>
+                  {recordingAction === action.id && (
+                    <span className="text-xs text-muted-foreground">Press shortcut…</span>
+                  )}
                   <Button
                     type="button"
                     size="sm"
                     variant={recordingAction === action.id ? "secondary" : "outline"}
                     disabled={isSaving || (recordingAction !== null && recordingAction !== action.id)}
-                    onClick={() => startShortcutRecording(action.id)}
+                    onClick={(event) => {
+                      if (recordingAction === action.id) cancelShortcutRecording();
+                      else startShortcutRecording(action.id, event.currentTarget);
+                    }}
                     onKeyDown={(event) => recordShortcut(event, action.id)}
                     onBlur={() => {
-                      if (recordingAction === action.id) stopShortcutRecording();
+                      if (recordingActionRef.current === action.id) cancelShortcutRecording();
                     }}
                   >
                     <Keyboard />
-                    {recordingAction === action.id ? "Press shortcut…" : "Change"}
+                    {recordingAction === action.id ? "Cancel" : "Change"}
                   </Button>
                 </div>
               </div>
