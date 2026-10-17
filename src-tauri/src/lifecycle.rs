@@ -192,10 +192,11 @@ pub fn setup(
         .item(&quit_station)
         .build()?;
 
-    let mut tray_builder = TrayIconBuilder::with_id("station-menu-bar")
+    let tray_builder = TrayIconBuilder::with_id("station-menu-bar")
         .menu(&menu)
         .show_menu_on_left_click(true)
         .tooltip("Station by DevCrashFlash")
+        .icon(tauri::include_image!("icons/tray-icon.png"))
         .icon_as_template(true)
         .on_menu_event(|app, event| match event.id().as_ref() {
             OPEN_STATION_MENU_ID => {
@@ -228,9 +229,6 @@ pub fn setup(
             QUIT_STATION_MENU_ID => app.exit(0),
             _ => {}
         });
-    if let Some(icon) = app.default_window_icon().cloned() {
-        tray_builder = tray_builder.icon(icon);
-    }
     let tray = tray_builder.build(app.handle())?;
 
     app.manage(LifecycleMenuState {
