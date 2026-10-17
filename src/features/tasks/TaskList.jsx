@@ -40,7 +40,7 @@ export function TaskList({
             {isProviderBacked ? (
               <span
                 className={cn(
-                  "mt-0.5 flex size-5 shrink-0 items-center justify-center text-muted-foreground",
+                  "mt-0.5 flex h-5 w-11 shrink-0 items-center justify-center text-muted-foreground",
                   isDone && "text-emerald-600 dark:text-emerald-400",
                 )}
                 role="img"
@@ -52,11 +52,12 @@ export function TaskList({
             ) : (
               <Button
                 className={cn(
-                  "mt-0.5 size-auto rounded-full p-0 text-muted-foreground hover:bg-transparent",
+                  "mt-0.5 h-5 w-11 rounded-full p-0 text-muted-foreground hover:bg-transparent",
                   isDone && "text-emerald-600 hover:text-emerald-700 dark:text-emerald-400 dark:hover:text-emerald-300",
                 )}
                 type="button"
                 variant="ghost"
+                size="icon"
                 disabled={readonly}
                 title={isDone ? "Mark open" : "Mark done"}
                 onClick={(event) => {
