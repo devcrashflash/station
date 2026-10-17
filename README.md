@@ -31,6 +31,8 @@ The same overlay surfaces recent Codex and Claude sessions, prioritizes agents w
 
 Keep persistent terminal tabs beside the main workspace, split them into multiple panes, move between panes from the keyboard, search output, and open detected file paths without leaving Station.
 
+Drag local files or folders onto a terminal pane to insert their full paths at the current input cursor. Multiple paths are separated by spaces, and dropping never presses Enter. Images are inserted as paths; clipboard paste keeps its existing behavior. Paths are quoted for the shell Station launched; nested shells and SSH sessions may use different quoting rules. In Windows `cmd.exe`, paths containing `%` or `!` are rejected because they can expand as variables even inside quotes.
+
 ![Station's built-in terminal workspace with persistent tabs and two split terminal panes](docs/assets/station-terminal.png)
 
 ### AI Commands on every task

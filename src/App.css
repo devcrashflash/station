@@ -484,6 +484,34 @@ body.terminal-window #root {
   outline-color: color-mix(in srgb, var(--primary) 55%, transparent);
 }
 
+.terminal-host.terminal-file-drop-hover {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+.terminal-file-drop-error {
+  position: absolute;
+  z-index: 10;
+  bottom: 12px;
+  left: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--destructive);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 13px;
+}
+
+.terminal-file-drop-error button {
+  cursor: pointer;
+  padding: 0 6px;
+}
+
 .terminal-pane-titled {
   display: flex;
   flex-direction: column;

@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
@@ -39,7 +40,10 @@ import {
   isPrimaryTerminalLinkEvent,
 } from "@/lib/terminalLinks";
 import { terminalCellLetterSpacing } from "@/lib/terminalFonts";
+import { createTerminalFileDropController } from "@/lib/terminalFileDrop";
 import { useSynchronizedTheme } from "@/lib/theme";
+
+const TerminalDropRegistry = createContext(null);
 
 const DARK_TERMINAL_THEME = {
   background: "#000000",
@@ -241,6 +245,37 @@ function TerminalPane({
   const [lifecycle, setLifecycle] = useState({ running: true, exitCode: null, error: "" });
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResult, setSearchResult] = useState({ resultIndex: -1, resultCount: 0 });
+  const dropRegistry = useContext(TerminalDropRegistry);
+  const shellRef = useRef(null);
+  const dropStateRef = useRef(null);
+  dropStateRef.current = { active, running: lifecycle.running && pane.running !== false };
+
+  useEffect(() => {
+    if (!dropRegistry) return undefined;
+    dropRegistry.current.set(pane.paneId, () => ({
+      ...dropStateRef.current,
+      tabId,
+      host: hostRef.current,
+      ready: attachmentIdRef.current !== null && Boolean(shellRef.current),
+      shell: shellRef.current,
+      terminal: terminalRef.current,
+      focus: () => {
+        if (searchOpenRef.current) closeSearchRef.current();
+        terminalRef.current?.focus();
+        invoke("focus_terminal_pane", { tabId, paneId: pane.paneId }).catch(console.error);
+      },
+    }));
+    return () => {
+      hostRef.current?.classList.remove("terminal-file-drop-hover");
+      dropRegistry.current.delete(pane.paneId);
+    };
+  }, [dropRegistry, tabId, pane.paneId]);
+
+  useEffect(() => {
+    if (!active || !lifecycle.running || pane.running === false) {
+      hostRef.current?.classList.remove("terminal-file-drop-hover");
+    }
+  }, [active, lifecycle.running, pane.running]);
 
   focusedRef.current = focused;
   copyOnSelectionRef.current = copyOnSelection;
@@ -270,6 +305,7 @@ function TerminalPane({
 
   const attach = useCallback(async (terminal, fit, command = "terminal_attach") => {
     if (!terminal || !fit) return;
+    shellRef.current = null;
     fit.fit();
     let receivedOutput = false;
     const scheduleStartupReady = (delay) => {
@@ -284,8 +320,10 @@ function TerminalPane({
     });
     const onEvent = new Channel((event) => {
       if (event.type === "exited") {
+        shellRef.current = null;
         setLifecycle({ running: false, exitCode: event.exitCode, error: "" });
       } else if (event.type === "error") {
+        shellRef.current = null;
         setLifecycle((current) => ({ ...current, running: false, error: event.message }));
       }
     });
@@ -299,6 +337,7 @@ function TerminalPane({
       onEvent,
     });
     attachmentIdRef.current = result.attachmentId;
+    shellRef.current = result.shell;
     // Interactive shells normally print a prompt. Keep a fallback for custom
     // shells with an empty prompt so a deferred terminal can still activate.
     if (!receivedOutput) scheduleStartupReady(1000);
@@ -490,6 +529,7 @@ function TerminalPane({
   async function disposeRenderer() {
     const terminal = terminalRef.current;
     if (!terminal) return;
+    shellRef.current = null;
     const attachmentId = attachmentIdRef.current;
     if (attachmentId !== null) {
       await invoke("terminal_detach", {
@@ -1046,6 +1086,46 @@ export function TerminalWorkspace() {
   const [settings, setSettings] = useState(DEFAULT_TERMINAL_SETTINGS);
   const [searchTarget, setSearchTarget] = useState(null);
   const [fontZoomOffset, setFontZoomOffset] = useState(0);
+  const dropRegistry = useRef(new Map());
+  const activeTabRef = useRef(snapshot.activeTabId);
+  activeTabRef.current = snapshot.activeTabId;
+  const dropControllerRef = useRef(null);
+  const [dropError, setDropError] = useState(null);
+
+  useEffect(() => {
+    if (!window.__TAURI_INTERNALS__) return undefined;
+    let disposed = false;
+    let unlisten = null;
+    const controller = createTerminalFileDropController({
+      getTargets: () => Array.from(dropRegistry.current.values(), (read) => read()),
+      getActiveTabId: () => activeTabRef.current,
+      getScaleFactor: () => window.devicePixelRatio,
+      elementFromPoint: (x, y) => document.elementFromPoint(x, y),
+      onError: setDropError,
+    });
+    dropControllerRef.current = controller;
+    getCurrentWebview().onDragDropEvent(({ payload }) => {
+      if (disposed) return;
+      if (payload.type === "enter") setDropError(null);
+      controller.handle(payload);
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    }).catch((error) => {
+      if (!disposed) setDropError(error?.message || String(error));
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+      controller.reset();
+      dropControllerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    dropControllerRef.current?.clearHighlight();
+    setDropError(null);
+  }, [snapshot.activeTabId]);
 
   useEffect(() => {
     function handleFontZoom(event) {
@@ -1178,23 +1258,31 @@ export function TerminalWorkspace() {
   }, [terminalTabKey]);
 
   return (
-    <div className="terminal-workspace">
-      {terminalTabs.map((tab) => (
-        <TerminalTabSurface
-          key={tab.id}
-          tabId={tab.id}
-          layout={layouts[tab.id] || null}
-          active={tab.id === snapshot.activeTabId}
-          effectiveTheme={effectiveTheme}
-          searchTarget={searchTarget}
-          onRequestSearch={(tabId, paneId) => setSearchTarget({ tabId, paneId })}
-          onCloseSearch={(tabId, paneId) => setSearchTarget((current) => (
-            current?.tabId === tabId && current?.paneId === paneId ? null : current
-          ))}
-          {...settings}
-          typography={typography}
-        />
-      ))}
-    </div>
+    <TerminalDropRegistry.Provider value={dropRegistry}>
+      <div className="terminal-workspace">
+        {terminalTabs.map((tab) => (
+          <TerminalTabSurface
+            key={tab.id}
+            tabId={tab.id}
+            layout={layouts[tab.id] || null}
+            active={tab.id === snapshot.activeTabId}
+            effectiveTheme={effectiveTheme}
+            searchTarget={searchTarget}
+            onRequestSearch={(tabId, paneId) => setSearchTarget({ tabId, paneId })}
+            onCloseSearch={(tabId, paneId) => setSearchTarget((current) => (
+              current?.tabId === tabId && current?.paneId === paneId ? null : current
+            ))}
+            {...settings}
+            typography={typography}
+          />
+        ))}
+        {dropError && (
+          <div className="terminal-file-drop-error" role="alert">
+            <span>{dropError}</span>
+            <button type="button" aria-label="Dismiss file drop error" onClick={() => setDropError(null)}>×</button>
+          </div>
+        )}
+      </div>
+    </TerminalDropRegistry.Provider>
   );
 }

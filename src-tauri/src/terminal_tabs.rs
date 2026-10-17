@@ -313,6 +313,7 @@ pub enum TerminalLifecycleEvent {
 #[serde(rename_all = "camelCase")]
 pub struct TerminalAttachmentResult {
     attachment_id: u64,
+    shell: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -367,6 +368,7 @@ impl DetachedOutputBuffer {
 
 struct TerminalSession {
     generation: u64,
+    shell: String,
     process_id: Option<u32>,
     master: Box<dyn MasterPty + Send>,
     input: mpsc::Sender<Vec<u8>>,
@@ -3325,7 +3327,10 @@ fn attach_to_running_session(
         on_output,
         on_event,
     });
-    Ok(TerminalAttachmentResult { attachment_id })
+    Ok(TerminalAttachmentResult {
+        attachment_id,
+        shell: session.shell.clone(),
+    })
 }
 
 fn route_terminal_output(
@@ -3411,6 +3416,7 @@ fn spawn_terminal_session(
         .map_err(db_error)?;
     let mut command = CommandBuilder::new_default_prog();
     configure_terminal_environment(&mut command);
+    let shell = command.get_shell();
     command.cwd(cwd);
     let mut child = pair.slave.spawn_command(command).map_err(db_error)?;
     let process_id = child.process_id();
@@ -3443,6 +3449,7 @@ fn spawn_terminal_session(
             pane_id.to_string(),
             TerminalSession {
                 generation,
+                shell: shell.clone(),
                 process_id,
                 master: pair.master,
                 input,
@@ -3595,7 +3602,10 @@ fn spawn_terminal_session(
     };
     emit_layout(app, &layout);
     emit_snapshot(app, &snapshot);
-    Ok(TerminalAttachmentResult { attachment_id })
+    Ok(TerminalAttachmentResult {
+        attachment_id,
+        shell,
+    })
 }
 
 #[tauri::command]
