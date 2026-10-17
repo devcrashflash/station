@@ -14,12 +14,14 @@ function downloadedLabel(progress) {
 export function UpdateDialog({ updater }) {
   if (!updater.promptOpen || !updater.update) return null;
 
-  const installing = updater.phase === "installing";
+  const installing = ["installing", "restarting"].includes(updater.phase);
+  const checking = updater.phase === "checking";
+  const restartRequired = updater.phase === "restart-required";
   const failed = updater.phase === "error";
 
   return (
     <Modal
-      title={`Station ${updater.update.version} is available`}
+      title={`Station ${updater.update.version} ${restartRequired ? "is installed" : "is available"}`}
       onClose={() => {
         if (!installing) updater.dismiss();
       }}
@@ -31,7 +33,8 @@ export function UpdateDialog({ updater }) {
       <DialogDescription>
         {installing
           ? "Station is downloading and installing the signed update. It will restart when finished."
-          : "Install the update now, or choose Later to be reminded after Station restarts."}
+          : restartRequired ? "The update is installed. Restart Station to finish updating."
+            : "Install the update now, or choose Later to be reminded after Station restarts."}
       </DialogDescription>
 
       {updater.update.body && !installing && (
@@ -44,7 +47,7 @@ export function UpdateDialog({ updater }) {
         <div className="grid gap-2" aria-live="polite">
           <div className="flex items-center gap-2 text-sm">
             <LoaderCircle className="animate-spin" />
-            {downloadedLabel(updater.progress)}
+            {updater.phase === "restarting" ? "Restarting Station…" : downloadedLabel(updater.progress)}
           </div>
           <div className="h-2 overflow-hidden rounded-full bg-muted">
             <div
@@ -55,7 +58,7 @@ export function UpdateDialog({ updater }) {
         </div>
       )}
 
-      {failed && <p className="text-sm text-destructive">{updater.message}</p>}
+      {(failed || restartRequired) && <p className="text-sm text-destructive">{updater.message}</p>}
 
       <DialogFooter>
         {!installing && (
@@ -63,8 +66,8 @@ export function UpdateDialog({ updater }) {
             Later
           </Button>
         )}
-        <Button type="button" disabled={installing} onClick={updater.install}>
-          {installing ? "Installing…" : failed ? "Retry" : "Install & Restart"}
+        <Button type="button" disabled={installing || checking} onClick={updater.install}>
+          {updater.phase === "restarting" ? "Restarting…" : installing ? "Installing…" : checking ? "Checking…" : restartRequired ? "Restart Station" : failed ? "Retry" : "Install & Restart"}
         </Button>
       </DialogFooter>
     </Modal>

@@ -1,5 +1,6 @@
 export const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 export const LAST_AUTOMATIC_UPDATE_CHECK_STORAGE_KEY = "dcf-last-automatic-update-check-v1";
+export const UPDATE_HISTORY_STORAGE_KEY = "dcf-update-history-v1";
 export const BUILD_VERSION = typeof __APP_VERSION__ === "string" ? __APP_VERSION__ : null;
 
 export function readLastAutomaticUpdateCheck(storage = globalThis.window?.localStorage) {
@@ -31,6 +32,25 @@ export function formatLastAutomaticUpdateCheck(value) {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(date);
+}
+
+function readUpdateHistory(storage) {
+  let history;
+  try {
+    history = JSON.parse(storage?.getItem(UPDATE_HISTORY_STORAGE_KEY) || "null");
+  } catch {
+    // Older installations and unavailable storage have no history yet.
+  }
+  const timestamp = (value) => Number.isFinite(value) && value > 0 && value <= 8.64e15 ? value : null;
+  return {
+    lastCheckAttemptAt: timestamp(history?.lastCheckAttemptAt),
+    lastCheckSource: history?.lastCheckSource === "manual" ? "manual" : "automatic",
+    lastSuccessfulCheckAt: timestamp(history?.lastSuccessfulCheckAt) || readLastAutomaticUpdateCheck(storage),
+    lastCheckError: timestamp(history?.lastCheckError?.at) && typeof history?.lastCheckError?.message === "string"
+      ? { at: history.lastCheckError.at, message: history.lastCheckError.message } : null,
+    lastInstalledUpdate: timestamp(history?.lastInstalledUpdate?.at) && typeof history?.lastInstalledUpdate?.version === "string"
+      ? { at: history.lastInstalledUpdate.at, version: history.lastInstalledUpdate.version } : null,
+  };
 }
 
 export function updateProgress(current, event) {
@@ -94,6 +114,7 @@ export class AppUpdateManager {
       supported: desktop,
       currentVersion: desktop ? currentVersion : null,
       lastAutomaticCheckAt: desktop ? readLastAutomaticUpdateCheck(storage) : null,
+      ...readUpdateHistory(desktop ? storage : null),
       phase: "idle",
       message: desktop ? "Updates are checked automatically." : "Updates require the desktop app.",
       update: null,
@@ -112,6 +133,22 @@ export class AppUpdateManager {
   emit(patch) {
     this.state = { ...this.state, ...patch };
     for (const listener of this.listeners) listener(this.state);
+  }
+
+  recordHistory(patch) {
+    const { lastCheckAttemptAt, lastCheckSource, lastSuccessfulCheckAt, lastCheckError, lastInstalledUpdate } = { ...this.state, ...patch };
+    try {
+      this.storage?.setItem(UPDATE_HISTORY_STORAGE_KEY, JSON.stringify({
+        lastCheckAttemptAt, lastCheckSource, lastSuccessfulCheckAt, lastCheckError, lastInstalledUpdate,
+      }));
+    } catch {
+      // History remains available for this session if storage is unavailable.
+    }
+    this.emit(patch);
+  }
+
+  get installationActive() {
+    return ["installing", "restarting", "restart-required"].includes(this.state.phase);
   }
 
   async start() {
@@ -134,7 +171,7 @@ export class AppUpdateManager {
       this.clearIntervalFn(this.timerId);
       this.timerId = null;
     }
-    await this.releaseUpdate();
+    if (!this.installationActive) await this.releaseUpdate();
   }
 
   async releaseUpdate() {
@@ -150,7 +187,7 @@ export class AppUpdateManager {
   }
 
   async check({ manual = false } = {}) {
-    if (!this.desktop) return null;
+    if (!this.desktop || this.installationActive) return null;
     if (this.inFlightCheck) {
       const inFlightRunId = this.inFlightRunId;
       await this.inFlightCheck;
@@ -173,6 +210,7 @@ export class AppUpdateManager {
 
   async performCheck({ manual, checkRunId }) {
     const previousPhase = this.state.update ? "available" : "idle";
+    this.recordHistory({ lastCheckAttemptAt: this.nowFn(), lastCheckSource: manual ? "manual" : "automatic" });
     this.emit({
       phase: "checking",
       message: manual ? "Checking for updates…" : this.state.message,
@@ -189,12 +227,13 @@ export class AppUpdateManager {
         const lastAutomaticCheckAt = writeLastAutomaticUpdateCheck(this.nowFn(), this.storage);
         if (lastAutomaticCheckAt) this.emit({ lastAutomaticCheckAt });
       }
+      this.recordHistory({ lastSuccessfulCheckAt: this.nowFn() });
 
       if (!update) {
         await this.releaseUpdate();
         this.emit({
           phase: "idle",
-          message: manual ? "Station is up to date." : "Updates are checked automatically.",
+          message: "Station is up to date.",
           update: null,
           promptOpen: false,
         });
@@ -232,22 +271,25 @@ export class AppUpdateManager {
       return metadata;
     } catch (error) {
       if (checkRunId !== this.runId) return null;
+      this.recordHistory({ lastCheckError: { at: this.nowFn(), message: errorMessage(error) } });
       this.emit({
         phase: previousPhase,
-        message: manual ? `Could not check for updates: ${errorMessage(error)}` : this.state.message,
+        message: `Could not check for updates: ${errorMessage(error)}`,
       });
       return null;
     }
   }
 
   async dismiss() {
-    if (this.state.phase === "installing") return;
+    if (["installing", "restarting"].includes(this.state.phase)) return;
     await this.releaseUpdate();
     this.emit({ promptOpen: false });
   }
 
   async install() {
-    if (!this.updateResource || this.state.phase === "installing") return;
+    if (this.state.phase === "restart-required") return this.restart();
+    if (!this.updateResource || this.installationActive || this.inFlightCheck) return;
+    const version = this.state.update.version;
     this.emit({
       phase: "installing",
       message: `Installing Station ${this.state.update.version}…`,
@@ -259,12 +301,26 @@ export class AppUpdateManager {
         const progress = updateProgress(this.state.progress, event);
         this.emit({ progress });
       });
-      this.emit({ message: "Update installed. Restarting Station…" });
-      await this.adapter.relaunch();
     } catch (error) {
       this.emit({
         phase: "error",
         message: `Could not install the update: ${errorMessage(error)}`,
+        promptOpen: true,
+      });
+      return;
+    }
+    this.recordHistory({ lastInstalledUpdate: { version, at: this.nowFn() } });
+    await this.restart();
+  }
+
+  async restart() {
+    this.emit({ phase: "restarting", message: "Update installed. Restarting Station…" });
+    try {
+      await this.adapter.relaunch();
+    } catch (error) {
+      this.emit({
+        phase: "restart-required",
+        message: `Update installed, but Station could not restart: ${errorMessage(error)}. Restart Station to use the new version.`,
         promptOpen: true,
       });
     }

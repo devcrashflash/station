@@ -542,7 +542,9 @@ export function SettingsDialog({
 
 function UpdatesTab({ updater }) {
   const checking = updater?.phase === "checking";
-  const installing = updater?.phase === "installing";
+  const installing = ["installing", "restarting"].includes(updater?.phase);
+  const restartRequired = updater?.phase === "restart-required";
+  const checkFailed = updater?.lastCheckError && updater.lastCheckError.at > (updater.lastSuccessfulCheckAt || 0);
 
   return (
     <FieldSet className="gap-4 rounded-lg border p-4">
@@ -554,12 +556,35 @@ function UpdatesTab({ updater }) {
         </p>
       </div>
       <div className="grid gap-1 rounded-md border bg-muted/20 p-3">
-        <p className="text-sm font-medium">Last automatic check</p>
+        <p className="text-sm font-medium">Last check attempted</p>
         <p className="text-sm text-muted-foreground">
-          {formatLastAutomaticUpdateCheck(updater?.lastAutomaticCheckAt)}
+          {formatLastAutomaticUpdateCheck(updater?.lastCheckAttemptAt)}
+          {updater?.lastCheckAttemptAt && ` (${updater.lastCheckSource})`}
         </p>
       </div>
-      <p className={cn("text-sm", updater?.phase === "error" ? "text-destructive" : "text-muted-foreground")}>
+      <div className="grid gap-1 rounded-md border bg-muted/20 p-3">
+        <p className="text-sm font-medium">Last successful check</p>
+        <p className="text-sm text-muted-foreground">
+          {formatLastAutomaticUpdateCheck(updater?.lastSuccessfulCheckAt)}
+        </p>
+      </div>
+      <div className="grid gap-1 rounded-md border bg-muted/20 p-3">
+        <p className="text-sm font-medium">Last installed update</p>
+        <p className="text-sm text-muted-foreground">
+          {updater?.lastInstalledUpdate
+            ? `Station ${updater.lastInstalledUpdate.version} · ${formatLastAutomaticUpdateCheck(updater.lastInstalledUpdate.at)}`
+            : "No installation recorded yet"}
+        </p>
+        <p className="text-xs text-muted-foreground">Records updates installed through Station. Earlier and manual installations have no recorded date.</p>
+      </div>
+      {updater?.lastCheckError && (
+        <div className="grid gap-1 rounded-md border bg-muted/20 p-3">
+          <p className="text-sm font-medium">Last failed check</p>
+          <p className="text-sm text-muted-foreground">{formatLastAutomaticUpdateCheck(updater.lastCheckError.at)}</p>
+          <p className="break-words text-sm text-destructive">{updater.lastCheckError.message}</p>
+        </div>
+      )}
+      <p role="status" className={cn("text-sm", updater?.phase === "error" || restartRequired || checkFailed ? "text-destructive" : "text-muted-foreground")}>
         {updater?.message || "Updates are checked automatically."}
       </p>
       <div>
@@ -567,14 +592,14 @@ function UpdatesTab({ updater }) {
           type="button"
           variant="outline"
           disabled={!updater?.supported || checking || installing}
-          onClick={() => updater.check({ manual: true })}
+          onClick={() => restartRequired ? updater.install() : updater.check({ manual: true })}
         >
           <RefreshCw className={cn(checking && "animate-spin")} />
-          {checking ? "Checking…" : "Check for updates"}
+          {restartRequired ? "Restart Station" : checking ? "Checking…" : "Check for updates"}
         </Button>
       </div>
       <p className="text-xs text-muted-foreground">
-        Station checks for signed updates when it starts and every six hours while it is running.
+        Station checks for signed updates when it starts and every six hours while it is running. Installation requires choosing Install &amp; Restart.
       </p>
     </FieldSet>
   );

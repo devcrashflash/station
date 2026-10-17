@@ -5,6 +5,7 @@ import {
   AppUpdateManager,
   LAST_AUTOMATIC_UPDATE_CHECK_STORAGE_KEY,
   UPDATE_CHECK_INTERVAL_MS,
+  UPDATE_HISTORY_STORAGE_KEY,
   formatLastAutomaticUpdateCheck,
   readLastAutomaticUpdateCheck,
   updateProgress,
@@ -209,14 +210,15 @@ test("automatic prompts occur once per version while manual checks can re-offer"
   assert.equal(manager.snapshot().update.version, "0.10.12");
 });
 
-test("automatic check errors stay silent and manual errors are reported", async () => {
+test("automatic and manual check failures are reported without opening a prompt", async () => {
   const manager = new AppUpdateManager({
     desktop: true,
     adapter: { async check() { throw new Error("offline"); } },
   });
 
   await manager.check();
-  assert.equal(manager.snapshot().message, "Updates are checked automatically.");
+  assert.match(manager.snapshot().message, /Could not check for updates: offline/);
+  assert.equal(manager.snapshot().promptOpen, false);
 
   await manager.check({ manual: true });
   assert.match(manager.snapshot().message, /Could not check for updates: offline/);
@@ -262,4 +264,146 @@ test("install reports progress, retries failures, and relaunches after success",
   assert.equal(attempts, 2);
   assert.equal(manager.snapshot().progress.percent, 100);
   assert.equal(relaunches, 1);
+});
+
+test("manual and failed automatic checks persist attempts, successes, and the latest failure", async () => {
+  const storage = memoryStorage();
+  let now = 1_800_000_000_000;
+  let fail = false;
+  const adapter = { async check() { if (fail) throw new Error("offline"); return null; } };
+  const manager = new AppUpdateManager({ desktop: true, storage, adapter, nowFn: () => now });
+  await manager.check({ manual: true });
+  assert.equal(manager.snapshot().lastCheckAttemptAt, now);
+  assert.equal(manager.snapshot().lastSuccessfulCheckAt, now);
+  assert.equal(manager.snapshot().lastCheckSource, "manual");
+  assert.equal(manager.snapshot().lastAutomaticCheckAt, null);
+  const successAt = now;
+  now += 1000;
+  fail = true;
+  await manager.check();
+  const restored = new AppUpdateManager({ desktop: true, storage, adapter });
+  assert.equal(restored.snapshot().lastCheckAttemptAt, now);
+  assert.equal(restored.snapshot().lastCheckSource, "automatic");
+  assert.equal(restored.snapshot().lastSuccessfulCheckAt, successAt);
+  assert.deepEqual(restored.snapshot().lastCheckError, { at: now, message: "offline" });
+  assert.equal(restored.snapshot().promptOpen, false);
+  now += 1000;
+  fail = false;
+  await manager.check();
+  assert.equal(manager.snapshot().lastSuccessfulCheckAt, now);
+  assert.equal(manager.snapshot().lastCheckError.message, "offline");
+  assert.equal(manager.snapshot().message, "Station is up to date.");
+});
+
+test("legacy successful automatic check is preserved without inventing installation history", () => {
+  const previous = 1_700_000_000_000;
+  const manager = new AppUpdateManager({ desktop: true, adapter: {}, storage: memoryStorage({
+    [LAST_AUTOMATIC_UPDATE_CHECK_STORAGE_KEY]: String(previous),
+  }) });
+  assert.equal(manager.snapshot().lastSuccessfulCheckAt, previous);
+  assert.equal(manager.snapshot().lastCheckAttemptAt, null);
+  assert.equal(manager.snapshot().lastInstalledUpdate, null);
+});
+
+test("invalid stored history and inaccessible storage do not prevent update checks", async () => {
+  for (const storage of [
+    memoryStorage({ [UPDATE_HISTORY_STORAGE_KEY]: "broken json" }),
+    memoryStorage({ [UPDATE_HISTORY_STORAGE_KEY]: JSON.stringify({ lastCheckAttemptAt: "bad", lastCheckError: { at: -1 }, lastInstalledUpdate: { at: 12 } }) }),
+    { getItem() { throw new Error("blocked"); }, setItem() { throw new Error("blocked"); } },
+  ]) {
+    const manager = new AppUpdateManager({ desktop: true, storage, adapter: { async check() { return null; } }, nowFn: () => 1234 });
+    assert.equal(manager.snapshot().lastCheckAttemptAt, null);
+    assert.equal(manager.snapshot().lastInstalledUpdate, null);
+    await manager.check();
+    assert.equal(manager.snapshot().lastSuccessfulCheckAt, 1234);
+  }
+});
+
+test("checks and dismissal cannot interrupt installation or trigger duplicate installs", async () => {
+  const download = deferred();
+  const update = fakeUpdate();
+  let installs = 0;
+  let checks = 0;
+  update.downloadAndInstall = async () => { installs += 1; await download.promise; };
+  const manager = new AppUpdateManager({ desktop: true, adapter: {
+    async check() { checks += 1; return update; }, async relaunch() {},
+  } });
+  await manager.check();
+  const installation = manager.install();
+  await manager.check();
+  await manager.check({ manual: true });
+  await manager.install();
+  await manager.dismiss();
+  assert.equal(checks, 1);
+  assert.equal(installs, 1);
+  assert.equal(update.closeCalls, 0);
+  assert.equal(manager.snapshot().phase, "installing");
+  assert.equal(manager.snapshot().promptOpen, true);
+  download.resolve();
+  await installation;
+  assert.equal(manager.snapshot().phase, "restarting");
+  await manager.check();
+  assert.equal(checks, 1);
+});
+
+test("installation waits for a pending check before using its resource", async () => {
+  const result = deferred();
+  const update = fakeUpdate();
+  let installs = 0;
+  let checks = 0;
+  update.downloadAndInstall = async () => { installs += 1; };
+  const manager = new AppUpdateManager({ desktop: true, adapter: {
+    async check() { checks += 1; return checks === 1 ? update : result.promise; }, async relaunch() {},
+  } });
+  await manager.check();
+  const checking = manager.check();
+  await manager.install();
+  assert.equal(installs, 0);
+  assert.equal(manager.snapshot().phase, "checking");
+  result.resolve(fakeUpdate());
+  await checking;
+  await manager.install();
+  assert.ok(manager.snapshot().lastInstalledUpdate);
+});
+
+test("installation is persisted before relaunch and restart retry never reinstalls", async () => {
+  const storage = memoryStorage();
+  const update = fakeUpdate("0.10.17");
+  let installs = 0;
+  let restarts = 0;
+  update.downloadAndInstall = async () => { installs += 1; };
+  const adapter = {
+    async check() { return update; },
+    async relaunch() {
+      restarts += 1;
+      const history = JSON.parse(storage.getItem(UPDATE_HISTORY_STORAGE_KEY));
+      assert.deepEqual(history.lastInstalledUpdate, { version: "0.10.17", at: 1234 });
+      if (restarts === 1) throw new Error("restart blocked");
+    },
+  };
+  const manager = new AppUpdateManager({ desktop: true, storage, adapter, nowFn: () => 1234 });
+  await manager.check();
+  await manager.install();
+  assert.equal(manager.snapshot().phase, "restart-required");
+  assert.match(manager.snapshot().message, /Update installed, but Station could not restart/);
+  const restored = new AppUpdateManager({ desktop: true, storage, adapter, currentVersion: "0.10.17" });
+  assert.deepEqual(restored.snapshot().lastInstalledUpdate, { version: "0.10.17", at: 1234 });
+  await manager.dismiss();
+  await manager.check();
+  assert.equal(manager.snapshot().phase, "restart-required");
+  await manager.install();
+  assert.equal(installs, 1);
+  assert.equal(restarts, 2);
+});
+
+test("failed installation preserves the previously recorded installation", async () => {
+  const storage = memoryStorage({ [UPDATE_HISTORY_STORAGE_KEY]: JSON.stringify({ lastInstalledUpdate: { version: "0.10.15", at: 1000 } }) });
+  const update = fakeUpdate();
+  update.downloadAndInstall = async () => { throw new Error("disk full"); };
+  const manager = new AppUpdateManager({ desktop: true, storage, adapter: { async check() { return update; } } });
+  await manager.check();
+  await manager.install();
+  assert.equal(manager.snapshot().phase, "error");
+  assert.deepEqual(manager.snapshot().lastInstalledUpdate, { version: "0.10.15", at: 1000 });
+  assert.deepEqual(JSON.parse(storage.getItem(UPDATE_HISTORY_STORAGE_KEY)).lastInstalledUpdate, { version: "0.10.15", at: 1000 });
 });

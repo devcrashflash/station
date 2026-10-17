@@ -150,7 +150,10 @@ GitLab, Trello, or any other external network request.
 Offline use should work for most read and organization workflows. Network
 access is only required for actions that explicitly sync external metadata or
 edit/modify external systems, plus a lightweight non-blocking update check at
-startup and every six hours. Failed automatic update checks remain silent.
+startup and every six hours. Updates settings show the last attempted and successful
+checks, the most recent check failure, and the last update installed through Station.
+Automatic check failures are recorded without opening a dialog. Installation requires
+choosing Install & Restart; checks pause while installation or restart is pending.
 Provider sync may start automatically after local data has rendered when it runs
 as bounded background work. Foreground syncs should show status while they run,
 and no sync may block local navigation or local editing.
