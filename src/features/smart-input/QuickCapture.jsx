@@ -55,11 +55,13 @@ import {
   smartOverlayNumberSession,
   smartOverlaySessionKey,
 } from "@/lib/smartOverlay";
+import { useSynchronizedTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
 const EMPTY_AGENT_RESULT = { sessions: [], revision: "", loadedAt: Date.now() };
 
 export function QuickCapture() {
+  useSynchronizedTheme();
   const [activeTab, setActiveTab] = useState("inbox");
   const [value, setValue] = useState("");
   const [error, setError] = useState("");
