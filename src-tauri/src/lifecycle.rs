@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 
 #[cfg(target_os = "macos")]
 use tauri::{
     menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder},
     tray::{TrayIcon, TrayIconBuilder},
-    ActivationPolicy, Emitter, Manager,
+    ActivationPolicy, Emitter,
 };
 #[cfg(target_os = "macos")]
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
@@ -126,12 +127,14 @@ pub fn sync_quick_capture_menu(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
 pub fn show_workspace(app: &tauri::AppHandle) -> Result<(), String> {
-    app.set_activation_policy(ActivationPolicy::Regular)
-        .map_err(|error| error.to_string())?;
-    app.set_dock_visibility(true)
-        .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    {
+        app.set_activation_policy(ActivationPolicy::Regular)
+            .map_err(|error| error.to_string())?;
+        app.set_dock_visibility(true)
+            .map_err(|error| error.to_string())?;
+    }
     let window = app
         .get_window("main")
         .ok_or_else(|| "The main window is unavailable.".to_string())?;

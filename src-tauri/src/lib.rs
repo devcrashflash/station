@@ -1518,6 +1518,22 @@ pub fn run() {
     let background_launch = false;
 
     let builder = tauri::Builder::default();
+    // Detect duplicate launches before any other plugin or application setup.
+    // Dev and production use separate bundle identifiers and instance locks.
+    #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+        if lifecycle::is_background_launch(&args) {
+            return;
+        }
+        let app_handle = app.clone();
+        if let Err(error) = app.run_on_main_thread(move || {
+            if let Err(error) = lifecycle::show_workspace(&app_handle) {
+                eprintln!("Could not open the running Station instance: {error}");
+            }
+        }) {
+            eprintln!("Could not schedule opening the running Station instance: {error}");
+        }
+    }));
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_nspanel::init());
     #[cfg(target_os = "macos")]
