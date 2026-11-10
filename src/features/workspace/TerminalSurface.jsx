@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Terminal } from "@xterm/xterm";
@@ -41,6 +41,7 @@ import {
 } from "@/lib/terminalLinks";
 import { terminalCellLetterSpacing } from "@/lib/terminalFonts";
 import { createTerminalFileDropController } from "@/lib/terminalFileDrop";
+import { registerTerminalClipboard } from "@/lib/terminalClipboard";
 import { useSynchronizedTheme } from "@/lib/theme";
 
 const TerminalDropRegistry = createContext(null);
@@ -471,6 +472,11 @@ function TerminalPane({
       invoke("terminal_set_cwd", { tabId, paneId: pane.paneId, ...cwd }).catch(() => {});
       return true;
     });
+    const clipboardDisposable = registerTerminalClipboard(terminal, (text) => (
+      isTauri()
+        ? invoke("plugin:clipboard-manager|write_text", { text })
+        : navigator.clipboard.writeText(text)
+    ));
     const resizeObserver = new ResizeObserver(() => {
       fit.fit();
       syncTerminalScrollbackState(terminal);
@@ -491,6 +497,7 @@ function TerminalPane({
       selectionDisposable.dispose();
       writeParsedDisposable.dispose();
       cwdDisposable.dispose();
+      clipboardDisposable.dispose();
       fileLinksDisposable.dispose();
       linkModifier.dispose();
       terminal.element?.classList.remove("terminal-has-scrollback");

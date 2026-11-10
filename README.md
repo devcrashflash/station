@@ -35,6 +35,10 @@ Drag local files or folders onto a terminal pane to insert their full paths at t
 
 ![Station's built-in terminal workspace with persistent tabs and two split terminal panes](docs/assets/station-terminal.png)
 
+Terminal applications can copy UTF-8 text to your local clipboard using OSC 52, including over SSH. Clipboard writes are enabled by default, independently of copy-on-selection; clipboard reads are not supported. Remote Vim or Neovim must be configured to send OSC 52 when yanking, and tmux must allow the sequence through. Mouse behavior is unchanged. Requests support the default, `c`, `p`, and `s` targets (all use the system clipboard), with a maximum of 1 MiB of decoded text.
+
+To test from a shell inside Station: `printf '\033]52;c;%s\007' "$(printf 'Hello from Station' | base64 | tr -d '\n')"`, then paste into another application.
+
 ### AI Commands on every task
 
 Turn reusable Codex and Claude prompts into task-level commands. The task retains its description, provider context, related work, and local repositories while the agent runs in the configured desktop or CLI environment.
