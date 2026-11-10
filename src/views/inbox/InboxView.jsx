@@ -27,6 +27,7 @@ import { reviewRequestInput, reviewRequestSubtitle } from "@/lib/smartInboxRevie
 import { buildAllSmartInboxItems } from "@/lib/smartInboxAll";
 import { filterAllSmartInboxItems, filterSmartInboxItems } from "@/lib/smartInboxSearch";
 import { cn } from "@/lib/utils";
+import { selectableActivationProps } from "@/lib/selectableActivation";
 import { calendarEventOpenUrl, calendarEventTimeLabel, calendarWarnings, sortCalendarEvents } from "@/lib/calendar";
 
 export function InboxView({
@@ -197,7 +198,7 @@ function TodayMeetings({ events, syncRuns, isSyncing, hasAccounts, onRefresh, on
                 <div className="flex min-w-0 items-start justify-between gap-2">
                   <div className="min-w-0">
                     <p className="text-xs font-medium text-muted-foreground">{calendarEventTimeLabel(event)}</p>
-                    <p className="mt-0.5 break-words text-sm font-medium [overflow-wrap:anywhere]">{event.title}</p>
+                    <p className="mt-0.5 break-words text-sm font-medium select-text cursor-text [overflow-wrap:anywhere]">{event.title}</p>
                   </div>
                   {openUrl && (
                     <Button size="icon-sm" variant="ghost" asChild>
@@ -756,7 +757,7 @@ function DashboardTaskItem({ task, projects, onOpenTask }) {
   return (
     <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border bg-card p-3">
       <span className="min-w-0 overflow-hidden">
-        <span className="block truncate text-sm font-medium">{task.title}</span>
+        <span className="block truncate text-sm font-medium select-text cursor-text">{task.title}</span>
         <span className="mt-1 block truncate text-xs text-muted-foreground">
           {dashboardTaskProjectName(task, projects)} · {dashboardTaskCreatedAt(task)}
         </span>
@@ -830,6 +831,7 @@ function ReviewRequestItem({ provider, item, onOpenReviewRequest, onOpenTask }) 
 
   return (
     <div
+      {...selectableActivationProps}
       className={cn(
         "grid min-w-0 max-w-full grid-cols-[auto_minmax(0,1fr)] items-center gap-3 rounded-md border bg-card p-3 transition-colors sm:grid-cols-[auto_minmax(0,1fr)_auto_auto]",
         canOpen && "cursor-pointer hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
@@ -852,7 +854,7 @@ function ReviewRequestItem({ provider, item, onOpenReviewRequest, onOpenTask }) 
         )}
       </span>
       <span className="min-w-0 overflow-hidden text-left">
-        <span className="block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm font-medium">
+        <span className="block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm font-medium select-text cursor-text">
           {item.title}
         </span>
         <span className="mt-1 block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-xs text-muted-foreground">
@@ -962,14 +964,15 @@ function SmartInboxTodoItem({ todo, onEditTodo, onOpenTodo, onDeleteTodo }) {
         <FileText className={cn("size-4 text-muted-foreground", isMissing && "text-destructive")} />
       </span>
       <button
+        {...selectableActivationProps}
         type="button"
-        className="min-w-0 overflow-hidden text-left"
+        className="min-w-0 overflow-hidden text-left select-text"
         disabled={!onEditTodo}
         onClick={() => onEditTodo?.(todo)}
         title="Edit todo"
       >
         <span className="flex min-w-0 items-center gap-2">
-          <span className="block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm font-medium">{todo.title}</span>
+          <span className="block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm font-medium select-text cursor-text">{todo.title}</span>
           {isMissing && (
             <Badge variant="secondary" className="shrink-0 border border-destructive/30 bg-destructive/10 text-destructive">
               Missing
@@ -1061,15 +1064,16 @@ function RecentDirectoryFileItem({ file, onOpenFile }) {
   return (
     <div className="flex min-w-0 max-w-full items-center gap-3 rounded-md border bg-card p-3">
       <button
+        {...selectableActivationProps}
         type="button"
-        className="flex min-w-0 flex-1 items-center gap-3 overflow-hidden text-left transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
+        className="flex min-w-0 flex-1 items-center gap-3 overflow-hidden text-left select-text transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
         disabled={!onOpenFile}
         onClick={() => onOpenFile?.(file)}
         title="Create task"
       >
         <RecentFilePreview file={file} />
         <span className="min-w-0 flex-1 overflow-hidden">
-          <span className="block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm font-medium">{file.name}</span>
+          <span className="block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm font-medium select-text cursor-text">{file.name}</span>
           <span className="block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-xs text-muted-foreground">
             {file.directoryName} · {file.relativePath || file.path}
           </span>

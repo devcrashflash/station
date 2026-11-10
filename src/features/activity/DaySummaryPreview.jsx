@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { activityActionClassName } from "@/lib/activity";
 import { openExternalUrl } from "@/lib/externalLinks";
 import { cn } from "@/lib/utils";
+import { selectableActivationProps } from "@/lib/selectableActivation";
 
 const externalSurfaceClassName = "cursor-pointer transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring";
 
@@ -61,6 +62,8 @@ export function DaySummaryPreview({ summary }) {
               const Wrapper = meeting.url ? "a" : "div";
               return (
                 <Wrapper
+                  {...selectableActivationProps}
+                  draggable={false}
                   className="flex items-center gap-3 rounded-lg border bg-card px-4 py-3 transition-colors hover:bg-muted/30"
                   href={meeting.url || undefined}
                   target={meeting.url ? "_blank" : undefined}
@@ -71,7 +74,7 @@ export function DaySummaryPreview({ summary }) {
                     <CalendarDays className="size-4" />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <p className="truncate font-medium">{meeting.title}</p>
+                    <p className="truncate font-medium select-text cursor-text">{meeting.title}</p>
                     <p className="text-xs text-muted-foreground">
                       {meeting.timeLabel}{meeting.calendarName ? ` · ${meeting.calendarName}` : ""}
                     </p>
@@ -104,6 +107,8 @@ function TicketHeader({ ticket }) {
 
   return (
     <Wrapper
+      {...selectableActivationProps}
+      draggable={false}
       className={cn(
         "flex min-w-0 items-start justify-between gap-3 border-b bg-muted/30 px-4 py-3 text-card-foreground",
         ticket.url && externalSurfaceClassName,
@@ -122,7 +127,7 @@ function TicketHeader({ ticket }) {
           <Ticket className="size-4" />
         </div>
         <div className="min-w-0">
-          <h3 className="break-words font-semibold leading-5 [overflow-wrap:anywhere]">{ticket.title}</h3>
+          <h3 className="break-words font-semibold leading-5 select-text cursor-text [overflow-wrap:anywhere]">{ticket.title}</h3>
           <p className="mt-0.5 text-xs text-muted-foreground">Trello ticket</p>
         </div>
       </div>
@@ -136,6 +141,8 @@ function ProviderItem({ item, providerLabel }) {
 
   return (
     <Wrapper
+      {...selectableActivationProps}
+      draggable={false}
       className={cn(
         "grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-3 overflow-hidden rounded-md border bg-background px-3 py-2.5 text-foreground",
         item.url && externalSurfaceClassName,
@@ -151,7 +158,7 @@ function ProviderItem({ item, providerLabel }) {
     >
       <div className="min-w-0">
         <div className="flex min-w-0 max-w-full flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="min-w-0 max-w-full break-words font-medium [overflow-wrap:anywhere]">{item.title}</span>
+          <span className="min-w-0 max-w-full break-words font-medium select-text cursor-text [overflow-wrap:anywhere]">{item.title}</span>
           {item.author && <span className="min-w-0 max-w-full break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">@{String(item.author).replace(/^@/, "")}</span>}
         </div>
         {item.actions.length > 0 && <ActionBadges actions={item.actions} className="mt-2" />}

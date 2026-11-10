@@ -58,6 +58,7 @@ import { filterTimelineItemsBySearch } from "@/lib/activitySearch";
 import { openExternalUrl } from "@/lib/externalLinks";
 import { isPrimarySearchShortcut, shortcutModifier } from "@/lib/keyboardShortcut";
 import { cn } from "@/lib/utils";
+import { selectableActivationProps } from "@/lib/selectableActivation";
 import { calendarEventOpenUrl, calendarEventTimeLabel, calendarWarningMessages } from "@/lib/calendar";
 
 function waitForNextPaint() {
@@ -830,6 +831,8 @@ function ActivityItem({ activity }) {
 
   return (
     <Wrapper
+      {...selectableActivationProps}
+      draggable={false}
       className={cn(
         "grid min-w-0 grid-cols-[4rem_minmax(0,1fr)_auto] gap-3 overflow-hidden rounded-md border bg-card p-3 text-card-foreground",
         openUrl && "cursor-pointer transition-colors hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
@@ -863,7 +866,7 @@ function ActivityItem({ activity }) {
             </span>
           )}
         </div>
-        <p className="mt-1 min-w-0 break-words text-sm leading-5 [overflow-wrap:anywhere]">
+        <p className="mt-1 min-w-0 break-words text-sm leading-5 select-text cursor-text [overflow-wrap:anywhere]">
           {activity.title || activity.externalId}
         </p>
         <p className="mt-1 min-w-0 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
@@ -896,7 +899,7 @@ function CalendarEventItem({ event }) {
           <Badge variant="outline">{event.calendarName}</Badge>
           {event.attendeeStatus && <Badge variant="outline">{event.attendeeStatus}</Badge>}
         </div>
-        <p className="mt-1 min-w-0 break-words text-sm font-medium leading-5 [overflow-wrap:anywhere]">{event.title}</p>
+        <p className="mt-1 min-w-0 break-words text-sm font-medium leading-5 select-text cursor-text [overflow-wrap:anywhere]">{event.title}</p>
         {event.location && (
           <p className="mt-1 flex min-w-0 items-center gap-1 truncate text-xs text-muted-foreground">
             <MapPin className="size-3 shrink-0" />

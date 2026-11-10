@@ -10,6 +10,7 @@ import {
   taskStatusBadgeStyle,
 } from "@/lib/taskStatus";
 import { cn } from "@/lib/utils";
+import { selectableActivationProps } from "@/lib/selectableActivation";
 
 export function TaskList({
   tasks,
@@ -72,12 +73,13 @@ export function TaskList({
               </Button>
             )}
             <button
-              className="min-w-0 flex-1 text-left"
+              {...selectableActivationProps}
+              className="min-w-0 flex-1 text-left select-text"
               type="button"
               onClick={() => onOpenTask?.(task)}
               title="Open task detail"
             >
-              <p className={cn("truncate font-medium", isDone && "text-muted-foreground line-through")}>
+              <p className={cn("truncate font-medium select-text cursor-text", isDone && "text-muted-foreground line-through")}>
                 {task.title}
               </p>
               {task.sourceUrl && (
