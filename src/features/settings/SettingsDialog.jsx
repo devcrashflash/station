@@ -50,6 +50,7 @@ const providerOptions = [
   { value: "gitlab", label: "GitLab" },
   { value: "github", label: "GitHub" },
   { value: "trello", label: "Trello" },
+  { value: "jira", label: "Jira" },
 ];
 
 const accountAddOptions = [
@@ -57,6 +58,7 @@ const accountAddOptions = [
   { value: "github", label: "GitHub", icon: GitPullRequest },
   { value: "gitlab", label: "GitLab", icon: GitMerge },
   { value: "trello", label: "Trello", icon: SquareKanban },
+  { value: "jira", label: "Jira", icon: SquareKanban },
   { value: "calendar", label: "Calendar", icon: CalendarDays },
 ];
 
@@ -94,6 +96,7 @@ const themeOptions = [
 const permissionHints = {
   gitlab: "Use read_api or api. read_repository is not enough for issues and merge requests.",
   github: "Use Metadata read, Pull requests read, and Issues read for fine-grained tokens.",
+  jira: "Read-only tokens are supported. Creating issues also requires token write access and permission in the Jira project.",
   trello: "Enter your Trello API key, then generate an API token for your account.",
 };
 
@@ -1225,6 +1228,8 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
       name: connection.name,
       baseUrl: connection.provider === "trello" ? "" : connection.baseUrl,
       apiKey: connection.apiKey || "",
+      email: connection.jira?.email || "",
+      tokenMode: connection.jira?.tokenMode || "scoped",
       token: connection.token || "",
     });
   }
@@ -1273,6 +1278,7 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
         baseUrl: editor.type === "trello" ? TRELLO_BASE_URL : fields.baseUrl || "",
         apiKey: editor.type === "trello" ? fields.apiKey || "" : null,
         token: fields.token || "",
+        jira: editor.type === "jira" ? { email: fields.email || "", tokenMode: fields.tokenMode || "scoped", cloudId: null } : null,
       });
       if (editor.id) setTestResults((current) => ({ ...current, [editor.id]: undefined }));
       resetEditor();
@@ -1383,7 +1389,7 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
     editorTestRunRef.current = run;
     setEditorTestResult({ ok: null, message: "Testing connection..." });
     try {
-      const result = ["github", "gitlab", "trello"].includes(editor.type)
+      const result = ["github", "gitlab", "trello", "jira"].includes(editor.type)
         ? await onTestConnectionInput({
           id: editor.mode === "edit" ? editor.id : null,
           provider: editor.type,
@@ -1391,6 +1397,7 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
           baseUrl: editor.type === "trello" ? TRELLO_BASE_URL : fields.baseUrl || "",
           apiKey: editor.type === "trello" ? fields.apiKey || "" : null,
           token: fields.token || "",
+          jira: editor.type === "jira" ? { email: fields.email || "", tokenMode: fields.tokenMode || "scoped", cloudId: null } : null,
         })
         : await onTestCalendarInput({
           id: editor.mode === "edit" ? editor.id : null,
@@ -1401,7 +1408,7 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
           url: calendarKind === "ical" ? fields.url || "" : null,
         });
       if (editorTestRunRef.current !== run) return;
-      setEditorTestResult(["github", "gitlab", "trello"].includes(editor.type)
+      setEditorTestResult(["github", "gitlab", "trello", "jira"].includes(editor.type)
         ? result
         : { ok: true, message: result });
     } catch (error) {
@@ -1410,7 +1417,7 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
     }
   }
 
-  const tokenUrl = editor && ["github", "gitlab", "trello"].includes(editor.type)
+  const tokenUrl = editor && ["github", "gitlab", "trello", "jira"].includes(editor.type)
     ? credentialUrl(editor.type, fields.baseUrl || "", fields.apiKey || "")
     : "";
   const editorProviderLabel = editor?.type === "google"
@@ -1422,6 +1429,7 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
     { id: "google", label: "Google", icon: AtSign, items: calendarAccounts.filter((item) => item.provider === "google"), kind: "calendar" },
     { id: "github", label: "GitHub", icon: GitPullRequest, items: connections.filter((item) => item.provider === "github"), kind: "developer" },
     { id: "gitlab", label: "GitLab", icon: GitMerge, items: connections.filter((item) => item.provider === "gitlab"), kind: "developer" },
+    { id: "jira", label: "Jira", icon: SquareKanban, items: connections.filter((item) => item.provider === "jira"), kind: "developer" },
     { id: "trello", label: "Trello", icon: SquareKanban, items: connections.filter((item) => item.provider === "trello"), kind: "developer" },
     { id: "caldav", label: "CalDAV", icon: CalendarDays, items: calendarAccounts.filter((item) => item.provider === "caldav"), kind: "calendar" },
     { id: "ical", label: "Calendar URLs", icon: CalendarDays, items: calendarAccounts.filter((item) => item.provider === "ical"), kind: "calendar" },
@@ -1445,7 +1453,7 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
       </div>
 
       {editor && editor.type !== "calendar" && <Modal title={`${editor.mode === "edit" ? "Edit" : "Add"} ${editorProviderLabel} account`} onClose={closeAccountEditor} contentClassName="sm:max-w-xl">
-        {["github", "gitlab", "trello"].includes(editor.type) && (
+        {["github", "gitlab", "trello", "jira"].includes(editor.type) && (
           <form className="grid max-h-[75vh] gap-3 overflow-y-auto pr-1" onSubmit={submitDeveloper}>
             <Field><FieldLabel>Connection name</FieldLabel><Input value={fields.name || ""} onChange={(event) => setField("name", event.target.value)} required /></Field>
             {editor.type === "trello" ? <div className="rounded-md border bg-background p-3 text-sm text-muted-foreground">
@@ -1457,8 +1465,13 @@ function AccountsSettingsTab({ connections, calendarAccounts, calendarSyncRuns, 
                 <a className="font-medium text-blue-700 underline-offset-2 hover:underline dark:text-blue-300" href={TRELLO_CREDENTIAL_URLS.setupGuide} target="_blank" rel="noreferrer">Trello API setup guide</a>
               </div>
             </div> : (
-              <Field><FieldLabel>{editor.type === "github" ? "GitHub server" : "GitLab server"}</FieldLabel><Input value={fields.baseUrl || ""} onChange={(event) => setField("baseUrl", event.target.value)} required /></Field>
+              <Field><FieldLabel>{editor.type === "github" ? "GitHub server" : editor.type === "jira" ? "Jira site URL" : "GitLab server"}</FieldLabel><Input value={fields.baseUrl || ""} onChange={(event) => setField("baseUrl", event.target.value)} required /></Field>
             )}
+            {editor.type === "jira" && <>
+              <Field><FieldLabel>Account email</FieldLabel><Input type="email" value={fields.email || ""} onChange={(event) => setField("email", event.target.value)} required /></Field>
+              <Field><FieldLabel>Token mode</FieldLabel><SelectControl value={fields.tokenMode || "scoped"} onValueChange={(value) => setField("tokenMode", value)} options={[{ value: "scoped", label: "Scoped API token" }, { value: "unscoped", label: "Unscoped API token" }]} /></Field>
+              <a className="text-xs underline" href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noreferrer">Manage Jira API tokens</a>
+            </>}
             {editor.type === "trello" && <Field><FieldLabel>API key</FieldLabel><Input type="password" value={fields.apiKey || ""} onChange={(event) => setField("apiKey", event.target.value)} required /></Field>}
             <Field>
               <FieldLabel>{editor.type === "trello" ? "API token" : "Token"}</FieldLabel>

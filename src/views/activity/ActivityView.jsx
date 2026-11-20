@@ -26,6 +26,7 @@ import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { DaySummaryPreview } from "@/features/activity/DaySummaryPreview";
 import { api } from "@/lib/api";
+import { jiraWorklogFromActivity, deduplicateJiraWorklogActivities } from "@/lib/jira";
 import {
   activityActionClassName,
   activityActionFilters,
@@ -53,6 +54,7 @@ import {
   daySummaryModelToMarkdown,
   filterDaySummaryModelBySearch,
   trelloTicketUrlsForActivities,
+  jiraTicketUrlsForActivities,
 } from "@/lib/activitySummary";
 import { filterTimelineItemsBySearch } from "@/lib/activitySearch";
 import { openExternalUrl } from "@/lib/externalLinks";
@@ -123,7 +125,7 @@ export function ActivityView({
     [connectionFilteredActivities],
   );
   const filteredActivities = useMemo(
-    () => filterActivitiesByActionBadges(connectionFilteredActivities, disabledActionKeys),
+    () => deduplicateJiraWorklogActivities(filterActivitiesByActionBadges(connectionFilteredActivities, disabledActionKeys)),
     [connectionFilteredActivities, disabledActionKeys],
   );
   const filteredCalendarEvents = calendarEvents.filter(
@@ -229,6 +231,15 @@ export function ActivityView({
         } catch (error) {
           summaryWarnings.push(error?.message || "Could not load linked Trello tickets.");
         }
+      }
+
+      const jiraUrls = jiraTicketUrlsForActivities(manualActivities);
+      if (jiraUrls.length) {
+        try {
+          const result = await api.resolveJiraTickets({ urls: jiraUrls });
+          resolvedTickets.push(...(result.tickets || []));
+          summaryWarnings.push(...(result.warnings || []));
+        } catch (error) { summaryWarnings.push(error?.message || "Could not load linked Jira tickets."); }
       }
 
       if (cancelled || summaryRunRef.current !== runId) return;
@@ -823,6 +834,7 @@ function ActivityFilters({
 }
 
 function ActivityItem({ activity }) {
+  const worklog = jiraWorklogFromActivity(activity);
   const occurred = activity.occurredAt ? new Date(activity.occurredAt) : null;
   const actionLabel = activityActionLabel(activity);
   const kindLabel = activityEventKindLabel(activity);
@@ -869,6 +881,7 @@ function ActivityItem({ activity }) {
         <p className="mt-1 min-w-0 break-words text-sm leading-5 select-text cursor-text [overflow-wrap:anywhere]">
           {activity.title || activity.externalId}
         </p>
+        {worklog?.note && <p className="mt-1 whitespace-pre-wrap break-words text-sm text-muted-foreground select-text cursor-text [overflow-wrap:anywhere]">{worklog.note}</p>}
         <p className="mt-1 min-w-0 break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">
           {activity.connectionName || activity.connectionId}
         </p>

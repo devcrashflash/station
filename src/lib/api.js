@@ -233,6 +233,10 @@ export const api = {
   listTasks: (payload) => call("list_tasks", payload, () => local.listTasks(payload)),
   updateTask: (payload) => call("update_task", payload, () => local.updateTask(payload)),
   deleteTask: (payload) => call("delete_task", payload, () => local.deleteTask(payload)),
+  listTaskJiraProjects: (payload) => call("list_task_jira_projects", payload, () => local.listTaskJiraProjects(payload)),
+  listJiraIssueTypes: (payload) => call("list_jira_issue_types", payload, () => { throw new Error("Jira issue creation requires the desktop app."); }),
+  jiraCreateMetadata: (payload) => call("jira_create_metadata", payload, () => { throw new Error("Jira issue creation requires the desktop app."); }),
+  convertTaskToJiraTicket: (payload) => call("convert_task_to_jira_ticket", payload, () => { throw new Error("Jira issue creation requires the desktop app."); }),
   listTaskTrelloBoards: (payload) =>
     call("list_task_trello_boards", payload, () => local.listTaskTrelloBoards(payload)),
   listTrelloBoardTemplates: (payload) =>
@@ -296,6 +300,7 @@ export const api = {
     const input = activityRequestPayload(payload);
     return call("sync_activities", input, () => local.syncActivities(input));
   },
+  resolveJiraTickets: (payload) => call("resolve_jira_tickets", payload, () => ({ tickets: [], warnings: ["Linked Jira ticket lookup requires the desktop app."] })),
   resolveTrelloTickets: (payload) =>
     call("resolve_trello_tickets", { input: payload }, () => local.resolveTrelloTickets(payload)),
   listCalendarAccounts: () => call("list_calendar_accounts", {}, local.listCalendarAccounts),
@@ -446,14 +451,17 @@ export function toParsedPayload(parsed) {
     url: parsed.url ?? null,
     title: parsed.title,
     repoUrl: parsed.repoUrl ?? null,
+    ...(parsed.connectionId ? { connectionId: parsed.connectionId } : {}),
   };
 }
 
 export function selectBestConnection(connections, enabledConnectionIds, parsed) {
   const enabled = new Set(enabledConnectionIds);
   const parsedHost = hostFromUrl(parsed.url) || hostFromUrl(parsed.repoUrl);
+  if (parsed.provider === "jira" && !parsed.connectionId && connections.filter((c) => enabled.has(c.id) && c.provider === "jira" && hostFromUrl(c.baseUrl) === parsedHost).length > 1) return null;
   return connections
     .filter((connection) => enabled.has(connection.id) && connection.provider === parsed.provider)
+    .filter((connection) => parsed.provider !== "jira" || (hostFromUrl(connection.baseUrl) === parsedHost && (!parsed.connectionId || connection.id === parsed.connectionId)))
     .map((connection) => ({
       connection,
       score: connectionScore(connection, parsedHost),
@@ -465,6 +473,14 @@ export function selectBestConnection(connections, enabledConnectionIds, parsed) 
 export function validateConnectionForTest(connection) {
   if (connection?.provider !== "trello" && !connection?.baseUrl?.trim()) return "Base URL is required.";
   if (!connection?.token?.trim()) return "Token is required.";
+  if (connection.provider === "jira") {
+    try {
+      const site = new URL(normalizeBaseUrl(connection.baseUrl));
+      if (site.protocol !== "https:" || !site.hostname.endsWith(".atlassian.net") || site.pathname !== "/" || site.search || site.hash || site.username || site.password || site.port) return "Enter a valid Jira Cloud site URL.";
+    } catch { return "Enter a valid Jira Cloud site URL."; }
+    if (!connection.jira?.email?.trim()) return "Jira account email is required.";
+    if (!["scoped", "unscoped"].includes(connection.jira?.tokenMode)) return "Choose scoped or unscoped Jira token mode.";
+  }
   if (connection.provider === "trello" && !connection.apiKey?.trim()) {
     return "Trello API key is required.";
   }
@@ -592,6 +608,7 @@ function repoResourceName(repoUrl) {
 }
 
 function parentResourceFromParsed(parsed) {
+  if (parsed?.kind === "jira_project" && parsed.externalId) return { provider: "jira", kind: "jira_project", externalId: parsed.externalId, url: parsed.url, name: parsed.title, iconUrl: null, connectionId: parsed.connectionId || null };
   if (parsed?.kind === "trello_board" && parsed.externalId) {
     return {
       provider: "trello",
@@ -750,6 +767,7 @@ function enrichTask(state, task) {
   const link = (state.taskLinks || []).find((item) => item.taskId === task.id);
   return {
     ...task,
+    ...(link?.externalStateCategory ? { statusCategory: link.externalStateCategory } : {}),
     sourceProvider: link?.provider ?? null,
     sourceKind: link?.kind ?? null,
   };
@@ -783,6 +801,7 @@ function latestProjectTaskForProviderItem(state, item, taskKind) {
 
 function supportsExternalRefresh(link) {
   return (
+    (link?.provider === "jira" && link?.kind === "jira_issue") ||
     (link?.provider === "trello" && link?.kind === "trello_card") ||
     (link?.provider === "github" && ["github_issue", "pull_request"].includes(link?.kind)) ||
     (link?.provider === "gitlab" && ["gitlab_issue", "merge_request"].includes(link?.kind))
@@ -794,6 +813,7 @@ function providerConnectionRequiredNotice(provider) {
     github: "GitHub",
     gitlab: "GitLab",
     trello: "Trello",
+    jira: "Jira",
   };
 
   return `Please add a ${labels[provider] || provider} connection to this project.`;
@@ -1219,6 +1239,7 @@ const local = {
       github: "pull_request",
       gitlab: "merge_request",
       trello: "trello_card",
+      jira: "jira_issue",
     }[provider];
     return {
       items: (state.smartInboxProviderItems || [])
@@ -1491,7 +1512,7 @@ const local = {
 
     resource = upsertProjectResource(state, targetProjectId, parentResourceFromParsed(parsed));
 
-    if (parsed.kind === "trello_board") {
+    if (["trello_board", "jira_project"].includes(parsed.kind)) {
       writeState(state);
       return {
         task: null,
@@ -1586,6 +1607,12 @@ const local = {
       (draft) => draft.taskId !== taskId,
     );
     writeState(state);
+  },
+
+  listTaskJiraProjects({ taskId }) {
+    const state = readState();
+    const task = state.tasks.find((item) => item.id === taskId);
+    return state.resources.filter((resource) => resource.projectId === task?.projectId && resource.provider === "jira" && resource.kind === "jira_project");
   },
 
   listTaskTrelloBoards({ taskId }) {

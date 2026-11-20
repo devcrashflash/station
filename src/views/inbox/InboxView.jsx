@@ -69,7 +69,7 @@ export function InboxView({
         <div>
           <h2 className="text-3xl font-semibold">Capture work from anywhere</h2>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-            Add a task, paste a Trello card or board, or route a pull request to a project and task.
+            Add a task, paste a Trello or Jira link, or route a pull request to a project and task.
           </p>
         </div>
         <SmartInput
@@ -252,6 +252,7 @@ function InboxCaptureTabs({
   const [providerItems, setProviderItems] = useState({
     github: { items: [], warnings: [], loaded: false, syncing: false },
     gitlab: { items: [], warnings: [], loaded: false, syncing: false },
+    jira: { items: [], warnings: [], loaded: false, syncing: false },
     trello: { items: [], warnings: [], loaded: false, syncing: false },
   });
   const startedProviders = useRef(new Set());
@@ -268,10 +269,11 @@ function InboxCaptureTabs({
     { id: "latest-files", label: "Latest files", count: files.length, icon: Files },
     { id: "github", label: "GitHub", count: providerItems.github.items.length, icon: GitPullRequest },
     { id: "gitlab", label: "GitLab", count: providerItems.gitlab.items.length, icon: GitPullRequest },
+    { id: "jira", label: "Jira", count: providerItems.jira.items.length, icon: SquareKanban },
     { id: "trello", label: "Trello", count: providerItems.trello.items.length, icon: SquareKanban },
   ];
-  const isProviderTab = ["github", "gitlab", "trello"].includes(activeTab);
-  const isAnyProviderSyncing = ["github", "gitlab", "trello"]
+  const isProviderTab = ["github", "gitlab", "trello", "jira"].includes(activeTab);
+  const isAnyProviderSyncing = ["github", "gitlab", "trello", "jira"]
     .some((provider) => providerItems[provider].syncing);
   const activeItems = activeTab === "all"
     ? allItems
@@ -311,7 +313,7 @@ function InboxCaptureTabs({
   useEffect(() => {
     if (!onLoadProviderItems) return;
 
-    for (const provider of ["github", "gitlab", "trello"]) {
+    for (const provider of ["github", "gitlab", "trello", "jira"]) {
       if (startedProviders.current.has(provider)) continue;
       startedProviders.current.add(provider);
       loadThenSyncProvider(provider);
@@ -319,7 +321,7 @@ function InboxCaptureTabs({
   }, [onLoadProviderItems, onSyncProviderItems]);
 
   useEffect(() => {
-    for (const provider of ["github", "gitlab", "trello"]) {
+    for (const provider of ["github", "gitlab", "trello", "jira"]) {
       if (startedProviders.current.has(provider)) {
         loadProviderItems(provider);
       }
@@ -344,7 +346,7 @@ function InboxCaptureTabs({
     try {
       await Promise.all([
         onRefreshAll(),
-        ...["github", "gitlab", "trello"].map(syncProviderItems),
+        ...["github", "gitlab", "trello", "jira"].map(syncProviderItems),
       ]);
     } finally {
       setIsRefreshing(false);
@@ -585,7 +587,7 @@ function AllSmartInboxItemList({
   onOpenTask,
   emptyText,
 }) {
-  const warnings = ["github", "gitlab", "trello"]
+  const warnings = ["github", "gitlab", "trello", "jira"]
     .flatMap((provider) => providerItems[provider]?.warnings || []);
 
   return (
@@ -688,13 +690,13 @@ function SmartInboxSourceSettingsDialog({ provider, onClose, onLoad, onSave, onS
   return (
     <Modal title={`${providerName(provider)} Smart Inbox sources`} onClose={() => !isSaving && onClose()}>
       <p className="text-sm text-muted-foreground">
-        New {provider === "trello" ? "boards" : "repositories"} are enabled automatically when discovered.
+        New {provider === "trello" ? "boards" : provider === "jira" ? "projects" : "repositories"} are enabled automatically when discovered.
       </p>
       <div className="mt-4 grid max-h-[55vh] gap-4 overflow-y-auto">
         {isLoading ? (
           <p className="text-sm text-muted-foreground">Loading sources…</p>
         ) : groups.length === 0 ? (
-          <EmptyState text={`No ${provider === "trello" ? "boards" : "repositories"} discovered yet.`} />
+          <EmptyState text={`No ${provider === "trello" ? "boards" : provider === "jira" ? "projects" : "repositories"} discovered yet.`} />
         ) : groups.map((group) => (
           <section key={group.connectionId} className="grid gap-2">
             <h3 className="text-sm font-medium">{group.connectionName}</h3>
@@ -795,7 +797,7 @@ function ReviewRequestList({
     <div className="grid gap-2">
       <ProviderWarnings warnings={warnings} />
       {items.length === 0 ? (
-        <EmptyState text={emptyText || (provider === "trello" ? "No assigned Trello cards." : `No ${displayName} review requests.`)} />
+        <EmptyState text={emptyText || (provider === "trello" ? "No assigned Trello cards." : provider === "jira" ? "No assigned Jira issues." : `No ${displayName} review requests.`)} />
       ) : (
         <div className="flex flex-col gap-2">
           {items.map((item) => (
@@ -838,7 +840,7 @@ function ReviewRequestItem({ provider, item, onOpenReviewRequest, onOpenTask }) 
       )}
       role={canOpen ? "link" : undefined}
       tabIndex={canOpen ? 0 : undefined}
-      title={canOpen ? `Open ${provider === "trello" ? "Trello card" : "review request"}` : undefined}
+      title={canOpen ? `Open ${provider === "trello" ? "Trello card" : provider === "jira" ? "Jira issue" : "review request"}` : undefined}
       onClick={() => openReviewRequestLink(item.url)}
       onKeyDown={(event) => {
         if (!canOpen || (event.key !== "Enter" && event.key !== " ")) return;
@@ -847,7 +849,7 @@ function ReviewRequestItem({ provider, item, onOpenReviewRequest, onOpenTask }) 
       }}
     >
       <span className="flex size-10 shrink-0 items-center justify-center rounded-md border bg-muted/40">
-        {provider === "trello" ? (
+        {["trello", "jira"].includes(provider) ? (
           <SquareKanban className="size-4 text-muted-foreground" />
         ) : (
           <GitPullRequest className="size-4 text-muted-foreground" />
@@ -897,7 +899,7 @@ function ReviewRequestItem({ provider, item, onOpenReviewRequest, onOpenTask }) 
           disabled={!input || !onOpenReviewRequest}
           onClick={(event) => {
             event.stopPropagation();
-            onOpenReviewRequest?.(input);
+            onOpenReviewRequest?.(input, item);
           }}
         >
           <Plus />
@@ -909,7 +911,7 @@ function ReviewRequestItem({ provider, item, onOpenReviewRequest, onOpenTask }) 
 }
 
 function providerName(provider) {
-  return { github: "GitHub", gitlab: "GitLab", trello: "Trello" }[provider] || provider;
+  return { github: "GitHub", gitlab: "GitLab", trello: "Trello", jira: "Jira" }[provider] || provider;
 }
 
 async function openReviewRequestLink(url) {

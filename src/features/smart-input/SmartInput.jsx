@@ -209,7 +209,7 @@ export function SmartInput({ onSubmit, onFileDrop, large = false, focusRequestKe
           isDraggingFile && "border-primary ring-2 ring-primary/25",
         )}
         value={value}
-        placeholder="Write a task, paste a Trello link, or capture work to route later..."
+        placeholder="Write a task, paste a Trello or Jira link, or capture work to route later..."
         onChange={(event) => setValue(event.target.value)}
         onKeyDown={handleKeyDown}
       />

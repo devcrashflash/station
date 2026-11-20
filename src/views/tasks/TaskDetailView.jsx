@@ -37,6 +37,7 @@ import { TaskDescriptionMarkdown } from "@/features/tasks/TaskDescriptionMarkdow
 import { TaskCommentsPanel } from "@/features/tasks/TaskCommentsPanel";
 import { TaskEditDialog } from "@/features/tasks/TaskEditDialog";
 import { AiPromptWizard } from "@/features/tasks/AiPromptWizard";
+import { JiraTicketWizard } from "@/features/tasks/JiraTicketWizard";
 import { TrelloTicketWizard } from "@/features/tasks/TrelloTicketWizard";
 import { isPullRequestResource } from "@/lib/api";
 import { aiPromptIconFor } from "@/lib/aiPromptIcons";
@@ -135,6 +136,7 @@ function formatFileBytes(value) {
 function taskFileMeta(file) {
   const sourceLabels = {
     trello: "Trello",
+    jira: "Jira",
     local: "Local",
   };
   return [
@@ -201,6 +203,8 @@ export function TaskDetailView({
   onOpenTask,
   onSave,
   onDeleteTask,
+  onLoadJiraProjects,
+  onConvertToJiraTicket,
   onLoadTrelloBoards,
   onLoadTrelloTemplates,
   onConvertToTrelloTicket,
@@ -214,6 +218,8 @@ export function TaskDetailView({
   const [showReview, setShowReview] = useState(false);
   const [showActions, setShowActions] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showJiraWizard, setShowJiraWizard] = useState(false);
+  const [jiraProjects, setJiraProjects] = useState([]);
   const [showTrelloWizard, setShowTrelloWizard] = useState(false);
   const [activeAiPromptId, setActiveAiPromptId] = useState("");
   const [trelloBoards, setTrelloBoards] = useState([]);
@@ -413,6 +419,15 @@ export function TaskDetailView({
     };
   }, [task.id, task.projectId]);
 
+  useEffect(() => {
+    let cancelled = false;
+    setJiraProjects([]); setShowJiraWizard(false);
+    if (task.projectId && onLoadJiraProjects) onLoadJiraProjects(task.id)
+      .then((items) => { if (!cancelled) setJiraProjects(items || []); })
+      .catch(() => { if (!cancelled) setJiraProjects([]); });
+    return () => { cancelled = true; };
+  }, [task.id, task.projectId]);
+
   function refreshRelations(cancelled = false) {
     if (!onLoadRelations) {
       setRelations([]);
@@ -505,6 +520,7 @@ export function TaskDetailView({
   const supportsComments = Boolean(
     taskResource && (
       (taskResource.provider === "trello" && taskResource.kind === "trello_card") ||
+      (taskResource.provider === "jira" && taskResource.kind === "jira_issue") ||
       (taskResource.provider === "github" && taskResource.kind === "pull_request") ||
       (taskResource.provider === "gitlab" && taskResource.kind === "merge_request")
     ),
@@ -532,6 +548,7 @@ export function TaskDetailView({
     onSubmitReviewComments,
   );
   const lastSyncedLabel = taskResource ? formatLastSyncedAt(taskResource.fetchedAt) : "";
+  const canConvertToJira = !taskResource && canCreateTrelloTicket(task, jiraProjects);
   const canConvertToTrello = !taskResource && canCreateTrelloTicket(task, trelloBoards);
 
   return (
@@ -571,6 +588,7 @@ export function TaskDetailView({
               {isDone ? "Mark open" : "Mark done"}
             </Button>
           )}
+          {canConvertToJira && <Button type="button" variant="outline" onClick={() => setShowJiraWizard(true)}>Create Jira ticket</Button>}
           {canConvertToTrello && (
             <Button type="button" variant="outline" onClick={() => setShowTrelloWizard(true)}>
               <SquareKanban className="size-4" />
@@ -784,6 +802,11 @@ export function TaskDetailView({
         />
       )}
 
+      {showJiraWizard && canConvertToJira && <JiraTicketWizard task={task} projects={jiraProjects} onClose={() => setShowJiraWizard(false)} onConvert={async (payload) => {
+        const result = await onConvertToJiraTicket(payload);
+        setLinks(result.link ? [result.link] : []);
+        setShowJiraWizard(false);
+      }} />}
       {showTrelloWizard && canConvertToTrello && (
         <TrelloTicketWizard
           task={task}

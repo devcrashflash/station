@@ -31,6 +31,8 @@ use tauri_nspanel::{tauri_panel, ManagerExt as PanelManagerExt, StyleMask, Webvi
 
 mod ai_sessions;
 mod calendar;
+mod jira;
+use jira::*;
 mod lifecycle;
 mod programs;
 mod terminal_tabs;
@@ -659,6 +661,7 @@ struct ConnectionRecord {
     name: String,
     base_url: String,
     api_key: Option<String>,
+    jira: Option<JiraConfig>,
     token: String,
     created_at: i64,
     updated_at: i64,
@@ -814,6 +817,7 @@ struct Task {
     source_provider: Option<String>,
     source_kind: Option<String>,
     status_color: Option<String>,
+    status_category: Option<String>,
     created_at: i64,
     updated_at: i64,
 }
@@ -846,6 +850,7 @@ struct TaskLink {
     external_body: Option<String>,
     external_state: Option<String>,
     external_state_color: Option<String>,
+    external_state_category: Option<String>,
     target_branch: Option<String>,
     source_branch: Option<String>,
     fetched_at: Option<i64>,
@@ -1359,6 +1364,7 @@ struct ConnectionInput {
     name: String,
     base_url: String,
     api_key: Option<String>,
+    jira: Option<JiraConfig>,
     token: String,
 }
 
@@ -1416,6 +1422,7 @@ struct ParsedInputPayload {
     url: Option<String>,
     title: String,
     repo_url: Option<String>,
+    connection_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1452,6 +1459,7 @@ struct ProviderMetadata {
     body: Option<String>,
     state: Option<String>,
     state_color: Option<String>,
+    state_category: Option<String>,
     target_branch: Option<String>,
     source_branch: Option<String>,
     url: Option<String>,
@@ -1757,6 +1765,11 @@ pub fn run() {
             list_tasks,
             update_task,
             delete_task,
+            resolve_jira_tickets,
+            list_task_jira_projects,
+            list_jira_issue_types,
+            jira_create_metadata,
+            convert_task_to_jira_ticket,
             list_task_trello_boards,
             list_trello_board_templates,
             convert_task_to_trello_ticket,
@@ -2200,10 +2213,12 @@ fn init_database(db: &SqliteConnection) -> rusqlite::Result<()> {
         "connection_id",
         "TEXT REFERENCES connections(id) ON DELETE SET NULL",
     )?;
+    add_column_if_missing(db, "connections", "jira_json", "TEXT")?;
     add_column_if_missing(db, "task_links", "external_title", "TEXT")?;
     add_column_if_missing(db, "task_links", "external_body", "TEXT")?;
     add_column_if_missing(db, "task_links", "external_state", "TEXT")?;
     add_column_if_missing(db, "task_links", "external_state_color", "TEXT")?;
+    add_column_if_missing(db, "task_links", "external_state_category", "TEXT")?;
     add_column_if_missing(db, "task_links", "target_branch", "TEXT")?;
     add_column_if_missing(db, "task_links", "source_branch", "TEXT")?;
     add_column_if_missing(db, "task_links", "fetched_at", "INTEGER")?;
@@ -2751,6 +2766,9 @@ fn row_to_connection(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionReco
         name: row.get(2)?,
         base_url: row.get(3)?,
         api_key: row.get(4)?,
+        jira: row
+            .get::<_, Option<String>>(8)?
+            .and_then(|v| serde_json::from_str(&v).ok()),
         token: row.get(5)?,
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
@@ -2851,6 +2869,7 @@ fn row_to_task_with_source(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         source_provider: row.get(8)?,
         source_kind: row.get(9)?,
         status_color: row.get(10)?,
+        status_category: row.get(11)?,
     })
 }
 
@@ -2884,6 +2903,7 @@ fn row_to_task_link(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskLink> {
         external_body: row.get(7)?,
         external_state: row.get(8)?,
         external_state_color: row.get(9)?,
+        external_state_category: row.get(16)?,
         target_branch: row.get(10)?,
         source_branch: row.get(11)?,
         fetched_at: row.get(12)?,
@@ -5082,8 +5102,19 @@ fn save_connection_in_db(
         )?;
     }
 
+    db.execute(
+        "UPDATE connections SET jira_json = ?1 WHERE id = ?2",
+        params![
+            input
+                .jira
+                .as_ref()
+                .map(|v| serde_json::to_string(v).unwrap()),
+            id
+        ],
+    )?;
+
     db.query_row(
-        "SELECT id, provider, name, base_url, api_key, token, created_at, updated_at FROM connections WHERE id = ?1",
+        "SELECT id, provider, name, base_url, api_key, token, created_at, updated_at, jira_json FROM connections WHERE id = ?1",
         params![id],
         row_to_connection,
     )
@@ -5756,7 +5787,7 @@ fn is_hidden_path_entry(path: &Path) -> bool {
 
 fn get_connection(db: &SqliteConnection, id: &str) -> rusqlite::Result<Option<ConnectionRecord>> {
     db.query_row(
-        "SELECT id, provider, name, base_url, api_key, token, created_at, updated_at FROM connections WHERE id = ?1",
+        "SELECT id, provider, name, base_url, api_key, token, created_at, updated_at, jira_json FROM connections WHERE id = ?1",
         params![id],
         row_to_connection,
     )
@@ -5765,7 +5796,7 @@ fn get_connection(db: &SqliteConnection, id: &str) -> rusqlite::Result<Option<Co
 
 fn list_connections_in_db(db: &SqliteConnection) -> rusqlite::Result<Vec<ConnectionRecord>> {
     let mut statement = db.prepare(
-        "SELECT id, provider, name, base_url, api_key, token, created_at, updated_at
+        "SELECT id, provider, name, base_url, api_key, token, created_at, updated_at, jira_json
          FROM connections ORDER BY provider ASC, name ASC",
     )?;
     let connections = statement
@@ -5783,7 +5814,10 @@ fn select_activity_sync_connections(
         .filter(|connection| {
             requested_ids.map_or(true, |ids| {
                 ids.contains(&connection.id)
-                    && matches!(connection.provider.as_str(), "github" | "gitlab" | "trello")
+                    && matches!(
+                        connection.provider.as_str(),
+                        "github" | "gitlab" | "trello" | "jira"
+                    )
             })
         })
         .collect()
@@ -6180,7 +6214,7 @@ fn create_task_in_db(
 fn get_task(db: &SqliteConnection, id: &str) -> rusqlite::Result<Option<Task>> {
     db.query_row(
         "SELECT t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
-                l.provider, l.kind, l.external_state_color
+                l.provider, l.kind, l.external_state_color, l.external_state_category
          FROM tasks t
          LEFT JOIN task_links l ON l.task_id = t.id
          WHERE t.id = ?1",
@@ -6196,7 +6230,7 @@ fn get_task_by_source_url(
 ) -> rusqlite::Result<Option<Task>> {
     db.query_row(
         "SELECT t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
-                l.provider, l.kind, l.external_state_color
+                l.provider, l.kind, l.external_state_color, l.external_state_category
          FROM tasks t
          LEFT JOIN task_links l ON l.task_id = t.id
          WHERE t.source_url = ?1 LIMIT 1",
@@ -6214,7 +6248,7 @@ fn get_task_by_link(
 ) -> rusqlite::Result<Option<Task>> {
     db.query_row(
         "SELECT t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
-                l.provider, l.kind, l.external_state_color
+                l.provider, l.kind, l.external_state_color, l.external_state_category
          FROM tasks t
          INNER JOIN task_links l ON l.task_id = t.id
          WHERE l.provider = ?1 AND l.kind = ?2 AND l.external_id = ?3
@@ -6233,7 +6267,7 @@ fn get_latest_project_task_by_link(
 ) -> rusqlite::Result<Option<Task>> {
     db.query_row(
         "SELECT t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
-                l.provider, l.kind, l.external_state_color
+                l.provider, l.kind, l.external_state_color, l.external_state_category
          FROM tasks t
          INNER JOIN task_links l ON l.task_id = t.id
          WHERE l.provider = ?1 AND l.kind = ?2 AND l.external_id = ?3
@@ -6272,7 +6306,7 @@ fn get_task_relation_view(
     db.query_row(
         "SELECT r.id, r.source_task_id, r.target_task_id, r.relation_type, r.created_at,
                 t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
-                l.provider, l.kind, l.external_state_color
+                l.provider, l.kind, l.external_state_color, l.external_state_category
          FROM task_relations r
          INNER JOIN tasks t ON t.id = CASE WHEN r.source_task_id = ?2 THEN r.target_task_id ELSE r.source_task_id END
          LEFT JOIN task_links l ON l.task_id = t.id
@@ -6300,6 +6334,7 @@ fn row_to_task_relation_view(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRe
             source_provider: row.get(13)?,
             source_kind: row.get(14)?,
             status_color: row.get(15)?,
+            status_category: row.get(16)?,
             created_at: row.get(11)?,
             updated_at: row.get(12)?,
         },
@@ -6415,8 +6450,8 @@ fn link_task_resource_in_db(
     let labels_json = external_labels_to_json(&metadata.labels);
     db.execute(
         "INSERT INTO task_links
-            (task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, external_state_color, target_branch, source_branch, fetched_at, files_json, comments_json, labels_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+            (task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, external_state_color, target_branch, source_branch, fetched_at, files_json, comments_json, labels_json, external_state_category)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
          ON CONFLICT(task_id) DO UPDATE SET
             provider = excluded.provider,
             kind = excluded.kind,
@@ -6432,7 +6467,8 @@ fn link_task_resource_in_db(
             fetched_at = excluded.fetched_at,
             files_json = excluded.files_json,
             comments_json = excluded.comments_json,
-            labels_json = excluded.labels_json",
+            labels_json = excluded.labels_json,
+            external_state_category = excluded.external_state_category",
         params![
             &task_id,
             &provider,
@@ -6449,7 +6485,8 @@ fn link_task_resource_in_db(
             &metadata.fetched_at,
             &files_json,
             &comments_json,
-            &labels_json
+            &labels_json,
+            &metadata.state_category
         ],
     )?;
     db.execute(
@@ -6461,7 +6498,7 @@ fn link_task_resource_in_db(
 
 fn list_task_links_in_db(db: &SqliteConnection, task_id: &str) -> rusqlite::Result<Vec<TaskLink>> {
     let mut statement = db.prepare(
-        "SELECT task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, external_state_color, target_branch, source_branch, fetched_at, files_json, comments_json, labels_json
+        "SELECT task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, external_state_color, target_branch, source_branch, fetched_at, files_json, comments_json, labels_json, external_state_category
          FROM task_links WHERE task_id = ?1 ORDER BY provider ASC, kind ASC",
     )?;
     let links = statement
@@ -6472,6 +6509,7 @@ fn list_task_links_in_db(db: &SqliteConnection, task_id: &str) -> rusqlite::Resu
 
 fn parsed_payload_from_task_link(task: &Task, link: &TaskLink) -> ParsedInputPayload {
     ParsedInputPayload {
+        connection_id: link.connection_id.clone(),
         kind: link.kind.clone(),
         provider: Some(link.provider.clone()),
         external_id: Some(link.external_id.clone()),
@@ -6527,6 +6565,7 @@ fn task_link_supports_external_refresh(link: &TaskLink) -> bool {
     matches!(
         (link.provider.as_str(), link.kind.as_str()),
         ("trello", "trello_card")
+            | ("jira", "jira_issue")
             | ("github", "github_issue")
             | ("github", "pull_request")
             | ("gitlab", "gitlab_issue")
@@ -6539,6 +6578,7 @@ fn provider_connection_required_notice(provider: &str) -> String {
         "github" => "GitHub",
         "gitlab" => "GitLab",
         "trello" => "Trello",
+        "jira" => "Jira",
         _ => provider,
     };
     format!("Please add a {label} connection to this project.")
@@ -6549,6 +6589,7 @@ fn provider_external_sync_failed_notice(provider: &str) -> String {
         "github" => "GitHub",
         "gitlab" => "GitLab",
         "trello" => "Trello",
+        "jira" => "Jira",
         _ => provider,
     };
     format!("Could not sync external details from {label}. Check the connection and try again.")
@@ -6757,6 +6798,7 @@ fn migrate_pull_requests_into_tasks(db: &SqliteConnection) -> rusqlite::Result<(
             body: pull_request.external_body.clone(),
             state: pull_request.external_state.clone(),
             state_color: None,
+            state_category: None,
             target_branch: pull_request.target_branch.clone(),
             source_branch: pull_request.source_branch.clone(),
             url: Some(pull_request.pr_url.clone()),
@@ -6856,7 +6898,10 @@ fn parent_resource_from_parsed(
     parsed: &ParsedInputPayload,
     metadata: Option<&ProviderMetadata>,
 ) -> Option<ProviderResourceMetadata> {
-    if parsed.kind == "trello_card" {
+    if matches!(
+        parsed.kind.as_str(),
+        "trello_card" | "jira_issue" | "jira_project"
+    ) {
         return metadata.and_then(|metadata| metadata.parent_resource.clone());
     }
 
@@ -6934,6 +6979,9 @@ fn create_smart_task_in_db(
     parsed: ParsedInputPayload,
     project_id: Option<String>,
 ) -> Result<SmartTaskResult, String> {
+    if parsed.provider.as_deref() == Some("jira") {
+        return jira_import(db, parsed, project_id);
+    }
     let response = parsed_response(&parsed);
 
     if parsed.kind == "text" {
@@ -7139,7 +7187,7 @@ fn list_enabled_connections(
     project_id: &str,
 ) -> rusqlite::Result<Vec<(ConnectionRecord, i64)>> {
     let mut statement = db.prepare(
-        "SELECT c.id, c.provider, c.name, c.base_url, c.api_key, c.token, c.created_at, c.updated_at, pc.enabled_at
+        "SELECT c.id, c.provider, c.name, c.base_url, c.api_key, c.token, c.created_at, c.updated_at, c.jira_json, pc.enabled_at
          FROM project_connections pc
          INNER JOIN connections c ON c.id = pc.connection_id
          WHERE pc.project_id = ?1
@@ -7154,11 +7202,14 @@ fn list_enabled_connections(
                     name: row.get(2)?,
                     base_url: row.get(3)?,
                     api_key: row.get(4)?,
+                    jira: row
+                        .get::<_, Option<String>>(8)?
+                        .and_then(|v| serde_json::from_str(&v).ok()),
                     token: row.get(5)?,
                     created_at: row.get(6)?,
                     updated_at: row.get(7)?,
                 },
-                row.get(8)?,
+                row.get(9)?,
             ))
         })?
         .collect();
@@ -7183,6 +7234,15 @@ fn select_best_connection(
         .filter(|(connection, _)| connection.provider == provider)
         .collect::<Vec<_>>();
 
+    if provider == "jira" {
+        matches.retain(|(c, _)| {
+            host_from_url(&c.base_url) == parsed_host
+                && parsed.connection_id.as_ref().is_none_or(|id| id == &c.id)
+        });
+        if matches.len() > 1 {
+            return Ok(None);
+        }
+    }
     matches.sort_by(|(left, left_enabled_at), (right, right_enabled_at)| {
         let left_score = connection_match_score(left, parsed_host.as_deref());
         let right_score = connection_match_score(right, parsed_host.as_deref());
@@ -7270,6 +7330,7 @@ impl ProviderMetadata {
             body: None,
             state: None,
             state_color: None,
+            state_category: None,
             target_branch: None,
             source_branch: None,
             url: None,
@@ -7296,6 +7357,7 @@ fn fetch_provider_metadata_with_connection(
 ) -> Result<ProviderMetadata, String> {
     match connection.provider.as_str() {
         "trello" if parsed.kind == "trello_card" => fetch_trello_card(connection, parsed),
+        "jira" if parsed.kind == "jira_issue" => jira_fetch_metadata(connection, parsed),
         "github" if parsed.kind == "pull_request" => fetch_github_pull_request(connection, parsed),
         "github" if parsed.kind == "github_issue" => fetch_github_issue(connection, parsed),
         "gitlab" if parsed.kind == "merge_request" => {
@@ -8008,6 +8070,7 @@ fn fetch_connection_activities(
         "github" => fetch_github_activities(connection, start_at, end_at),
         "gitlab" => fetch_gitlab_activities(connection, date, start_at, end_at),
         "trello" => fetch_trello_activities(connection, date, start_at, end_at),
+        "jira" => jira_activities(connection, start_at, end_at),
         _ => Err(format!("Unsupported provider: {}", connection.provider)),
     }
 }
@@ -8021,6 +8084,7 @@ fn fetch_connection_review_requests(
         "github" => fetch_github_review_requests(connection),
         "gitlab" => fetch_gitlab_review_requests(connection),
         "trello" => fetch_trello_assigned_cards(connection),
+        "jira" => jira_assigned_issues(connection),
         _ => Err(format!("Unsupported provider: {}", connection.provider)),
     }
 }
@@ -9259,6 +9323,7 @@ fn test_connection_with_record(connection: &ConnectionRecord) -> TestConnectionR
         "github" => test_github_connection(connection),
         "gitlab" => test_gitlab_connection(connection),
         "trello" => test_trello_connection(connection),
+        "jira" => jira_test_connection(connection),
         _ => Err(format!("Unsupported provider: {}", connection.provider)),
     };
 
@@ -9290,6 +9355,7 @@ fn connection_record_from_test_input(input: ConnectionInput) -> ConnectionRecord
             normalize_base_url(&input.base_url)
         },
         api_key: input.api_key.map(|value| value.trim().to_string()),
+        jira: input.jira,
         token: input.token.trim().to_string(),
         provider,
         created_at: 0,
@@ -9319,6 +9385,9 @@ fn provider_permission_hint(provider: &str) -> &'static str {
 }
 
 fn validate_connection_credentials(connection: &ConnectionRecord) -> Result<(), String> {
+    if connection.provider == "jira" {
+        jira_validate(connection)?;
+    }
     if connection.base_url.trim().is_empty() {
         return Err("Base URL is required.".to_string());
     }
@@ -9563,6 +9632,7 @@ fn fetch_trello_card(
         body: json_string(&json, "desc"),
         state: trello_list_state(&list_json),
         state_color: trello_color(json_string(&list_json, "color")),
+        state_category: None,
         url: card_url,
         files: trello_attachment_files(&attachments_json),
         comments,
@@ -10237,7 +10307,7 @@ fn create_task_from_input(
 
 fn normalize_smart_inbox_provider(provider: &str) -> Result<String, String> {
     let provider = provider.trim().to_ascii_lowercase();
-    if ["github", "gitlab", "trello"].contains(&provider.as_str()) {
+    if ["github", "gitlab", "trello", "jira"].contains(&provider.as_str()) {
         Ok(provider)
     } else {
         Err("Unsupported smart inbox provider.".to_string())
@@ -10298,6 +10368,7 @@ fn list_smart_inbox_provider_items_in_db(
         "github" => "pull_request",
         "gitlab" => "merge_request",
         "trello" => "trello_card",
+        "jira" => "jira_issue",
         _ => return Err("Unsupported smart inbox provider.".to_string()),
     };
     for item in &mut items {
@@ -10688,13 +10759,13 @@ fn list_tasks(
     let db = state.db.lock().map_err(db_error)?;
     let sql = if project_id.is_some() {
         "SELECT t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
-                l.provider, l.kind, l.external_state_color
+                l.provider, l.kind, l.external_state_color, l.external_state_category
          FROM tasks t
          LEFT JOIN task_links l ON l.task_id = t.id
          WHERE t.project_id = ?1 ORDER BY t.created_at DESC"
     } else {
         "SELECT t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
-                l.provider, l.kind, l.external_state_color
+                l.provider, l.kind, l.external_state_color, l.external_state_category
          FROM tasks t
          LEFT JOIN task_links l ON l.task_id = t.id
          ORDER BY t.created_at DESC"
@@ -10960,6 +11031,7 @@ async fn convert_task_to_trello_ticket(
             body: Some(description.clone()),
             state: Some(destination_list.name.clone()),
             state_color: destination_list.color.clone(),
+            state_category: None,
             url: Some(card_url.clone()),
             fetched_at: Some(now_millis()),
             parent_resource: Some(ProviderResourceMetadata {
@@ -11057,7 +11129,7 @@ fn list_task_relations(
         .prepare(
             "SELECT r.id, r.source_task_id, r.target_task_id, r.relation_type, r.created_at,
                     t.id, t.project_id, t.title, t.body, t.status, t.source_url, t.created_at, t.updated_at,
-                    l.provider, l.kind, l.external_state_color
+                    l.provider, l.kind, l.external_state_color, l.external_state_category
              FROM task_relations r
              INNER JOIN tasks t ON t.id = CASE WHEN r.source_task_id = ?1 THEN r.target_task_id ELSE r.source_task_id END
              LEFT JOIN task_links l ON l.task_id = t.id
@@ -11099,8 +11171,11 @@ fn list_connections(state: tauri::State<'_, AppState>) -> Result<Vec<ConnectionR
 #[tauri::command]
 fn save_connection(
     state: tauri::State<'_, AppState>,
-    input: ConnectionInput,
+    mut input: ConnectionInput,
 ) -> Result<ConnectionRecord, String> {
+    if input.provider == "jira" {
+        jira_prepare_input(&mut input)?;
+    }
     let db = state.db.lock().map_err(db_error)?;
     save_connection_in_db(&db, input).map_err(db_error)
 }
@@ -11507,7 +11582,20 @@ async fn sync_activities(
 
             match result {
                 Ok(activities) => {
-                    if connection.provider == "gitlab" {
+                    if connection.provider == "jira" {
+                        let worklogs = jira_worklog_activities(&connection, start_at, end_at);
+                        save_jira_activity_sync(
+                            &mut db,
+                            &connection.id,
+                            &date,
+                            start_at,
+                            end_at,
+                            &activities,
+                            &worklogs,
+                            fetched_at,
+                        )
+                        .map_err(db_error)?;
+                    } else if connection.provider == "gitlab" {
                         replace_gitlab_activity_sync_in_db(
                             &mut db,
                             &connection.id,
@@ -11837,6 +11925,7 @@ mod tests {
 
     fn parsed_text(title: &str) -> ParsedInputPayload {
         ParsedInputPayload {
+            connection_id: None,
             kind: "text".to_string(),
             provider: None,
             external_id: None,
@@ -11848,6 +11937,7 @@ mod tests {
 
     fn parsed_gitlab(url: &str, host: &str) -> ParsedInputPayload {
         ParsedInputPayload {
+            connection_id: None,
             kind: "merge_request".to_string(),
             provider: Some("gitlab".to_string()),
             external_id: Some("group/app!17".to_string()),
@@ -11859,6 +11949,7 @@ mod tests {
 
     fn parsed_github_pull_request(url: &str) -> ParsedInputPayload {
         ParsedInputPayload {
+            connection_id: None,
             kind: "pull_request".to_string(),
             provider: Some("github".to_string()),
             external_id: Some("owner/repo#42".to_string()),
@@ -11870,6 +11961,7 @@ mod tests {
 
     fn parsed_trello_card(url: &str) -> ParsedInputPayload {
         ParsedInputPayload {
+            connection_id: None,
             kind: "trello_card".to_string(),
             provider: Some("trello".to_string()),
             external_id: Some("card123".to_string()),
@@ -11907,6 +11999,7 @@ mod tests {
                 _ => "https://example.org".to_string(),
             },
             api_key: api_key.map(ToString::to_string),
+            jira: None,
             token: token.to_string(),
             created_at: 1,
             updated_at: 1,
@@ -12175,6 +12268,7 @@ mod tests {
                 name: "Work Trello".to_string(),
                 base_url: "https://api.trello.com".to_string(),
                 api_key: Some("key".to_string()),
+                jira: None,
                 token: "token".to_string(),
             },
         )
@@ -12226,6 +12320,7 @@ mod tests {
                 name: "Work Trello".to_string(),
                 base_url: "https://api.trello.com".to_string(),
                 api_key: Some("key".to_string()),
+                jira: None,
                 token: "token".to_string(),
             },
         )
@@ -12365,6 +12460,7 @@ mod tests {
                         format!("https://{provider}.example.org")
                     },
                     api_key: (provider == "trello").then(|| "key".to_string()),
+                    jira: None,
                     token: "token".to_string(),
                 },
             )
@@ -13717,6 +13813,7 @@ mod tests {
                 name: "GitHub".to_string(),
                 base_url: "https://github.com".to_string(),
                 api_key: None,
+                jira: None,
                 token: "token".to_string(),
             },
         )
@@ -13764,6 +13861,7 @@ mod tests {
                 name: "GitLab".to_string(),
                 base_url: "https://gitlab.example.org".to_string(),
                 api_key: None,
+                jira: None,
                 token: "token".to_string(),
             },
         )
@@ -13776,6 +13874,7 @@ mod tests {
                 name: "GitHub".to_string(),
                 base_url: "https://github.com".to_string(),
                 api_key: None,
+                jira: None,
                 token: "token".to_string(),
             },
         )
@@ -13851,6 +13950,7 @@ mod tests {
                 name: "GitLab".to_string(),
                 base_url: "https://gitlab.example.org".to_string(),
                 api_key: None,
+                jira: None,
                 token: "token".to_string(),
             },
         )
@@ -13898,6 +13998,7 @@ mod tests {
                 name: "GitLab".to_string(),
                 base_url: "https://gitlab.example.org".to_string(),
                 api_key: None,
+                jira: None,
                 token: "token".to_string(),
             },
         )
@@ -15094,7 +15195,7 @@ mod tests {
 
         let mut statement = db
             .prepare(
-                "SELECT task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, external_state_color, target_branch, source_branch, fetched_at, files_json, comments_json, labels_json
+                "SELECT task_id, provider, kind, external_id, url, connection_id, external_title, external_body, external_state, external_state_color, target_branch, source_branch, fetched_at, files_json, comments_json, labels_json, external_state_category
                  FROM task_links WHERE task_id = ?1",
             )
             .expect("prepare task links query");
@@ -15421,6 +15522,7 @@ mod tests {
                 name: "Trello".to_string(),
                 base_url: "https://trello.com".to_string(),
                 api_key: Some("key".to_string()),
+                jira: None,
                 token: "token".to_string(),
             },
         )
@@ -15452,6 +15554,7 @@ mod tests {
             body: Some("Fetched Trello description".to_string()),
             state: Some("Doing".to_string()),
             state_color: Some("#61bd4f".to_string()),
+            state_category: None,
             target_branch: None,
             source_branch: None,
             url: Some("https://trello.com/c/card123/fetched".to_string()),
@@ -15548,6 +15651,7 @@ mod tests {
                 body: Some("Fetched body".to_string()),
                 state: Some("Done".to_string()),
                 state_color: None,
+                state_category: None,
                 target_branch: None,
                 source_branch: None,
                 url: None,
@@ -15918,6 +16022,7 @@ mod tests {
                 name: "Work GitLab".to_string(),
                 base_url: "https://gitlab.example.com".to_string(),
                 api_key: None,
+                jira: None,
                 token: "secret".to_string(),
             },
         )
@@ -16291,6 +16396,7 @@ mod tests {
             source_provider: Some("trello".to_string()),
             source_kind: Some("trello_card".to_string()),
             status_color: Some("#61bd4f".to_string()),
+            status_category: None,
             created_at: 1,
             updated_at: 1,
         };
@@ -16349,6 +16455,7 @@ mod tests {
             source_provider: None,
             source_kind: None,
             status_color: None,
+            status_category: None,
             created_at: 1,
             updated_at: 1,
         };
@@ -16370,6 +16477,7 @@ mod tests {
             source_provider: None,
             source_kind: None,
             status_color: None,
+            status_category: None,
             created_at: 1,
             updated_at: 1,
         };
@@ -16734,6 +16842,7 @@ mod tests {
                 name: "Work GitLab".to_string(),
                 base_url: "gitlab.example.org/".to_string(),
                 api_key: None,
+                jira: None,
                 token: "secret".to_string(),
             },
         )
@@ -16769,6 +16878,7 @@ mod tests {
                 name: " Trello ".to_string(),
                 base_url: "https://trello.com".to_string(),
                 api_key: Some(" key ".to_string()),
+                jira: None,
                 token: " token ".to_string(),
             },
         )
@@ -16788,6 +16898,7 @@ mod tests {
             name: " Draft Trello ".to_string(),
             base_url: "https://ignored.example.com".to_string(),
             api_key: Some(" key ".to_string()),
+            jira: None,
             token: " token ".to_string(),
         });
 
@@ -17138,6 +17249,7 @@ mod tests {
                 name: "GitLab.com".to_string(),
                 base_url: "https://gitlab.com".to_string(),
                 api_key: None,
+                jira: None,
                 token: "secret".to_string(),
             },
         )
@@ -17150,6 +17262,7 @@ mod tests {
                 name: "Self-hosted".to_string(),
                 base_url: "https://gitlab.example.org".to_string(),
                 api_key: None,
+                jira: None,
                 token: "secret".to_string(),
             },
         )
@@ -17238,6 +17351,7 @@ mod tests {
                 name: "Trello".to_string(),
                 base_url: "https://api.trello.com".to_string(),
                 api_key: Some("key".to_string()),
+                jira: None,
                 token: "token".to_string(),
             },
         )
@@ -17308,6 +17422,7 @@ mod tests {
             body: Some("Converted body".to_string()),
             state: Some("Doing".to_string()),
             state_color: Some("#0079bf".to_string()),
+            state_category: None,
             url: Some("https://trello.com/c/card-1".to_string()),
             fetched_at: Some(now_millis()),
             ..ProviderMetadata::empty()

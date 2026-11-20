@@ -1,4 +1,4 @@
-const CATEGORY_ORDER = ["todos", "tasks", "latest-files", "github", "gitlab", "trello"];
+const CATEGORY_ORDER = ["todos", "tasks", "latest-files", "github", "gitlab", "trello", "jira"];
 
 function timestampValue(value) {
   if (Number.isFinite(value)) return value;
@@ -32,7 +32,7 @@ function itemTimestamp(category, item) {
 
 function itemKey(category, item, index) {
   if (category === "latest-files") return `${category}:${item?.path || index}`;
-  if (["github", "gitlab", "trello"].includes(category)) {
+  if (["github", "gitlab", "trello", "jira"].includes(category)) {
     return `${category}:${item?.externalId || item?.url || index}`;
   }
   return `${category}:${item?.id || index}`;
@@ -51,6 +51,7 @@ export function buildAllSmartInboxItems({
     github: providerItems.github?.items || [],
     gitlab: providerItems.gitlab?.items || [],
     trello: providerItems.trello?.items || [],
+    jira: providerItems.jira?.items || [],
   };
 
   return CATEGORY_ORDER

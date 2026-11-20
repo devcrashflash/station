@@ -14,6 +14,7 @@ export function reviewRequestSubtitle(item) {
 }
 
 function requestNumberLabel(provider, number) {
+  if (provider === "jira") return number;
   return provider === "gitlab" ? `!${number}` : `#${number}`;
 }
 

@@ -210,6 +210,7 @@ function App() {
   const [editingSmartInboxTodo, setEditingSmartInboxTodo] = useState(null);
   const [projectConnectionIds, setProjectConnectionIds] = useState([]);
   const [selectedTask, setSelectedTask] = useState(null);
+  const [pendingJiraAccount, setPendingJiraAccount] = useState(null);
   const [pendingInput, setPendingInput] = useState(null);
   const [pendingOcrDrop, setPendingOcrDrop] = useState(null);
   const [isOcrRunning, setIsOcrRunning] = useState(false);
@@ -676,6 +677,17 @@ function App() {
     const parsedPayload = parsedOverride || toParsedPayload(parseSmartInput(input));
     const targetProjectId = projectId || selectedProjectId || null;
 
+    if (parsedPayload.provider === "jira" && targetProjectId && !parsedPayload.connectionId) {
+      const enabled = new Set(await api.listProjectConnections({ projectId: targetProjectId }));
+      const host = new URL(parsedPayload.url).hostname;
+      const candidates = connections.filter((c) => c.provider === "jira" && enabled.has(c.id) && new URL(c.baseUrl).hostname === host);
+      if (candidates.length > 1) {
+        setPendingJiraAccount({ input, projectId: targetProjectId, parsed: parsedPayload, todoId: sourceTodoId, candidates });
+        return;
+      }
+      if (candidates.length === 1) parsedPayload.connectionId = candidates[0].id;
+    }
+
     const result = await api.createTaskFromInput({
       input,
       parsed: parsedPayload,
@@ -1024,6 +1036,15 @@ function App() {
           }}
           onLoadLinks={(taskId) => api.listTaskLinks({ taskId })}
           onLoadRelations={(taskId) => api.listTaskRelations({ taskId })}
+          onLoadJiraProjects={(taskId) => api.listTaskJiraProjects({ taskId })}
+          onConvertToJiraTicket={async (payload) => {
+            const result = await api.convertTaskToJiraTicket(payload);
+            setSelectedTask(result.task);
+            setTasks((current) => current.map((task) => task.id === result.task.id ? result.task : task));
+            if (result.task.projectId) await refreshProject(result.task.projectId);
+            showNotice("Jira ticket created.");
+            return result;
+          }}
           onLoadTrelloBoards={(taskId) => api.listTaskTrelloBoards({ taskId })}
           onLoadTrelloTemplates={(payload) => api.listTrelloBoardTemplates(payload)}
           onConvertToTrelloTicket={async (payload) => {
@@ -1182,7 +1203,7 @@ function App() {
           onSyncProviderItems={(provider) => api.syncSmartInboxProviderItems({ provider })}
           onLoadProviderSources={(provider) => api.listSmartInboxProviderSources({ provider })}
           onUpdateProviderSources={(provider, changes) => api.updateSmartInboxProviderSources({ provider, changes })}
-          onOpenReviewRequest={(input) => submitSmartInput(input).catch(reportError)}
+          onOpenReviewRequest={(input, item) => submitSmartInput(input, null, item?.provider === "jira" ? { ...toParsedPayload(parseSmartInput(input)), connectionId: item.connectionId } : null).catch(reportError)}
           onOpenTask={openTask}
           calendarEvents={todayCalendarData.events}
           calendarSyncRuns={todayCalendarData.syncRuns}
@@ -1230,6 +1251,16 @@ function App() {
         />
       )}
 
+      {pendingJiraAccount && <Modal title="Choose Jira account" onClose={() => setPendingJiraAccount(null)}>
+        <div className="grid gap-3">
+          <p className="text-sm text-muted-foreground">Choose the account to use for this Jira link.</p>
+          {pendingJiraAccount.candidates.map((c) => <Button key={c.id} variant="outline" onClick={() => {
+            const pending = pendingJiraAccount;
+            setPendingJiraAccount(null);
+            submitSmartInput(pending.input, pending.projectId, { ...pending.parsed, connectionId: c.id }, pending.todoId).catch(reportError);
+          }}>{c.name} · {c.jira?.email}</Button>)}
+        </div>
+      </Modal>}
       {pendingInput && (
         <ProjectPickerDialog
           input={pendingInput.input}

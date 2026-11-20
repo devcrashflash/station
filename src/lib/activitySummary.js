@@ -1,3 +1,4 @@
+import { extractJiraIssueUrls, jiraTicketFromActivity, jiraWorklogFromActivity, formatJiraLoggedTime, deduplicateJiraWorklogActivities } from "./jira.js";
 import { activityActionLabel } from "./activity.js";
 import { calendarEventOpenUrl, calendarEventTimeLabel } from "./calendar.js";
 
@@ -49,6 +50,26 @@ export function trelloTicketReferencesForActivity(activity) {
   return [];
 }
 
+function jiraReferencesForActivity(activity) {
+  const subject = activitySubject(activity);
+  if (activity?.provider === "gitlab") return extractJiraIssueUrls(subject?.description || "");
+  if (activity?.provider === "github" && isGithubPullRequestSubject(activity, subject)) return extractJiraIssueUrls(subject?.body || "");
+  return [];
+}
+
+function ticketReferencesForActivity(activity) {
+  return [...trelloTicketReferencesForActivity(activity), ...jiraReferencesForActivity(activity)];
+}
+
+export function jiraTicketUrlsForActivities(activities = []) {
+  const cached = new Set(activities.map(jiraTicketFromActivity).filter(Boolean).map((ticket) => ticket.url));
+  return [...new Set(activities.flatMap(jiraReferencesForActivity).map((ticket) => ticket.url))].filter((url) => !cached.has(url));
+}
+
+function ticketFromActivity(activity) {
+  return activity.provider === "jira" ? jiraTicketFromActivity(activity) : ticketFromTrelloActivity(activity);
+}
+
 export function trelloTicketExternalIdForActivity(activity) {
   return ticketFromTrelloActivity(activity)?.externalId || null;
 }
@@ -60,10 +81,19 @@ export function buildDaySummaryModel({
   resources = [],
   resolvedTickets = [],
 } = {}) {
-  const summaryActivities = filterMergeGeneratedGitlabPushes(activities);
+  const summaryActivities = filterMergeGeneratedGitlabPushes(deduplicateJiraWorklogActivities(activities));
   const projectById = new Map(projects.map((project) => [project.id, project]));
   const orderedProjectIds = projects.map((project) => project.id);
-  const ticketById = new Map(resolvedTickets.map((ticket) => [ticket.externalId, { ...ticket }]));
+  const ticketById = new Map();
+  const rememberTicket = (ticket) => {
+    const merged = mergeTicketMetadata(ticketById.get(ticket.externalId), ticket);
+    ticketById.set(ticket.externalId, merged);
+    if (ticket.provider === "jira") {
+      ticketById.set(`jira:${ticket.url}`, merged);
+      if (ticket.referenceExternalId) ticketById.set(ticket.referenceExternalId, merged);
+    }
+  };
+  resolvedTickets.forEach(rememberTicket);
   const sections = new Map();
   const mergeRequestRelations = mergeRequestRelationsForActivities(summaryActivities);
 
@@ -74,20 +104,24 @@ export function buildDaySummaryModel({
   };
 
   for (const activity of [...summaryActivities].sort(compareActivityTime)) {
-    if (activity.provider !== "trello") continue;
-    const ticket = ticketFromTrelloActivity(activity);
+    if (!["trello", "jira"].includes(activity.provider)) continue;
+    const ticket = ticketFromActivity(activity);
     if (!ticket) continue;
-    ticketById.set(ticket.externalId, mergeTicketMetadata(ticketById.get(ticket.externalId), ticket));
+    rememberTicket(ticket);
   }
 
   for (const activity of [...summaryActivities].sort(compareActivityTime)) {
-    if (activity.provider === "trello") {
-      const ticket = ticketFromTrelloActivity(activity);
+    if (["trello", "jira"].includes(activity.provider)) {
+      const ticket = ticketFromActivity(activity);
       if (!ticket) continue;
       const completeTicket = mergeTicketMetadata(ticketById.get(ticket.externalId), ticket);
       const projectId = projectForTicket(completeTicket, resources);
       const bucket = ensureTicketBucket(ensureSection(projectId), completeTicket);
-      addAction(bucket.trelloActions, activity);
+      const worklog = jiraWorklogFromActivity(activity);
+      if (worklog) {
+        bucket.worklogs ||= new Map();
+        bucket.worklogs.set(worklog.id, worklog);
+      } else { addAction(bucket.trelloActions, activity); }
       continue;
     }
 
@@ -103,13 +137,14 @@ export function buildDaySummaryModel({
           : refEvent.actionLabel)
       : null;
     const repositoryProjectId = projectForCodeActivity(activity, subject, resources);
-    const ticketRefs = relatedMergeRequest?.ticketRefs || trelloTicketReferencesForActivity(activity);
+    const ticketRefs = relatedMergeRequest?.ticketRefs || ticketReferencesForActivity(activity);
 
     if (ticketRefs.length > 0) {
       for (const reference of ticketRefs) {
         const ticket = ticketById.get(reference.externalId) || {
           externalId: reference.externalId,
-          title: `Trello ticket ${reference.externalId}`,
+          title: reference.title || `Trello ticket ${reference.externalId}`,
+          provider: reference.provider,
           url: reference.url,
         };
         const projectId = projectForTicket(ticket, resources) || repositoryProjectId;
@@ -137,6 +172,8 @@ export function buildDaySummaryModel({
       isUnknown: projectId === "__unknown__",
       tickets: [...section.tickets.values()].map((ticket) => ({
         externalId: ticket.externalId,
+        ...(ticket.provider === "jira" ? { provider: "jira" } : {}),
+        ...(ticket.worklogs?.size ? { worklogs: [...ticket.worklogs.values()].sort((a, b) => a.startedAt - b.startedAt) } : {}),
         title: ticket.title || `Trello ticket ${ticket.externalId}`,
         url: ticket.url || `https://trello.com/c/${ticket.externalId}`,
         ticketActions: ticket.trelloActions.map((action) => action.label),
@@ -146,7 +183,7 @@ export function buildDaySummaryModel({
     });
   }
 
-  return {
+  return withJiraWorklogTotals({
     sections: projectSections,
     meetings: [...calendarEvents].sort(compareCalendarTime).map((event) => ({
       id: event.id || event.uid || `${event.startAt}:${event.title}`,
@@ -155,7 +192,7 @@ export function buildDaySummaryModel({
       url: calendarEventOpenUrl(event),
       calendarName: event.calendarName || null,
     })),
-  };
+  });
 }
 
 export function filterDaySummaryModelBySearch(summary, query = "") {
@@ -166,7 +203,7 @@ export function filterDaySummaryModelBySearch(summary, query = "") {
     if (summaryValuesMatch(normalizedQuery, [section.name])) return [section];
 
     const tickets = section.tickets.flatMap((ticket) => {
-      if (summaryValuesMatch(normalizedQuery, [ticket.title, ...ticket.ticketActions])) return [ticket];
+      if (summaryValuesMatch(normalizedQuery, [ticket.title, ...ticket.ticketActions, ...(ticket.worklogs || []).flatMap((w) => [w.note, w.author, `Logged ${formatJiraLoggedTime(w.seconds)}`])])) return [ticket];
 
       const providers = filterSummaryProviders(ticket.providers, normalizedQuery);
       return providers.length > 0 ? [{ ...ticket, providers }] : [];
@@ -185,7 +222,13 @@ export function filterDaySummaryModelBySearch(summary, query = "") {
         meeting.timeLabel,
       ]));
 
-  return { ...summary, sections, meetings };
+  return withJiraWorklogTotals({ ...summary, sections, meetings });
+}
+
+function withJiraWorklogTotals(summary) {
+  const worklogs = new Map(summary.sections.flatMap((section) => section.tickets.flatMap((ticket) => ticket.worklogs || [])).map((worklog) => [worklog.id, worklog]));
+  if (!worklogs.size && summary.jiraLoggedSeconds === undefined) return summary;
+  return { ...summary, jiraLoggedSeconds: [...worklogs.values()].reduce((sum, worklog) => sum + worklog.seconds, 0), jiraWorklogCount: worklogs.size };
 }
 
 function filterSummaryProviders(providers, query) {
@@ -250,6 +293,7 @@ export function buildDaySummaryMarkdown(input = {}) {
 
 export function daySummaryModelToMarkdown(summary) {
   const output = [];
+  if (summary.jiraWorklogCount) output.push(`**Jira hours logged: ${formatJiraLoggedTime(summary.jiraLoggedSeconds)}**`, "");
 
   for (const section of summary.sections) {
     output.push(`# ${markdownText(section.name)}`, "");
@@ -257,6 +301,9 @@ export function daySummaryModelToMarkdown(summary) {
       output.push(`## ${markdownText(ticket.title)} ([here](${ticket.url}))`, "");
       if (ticket.ticketActions.length > 0) {
         output.push(`- Ticket: ${ticket.ticketActions.map(markdownText).join(", ")}`);
+      }
+      for (const worklog of ticket.worklogs || []) {
+        output.push(`- Jira: logged ${formatJiraLoggedTime(worklog.seconds)}${worklog.note ? ` — ${markdownText(worklog.note)}` : ""}`);
       }
       output.push(...renderProviderGroups(ticket.providers));
       output.push("");
@@ -316,6 +363,7 @@ function compareSummaryAction(left, right) {
 }
 
 function summaryActionLabel(activity) {
+  if (activity.provider === "jira") return activity.actionLabel || activityActionLabel(activity);
   const label = activityActionLabel(activity);
   if (activity.provider !== "trello" || !label.toLowerCase().startsWith("moved")) return label;
   const raw = safeJson(activity.rawJson);
@@ -400,7 +448,7 @@ function mergeRequestRelationsForActivities(activities) {
       branch,
       repository: codeActivityRepository(activity, subject),
       subject,
-      ticketRefs: trelloTicketReferencesForActivity({ ...activity, subjectJson: subject }),
+      ticketRefs: ticketReferencesForActivity({ ...activity, subjectJson: subject }),
       occurredAt: activity.occurredAt || 0,
     }];
   });
@@ -601,6 +649,8 @@ function ticketFromTrelloActivity(activity) {
 }
 
 function projectForTicket(ticket, resources) {
+  if (ticket.provider === "jira") return resources.find((r) => r.provider === "jira" && r.kind === "jira_project" && r.externalId === ticket.projectExternalId)?.projectId || null;
+
   return resources.find((resource) => {
     if (resource.provider !== "trello" || resource.kind !== "trello_board") return false;
     const identities = [resource.externalId, boardIdentityFromUrl(resource.url)].filter(Boolean);

@@ -1,3 +1,4 @@
+import { jiraWorklogFromActivity } from "./jira.js";
 export function formatLocalDate(date = new Date()) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -35,7 +36,7 @@ export function isPastLocalDate(dateValue, today = formatLocalDate()) {
 
 export const ACTIVITY_AUTO_SYNC_STALE_MS = 5 * 60 * 1000;
 export const ACTIVITY_SYNC_DAYS = 7;
-export const ACTIVITY_SYNC_PROVIDERS = new Set(["github", "gitlab", "trello"]);
+export const ACTIVITY_SYNC_PROVIDERS = new Set(["github", "gitlab", "trello", "jira"]);
 
 export function recentActivityDates(today = formatLocalDate(), count = ACTIVITY_SYNC_DAYS) {
   return Array.from({ length: Math.max(0, count) }, (_, index) => addDays(today, -index));
@@ -142,7 +143,7 @@ export function timelineItemsToCsv(items = []) {
       activityActionLabel(value),
       activityEventKindLabel(value),
       value.actor || "",
-      value.title || value.externalId || "",
+      [value.title || value.externalId || "", jiraWorklogFromActivity(value)?.note].filter(Boolean).join(" — "),
       value.targetUrl || "",
     ];
   });
@@ -257,11 +258,13 @@ export function activityProviderLabel(provider) {
     github: "GitHub",
     gitlab: "GitLab",
     trello: "Trello",
+    jira: "Jira",
     calendar: "Calendar",
   }[provider] || provider || "Provider";
 }
 
 export function activityActionLabel(activity) {
+  if (activity?.provider === "jira" && activity.eventType === "worklog") return activity.actionLabel || "Logged time";
   const label = activity?.actionLabel || activity?.eventType || "Activity";
   const normalized = label.toLowerCase();
   const eventType = String(activity?.eventType || "").toLowerCase();
@@ -283,6 +286,7 @@ export function activityActionLabel(activity) {
 }
 
 export function activityActionFilterKey(activity) {
+  if (activity?.provider === "jira" && activity.eventType === "worklog") return "Logged time";
   const label = activityActionLabel(activity);
   return label.toLocaleLowerCase().startsWith("moved:") ? "Moved" : label;
 }
@@ -298,6 +302,8 @@ export function filterActivitiesByActionBadges(activities = [], disabledActionKe
 }
 
 export function activityEventKindLabel(activity) {
+  if (activity?.provider === "jira" && activity.eventType === "worklog") return "Worklog";
+  if (activity?.provider === "jira") return String(activity.eventType).includes("comment") ? "Comment" : "Issue";
   const type = activity?.eventType || "";
   const normalized = type.toLowerCase();
   if (normalized.includes("pullrequest") || normalized.includes("mergerequest") || normalized.includes("merge_request") || normalized.includes("merge request")) {
@@ -320,6 +326,7 @@ export function activityActionClassName(label) {
   if (normalized === "moved" || normalized.startsWith("moved:")) return "border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300";
   if (normalized === "changed") return "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300";
   if (normalized === "commented") return "border-cyan-200 bg-cyan-50 text-cyan-800 dark:border-cyan-900 dark:bg-cyan-950/40 dark:text-cyan-300";
+  if (normalized.startsWith("logged ")) return "border-violet-200 bg-violet-50 text-violet-800 dark:border-violet-900 dark:bg-violet-950/40 dark:text-violet-300";
   if (normalized === "merged") return "border-purple-200 bg-purple-50 text-purple-800 dark:border-purple-900 dark:bg-purple-950/40 dark:text-purple-300";
   if (normalized === "closed" || normalized === "deleted") return "border-red-200 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300";
   return "border-border bg-muted text-muted-foreground";

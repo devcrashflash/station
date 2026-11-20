@@ -1,5 +1,6 @@
-import { CalendarDays, ExternalLink, GitPullRequest, Ticket } from "lucide-react";
+import { Clock, CalendarDays, ExternalLink, GitPullRequest, Ticket } from "lucide-react";
 
+import { formatJiraLoggedTime } from "@/lib/jira";
 import { Badge } from "@/components/ui/badge";
 import { activityActionClassName } from "@/lib/activity";
 import { openExternalUrl } from "@/lib/externalLinks";
@@ -11,6 +12,11 @@ const externalSurfaceClassName = "cursor-pointer transition-colors hover:bg-mute
 export function DaySummaryPreview({ summary }) {
   return (
     <div className="grid min-w-0 gap-7">
+      {summary.jiraWorklogCount > 0 && <div className="flex items-center gap-2 rounded-lg border bg-card p-4">
+        <Clock className="size-5 text-violet-600" />
+        <p className="font-medium">Jira hours logged: {formatJiraLoggedTime(summary.jiraLoggedSeconds)}</p>
+        <span className="text-sm text-muted-foreground">({summary.jiraWorklogCount} {summary.jiraWorklogCount === 1 ? "entry" : "entries"})</span>
+      </div>}
       {summary.sections.map((section) => (
         <section className="grid min-w-0 gap-3" key={section.id}>
           <div className="flex min-w-0 items-center gap-2 border-b pb-2">
@@ -28,6 +34,14 @@ export function DaySummaryPreview({ summary }) {
                     <ActionBadges actions={ticket.ticketActions} />
                   </SummaryRow>
                 )}
+                {ticket.worklogs?.length > 0 && <SummaryRow label="Jira hours" icon={Clock}>
+                  <div className="grid min-w-0 gap-2">
+                    {ticket.worklogs.map((worklog) => <div className="min-w-0 rounded-md border bg-background p-3" key={worklog.id}>
+                      <p className="text-sm font-medium">Logged {formatJiraLoggedTime(worklog.seconds)}{worklog.author ? ` · ${worklog.author}` : ""}</p>
+                      {worklog.note && <p className="mt-1 whitespace-pre-wrap break-words text-sm text-muted-foreground select-text cursor-text [overflow-wrap:anywhere]">{worklog.note}</p>}
+                    </div>)}
+                  </div>
+                </SummaryRow>}
                 {ticket.providers.map((provider) => (
                   <ProviderGroup key={provider.provider} provider={provider} />
                 ))}
@@ -39,7 +53,7 @@ export function DaySummaryPreview({ summary }) {
             <article className="rounded-lg border border-dashed bg-muted/15 p-4">
               <div className="mb-4">
                 <h3 className="font-semibold">Unknown ticket</h3>
-                <p className="text-xs text-muted-foreground">Activity mapped to this project without a Trello ticket.</p>
+                <p className="text-xs text-muted-foreground">Activity mapped to this project without a linked ticket.</p>
               </div>
               <div className="grid gap-4">
                 {section.unknownProviders.map((provider) => (
@@ -116,7 +130,7 @@ function TicketHeader({ ticket }) {
       href={ticket.url || undefined}
       target={ticket.url ? "_blank" : undefined}
       rel={ticket.url ? "noreferrer" : undefined}
-      title={ticket.url ? "Open Trello ticket" : undefined}
+      title={ticket.url ? `Open ${ticket.provider === "jira" ? "Jira" : "Trello"} ticket` : undefined}
       onClick={ticket.url ? (event) => {
         event.preventDefault();
         void openExternalUrl(ticket.url);
@@ -128,7 +142,7 @@ function TicketHeader({ ticket }) {
         </div>
         <div className="min-w-0">
           <h3 className="break-words font-semibold leading-5 select-text cursor-text [overflow-wrap:anywhere]">{ticket.title}</h3>
-          <p className="mt-0.5 text-xs text-muted-foreground">Trello ticket</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">{ticket.provider === "jira" ? "Jira issue" : "Trello ticket"}</p>
         </div>
       </div>
       {ticket.url && <ExternalLink className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />}

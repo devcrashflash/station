@@ -22,7 +22,7 @@ The same overlay surfaces recent Codex and Claude sessions, prioritizes agents w
 - **Keep project context close.** Group tasks with repositories, boards, local checkouts, related work, and external conversation history.
 - **Run tools beside your work.** Keep persistent built-in terminal tabs, split panes, searchable output, and detected file links inside the workspace.
 - **Review and delegate.** Open pull-request reviews inside Station or hand a task to reusable Codex and Claude prompts.
-- **See the shape of your day.** Combine calendar events with GitHub, GitLab, and Trello activity in a searchable timeline and Markdown summary.
+- **See the shape of your day.** Combine calendar events with GitHub, GitLab, Trello, and Jira activity in a searchable timeline and Markdown summary.
 - **Stay productive offline.** Projects, tasks, resources, and most organization workflows load from the local database first.
 
 ## A complete developer workspace
@@ -53,7 +53,11 @@ Check out a linked GitHub pull request or GitLab merge request, inspect the real
 
 ### Connected services
 
-Connect GitHub, GitLab, Trello, Google Calendar, CalDAV, or calendar URLs. Connections are enabled per project so each workspace syncs only the context it needs.
+Connect GitHub, GitLab, Trello, Jira Cloud, Google Calendar, CalDAV, or calendar URLs. Connections are enabled per project so each workspace syncs only the context it needs.
+
+For Jira Cloud, add a named connection with your site URL (for example `https://company.atlassian.net`), account email, API token, and scoped/unscoped token mode. Multiple sites and accounts are supported. Enable the connection in a Station project, then paste a Jira project or issue URL to connect it. Scoped tokens use the Atlassian API gateway; issue links still open on your Jira site.
+
+Read-only Jira tokens work for personal activities, assigned issues in Smart Inbox, and linked-task refresh. Jira worklogs appear on their recorded work date with the duration and note, plus a separate Jira hours total in daily summaries. Refreshing a day reconciles edited or deleted worklogs. Worklog reading requires Jira time tracking and worklog read access; if unavailable, Station keeps cached hours and refreshes other Jira activities. Import issues as Station tasks to show them on the dashboard. To create an issue from an unlinked local task, choose **Create Jira ticket**, select a connected Jira project and issue type, and edit its title and description. Creation requires write access and Jira project permission. Projects requiring additional fields offer **Open in Jira**; Station does not edit workflows or issue statuses. Jira Data Center and OAuth are not supported.
 
 ![Station settings showing synthetic GitHub, GitLab, Trello, and CalDAV connections](docs/assets/station-connections.png)
 

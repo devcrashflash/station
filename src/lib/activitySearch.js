@@ -1,3 +1,4 @@
+import { jiraWorklogFromActivity } from "./jira.js";
 import {
   activityActionLabel,
   activityEventKindLabel,
@@ -35,6 +36,7 @@ function timelineItemSearchValues(item) {
     activityActionLabel(activity),
     activityEventKindLabel(activity),
     activity.actor,
+    jiraWorklogFromActivity(activity)?.note,
     activity.title || activity.externalId,
     activity.connectionName || activity.connectionId,
   ];

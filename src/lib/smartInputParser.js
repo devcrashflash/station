@@ -23,6 +23,16 @@ export function parseSmartInput(value) {
     };
   }
 
+  const jiraIssue = parsedUrl.pathname.match(/^\/browse\/([A-Z][A-Z0-9_]*-\d+)\/?$/i);
+  const jiraProject = parsedUrl.pathname.match(/^\/(?:jira\/[^/]+\/(?:c\/)?projects|plugins\/servlet\/project-config)\/([A-Z][A-Z0-9_]*)/i)
+    || parsedUrl.pathname.match(/^\/projects\/([A-Z][A-Z0-9_]*)/i);
+  if (parsedUrl.protocol === "https:" && parsedUrl.hostname.endsWith(".atlassian.net") && (jiraIssue || jiraProject)) {
+    const key = (jiraIssue || jiraProject)[1].toUpperCase();
+    return { kind: jiraIssue ? "jira_issue" : "jira_project", provider: "jira",
+      externalId: `${parsedUrl.hostname}:${key}`, url: `${parsedUrl.origin}${parsedUrl.pathname}`,
+      title: jiraIssue ? key : `Jira project ${key}` };
+  }
+
   const trelloBoard = parsedUrl.pathname.match(/^\/b\/([^/]+)/);
   if (parsedUrl.hostname.endsWith("trello.com") && trelloBoard) {
     return {

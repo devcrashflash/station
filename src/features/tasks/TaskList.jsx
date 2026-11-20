@@ -34,6 +34,7 @@ export function TaskList({
           github: "GitHub",
           gitlab: "GitLab",
           trello: "Trello",
+          jira: "Jira",
         }[task.sourceProvider] || "Provider";
 
         return (
