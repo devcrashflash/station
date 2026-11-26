@@ -895,3 +895,57 @@ body.terminal-window #root {
     color: var(--syntax-operator);
   }
 }
+
+.terminal-quickstart-bar {
+  position: fixed;
+  z-index: 2;
+  width: max-content;
+  max-width: calc(100vw - 16px);
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--background);
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.terminal-quickstart-commands {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.terminal-quickstart-bar button {
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.terminal-quickstart-bar button:disabled { opacity: 0.6; cursor: default; }
+
+.terminal-quickstart-bar .terminal-quickstart-dismiss {
+  color: var(--foreground);
+  justify-content: center;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 4px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.terminal-quickstart-bar button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.terminal-quickstart-bar .terminal-quickstart-dismiss:hover { background: var(--muted); }

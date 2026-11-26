@@ -1,3 +1,4 @@
+import { defaultQuickstartRules, migrateLegacyComposeQuickstartRules, validateQuickstartRules } from "./terminalQuickstart.js";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -58,6 +59,7 @@ const defaultState = {
   aiSessionSettings: { ...DEFAULT_AI_SESSION_SETTINGS },
   aiSessionArchives: [],
   terminalSettings: {
+    quickstartRules: defaultQuickstartRules(),
     newTabDirectory: null,
     newPaneDirectory: null,
     inactivePaneOpacity: 0.65,
@@ -927,7 +929,13 @@ const local = {
   },
 
   listTerminalSettings() {
-    const settings = { ...defaultState.terminalSettings, ...readState().terminalSettings };
+    const state = readState();
+    if (!state.terminalQuickstartComposeYamlMigrated) {
+      state.terminalSettings = { ...state.terminalSettings, quickstartRules: migrateLegacyComposeQuickstartRules(state.terminalSettings?.quickstartRules ?? defaultQuickstartRules()) };
+      state.terminalQuickstartComposeYamlMigrated = true;
+      writeState(state);
+    }
+    const settings = { ...defaultState.terminalSettings, ...state.terminalSettings };
     const storedLineHeight = Number(settings.lineHeight);
     const storedHorizontalSpacing = Number(settings.horizontalSpacing);
     const storedScrollbackLines = Number(settings.scrollbackLines);
@@ -964,7 +972,11 @@ const local = {
           : "Each terminal action must use a unique shortcut.");
     }
     const shortcuts = normalizeTerminalShortcuts(requestedShortcuts);
+    const quickstartRules = validateQuickstartRules(input.quickstartRules ?? (state.terminalQuickstartComposeYamlMigrated
+      ? state.terminalSettings?.quickstartRules ?? defaultQuickstartRules()
+      : migrateLegacyComposeQuickstartRules(state.terminalSettings?.quickstartRules ?? defaultQuickstartRules())));
     state.terminalSettings = {
+      quickstartRules,
       newTabDirectory: input.newTabDirectory?.trim() || null,
       newPaneDirectory: input.newPaneDirectory?.trim() || null,
       inactivePaneOpacity: Number.isFinite(requestedOpacity)
@@ -997,6 +1009,7 @@ const local = {
       shortcuts,
       profileDirectory: state.terminalSettings?.profileDirectory || "~",
     };
+    state.terminalQuickstartComposeYamlMigrated = true;
     writeState(state);
     return state.terminalSettings;
   },

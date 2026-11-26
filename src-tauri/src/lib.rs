@@ -1709,6 +1709,8 @@ pub fn run() {
             terminal_tabs::install_terminal_shell_integration,
             terminal_tabs::uninstall_terminal_shell_integration,
             terminal_tabs::get_terminal_layout,
+            terminal_tabs::quickstart::preview_terminal_quickstart,
+            terminal_tabs::quickstart::activate_terminal_quickstart,
             terminal_tabs::create_terminal_tab,
             terminal_tabs::open_ai_session_terminal,
             terminal_tabs::complete_terminal_startup_input,

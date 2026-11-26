@@ -1,3 +1,6 @@
+#[path = "terminal_quickstart.rs"]
+pub mod quickstart;
+
 #[cfg(windows)]
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
@@ -118,12 +121,14 @@ pub struct TerminalSettings {
     horizontal_spacing: f64,
     scrollback_lines: u32,
     shortcuts: TerminalShortcuts,
+    quickstart_rules: Vec<quickstart::QuickstartRule>,
     profile_directory: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TerminalShortcuts {
+    quickstart: String,
     split_columns: String,
     split_rows: String,
     search: String,
@@ -139,6 +144,7 @@ pub struct TerminalShortcuts {
 impl Default for TerminalShortcuts {
     fn default() -> Self {
         Self {
+            quickstart: "CommandOrControl+KeyS".into(),
             split_columns: "CommandOrControl+KeyD".into(),
             split_rows: "CommandOrControl+Shift+KeyD".into(),
             search: "CommandOrControl+KeyF".into(),
@@ -177,6 +183,7 @@ pub struct TerminalSettingsInput {
     horizontal_spacing: Option<f64>,
     scrollback_lines: Option<i64>,
     shortcuts: Option<TerminalShortcuts>,
+    quickstart_rules: Option<Vec<quickstart::QuickstartRule>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1815,6 +1822,7 @@ fn terminate_tab_sessions(runtime: &mut TerminalTabsRuntime, tab_id: &str) {
     }
     for pane_id in pane_ids {
         terminate_session(runtime, &pane_id);
+        runtime.pending_input.remove(&pane_id);
     }
 }
 
@@ -2579,8 +2587,9 @@ fn terminal_shortcut_signature(shortcut: &str) -> Option<String> {
     ))
 }
 
-fn terminal_shortcut_entries(shortcuts: &TerminalShortcuts) -> [(&'static str, &str); 10] {
+fn terminal_shortcut_entries(shortcuts: &TerminalShortcuts) -> [(&'static str, &str); 11] {
     [
+        ("Quickstart", &shortcuts.quickstart),
         ("Split pane right", &shortcuts.split_columns),
         ("Split pane down", &shortcuts.split_rows),
         ("Search terminal output", &shortcuts.search),
@@ -2639,7 +2648,8 @@ fn terminal_shortcuts(db: &SqliteConnection) -> TerminalShortcuts {
             .unwrap_or(fallback)
             .to_string()
     };
-    let shortcuts = TerminalShortcuts {
+    let mut shortcuts = TerminalShortcuts {
+        quickstart: valid_or("quickstart", &defaults.quickstart),
         split_columns: valid_or("splitColumns", &defaults.split_columns),
         split_rows: valid_or("splitRows", &defaults.split_rows),
         search: valid_or("search", &defaults.search),
@@ -2651,6 +2661,25 @@ fn terminal_shortcuts(db: &SqliteConnection) -> TerminalShortcuts {
         focus_pane_up: valid_or("focusPaneUp", &defaults.focus_pane_up),
         focus_pane_down: valid_or("focusPaneDown", &defaults.focus_pane_down),
     };
+    // Preserve legacy assignments to Cmd/Ctrl+S when introducing the new action.
+    if !values.contains_key("quickstart") {
+        let used: HashSet<_> = terminal_shortcut_entries(&shortcuts)
+            .into_iter()
+            .skip(1)
+            .filter_map(|(_, shortcut)| terminal_shortcut_signature(shortcut))
+            .collect();
+        if terminal_shortcut_signature(&shortcuts.quickstart)
+            .is_some_and(|value| used.contains(&value))
+        {
+            shortcuts.quickstart = std::iter::once("CommandOrControl+Shift+KeyS".to_string())
+                .chain((1..=12).map(|number| format!("CommandOrControl+Alt+Shift+F{number}")))
+                .find(|shortcut| {
+                    terminal_shortcut_signature(shortcut)
+                        .is_some_and(|value| !used.contains(&value))
+                })
+                .unwrap_or_else(|| defaults.quickstart.clone());
+        }
+    }
     validate_terminal_shortcuts(&shortcuts).map_or(defaults, |_| shortcuts)
 }
 
@@ -2986,6 +3015,7 @@ pub fn list_terminal_settings(
         horizontal_spacing: terminal_horizontal_spacing(&db),
         scrollback_lines: terminal_scrollback_lines(&db),
         shortcuts: terminal_shortcuts(&db),
+        quickstart_rules: quickstart::load(&db)?,
         profile_directory: profile_directory.to_string_lossy().into_owned(),
     })
 }
@@ -3087,6 +3117,11 @@ pub fn save_terminal_settings(
             .unwrap_or_else(|| copy_on_selection(&db));
         let shortcuts = requested_shortcuts.unwrap_or_else(|| terminal_shortcuts(&db));
         validate_terminal_shortcuts(&shortcuts)?;
+        let quickstart_rules = match input.quickstart_rules {
+            Some(rules) => rules,
+            None => quickstart::load(&db)?,
+        };
+        quickstart::validate_for_save(&quickstart_rules)?;
         set_app_setting(
             &db,
             NEW_TAB_DIRECTORY_SETTING_KEY,
@@ -3142,6 +3177,7 @@ pub fn save_terminal_settings(
             Some(&scrollback_lines.to_string()),
         )
         .map_err(db_error)?;
+        quickstart::save(&db, &quickstart_rules)?;
         let shortcuts_json = serde_json::to_string(&shortcuts).map_err(db_error)?;
         set_app_setting(&db, SHORTCUTS_SETTING_KEY, Some(&shortcuts_json)).map_err(db_error)?;
     }
@@ -5050,6 +5086,17 @@ mod tests {
             shortcuts.focus_pane_left,
             TerminalShortcuts::default().focus_pane_left
         );
+
+        set_app_setting(
+            &db,
+            SHORTCUTS_SETTING_KEY,
+            Some(r#"{"search":"CommandOrControl+KeyS"}"#),
+        )
+        .unwrap();
+        let migrated = terminal_shortcuts(&db);
+        assert_eq!(migrated.search, "CommandOrControl+KeyS");
+        assert_eq!(migrated.quickstart, "CommandOrControl+Shift+KeyS");
+        assert!(validate_terminal_shortcuts(&migrated).is_ok());
 
         let legacy_shortcuts: TerminalShortcuts = serde_json::from_str(
             r#"{"splitColumns":"Control+KeyD","splitRows":"Control+Shift+KeyD","search":"Control+KeyF","clear":"Super+KeyK","zoomIn":"Control+Equal","zoomOut":"Control+Minus"}"#,

@@ -1,3 +1,4 @@
+import { defaultQuickstartRules, validateQuickstartRules } from "@/lib/terminalQuickstart";
 import { useEffect, useRef, useState } from "react";
 import { AtSign, Bot, CalendarDays, ChevronDown, FolderOpen, GitMerge, GitPullRequest, Keyboard, LoaderCircle, Monitor, Palette, Pencil, PlugZap, RefreshCw, RotateCcw, Signpost, SquareKanban, SquareTerminal, Trash2, UserRound } from "lucide-react";
 
@@ -1767,6 +1768,7 @@ function TerminalTab({
   const [lineHeight, setLineHeight] = useState(String(settings?.lineHeight ?? 100));
   const [horizontalSpacing, setHorizontalSpacing] = useState(String(settings?.horizontalSpacing ?? 100));
   const [scrollbackLines, setScrollbackLines] = useState(String(settings?.scrollbackLines ?? 10_000));
+  const [quickstartRules, setQuickstartRules] = useState(() => settings?.quickstartRules ?? defaultQuickstartRules());
   const [shortcuts, setShortcuts] = useState(() => normalizeTerminalShortcuts(settings?.shortcuts));
   const [recordingAction, setRecordingAction] = useState(null);
   const recordingActionRef = useRef(null);
@@ -1790,8 +1792,9 @@ function TerminalTab({
     setLineHeight(String(settings?.lineHeight ?? 100));
     setHorizontalSpacing(String(settings?.horizontalSpacing ?? 100));
     setScrollbackLines(String(settings?.scrollbackLines ?? 10_000));
+    setQuickstartRules(settings?.quickstartRules ?? defaultQuickstartRules());
     setShortcuts(normalizeTerminalShortcuts(settings?.shortcuts));
-  }, [settings?.newTabDirectory, settings?.newPaneDirectory, settings?.inactivePaneOpacity, settings?.closeTerminalsOnAppExit, settings?.copyOnSelection, settings?.fontFamily, settings?.fontWeight, settings?.fontStyle, settings?.fontSize, settings?.lineHeight, settings?.horizontalSpacing, settings?.scrollbackLines, settings?.shortcuts]);
+  }, [settings?.quickstartRules, settings?.newTabDirectory, settings?.newPaneDirectory, settings?.inactivePaneOpacity, settings?.closeTerminalsOnAppExit, settings?.copyOnSelection, settings?.fontFamily, settings?.fontWeight, settings?.fontStyle, settings?.fontSize, settings?.lineHeight, settings?.horizontalSpacing, settings?.scrollbackLines, settings?.shortcuts]);
 
   useEffect(() => () => setTerminalShortcutRecording(false), []);
 
@@ -1947,7 +1950,9 @@ function TerminalTab({
             ? "Terminal shortcuts cannot replace Cmd/Ctrl+T, Cmd/Ctrl+W, or Cmd/Ctrl+0–9."
             : "Each terminal action must use a unique shortcut.");
       }
+      validateQuickstartRules(quickstartRules);
       await onSave({
+        quickstartRules,
         newTabDirectory,
         newPaneDirectory,
         inactivePaneOpacity,
@@ -2226,6 +2231,46 @@ function TerminalTab({
         </div>
       </FieldSet>
 
+      <details className="group rounded-lg border">
+        <summary className="flex cursor-pointer items-center justify-between gap-3 p-4 text-sm font-medium">
+          Quickstart
+          <ChevronDown className="size-4 text-muted-foreground transition-transform group-open:rotate-180" />
+        </summary>
+        <div className="grid gap-3 border-t p-4">
+          <p className="text-xs text-muted-foreground">Offer commands when path conditions match a single pane’s current directory. Rules run only when you activate Quickstart. Order controls placement within each side.</p>
+          <p className="text-xs text-muted-foreground">
+            Relative paths check for existing files or directories. Absolute directory conditions must end in <code>/</code>: <code>/Projects/app/</code> matches that directory only, <code>/Projects/*/</code> matches immediate children, and <code>/Projects/**/</code> matches descendants at any depth. Both wildcard examples exclude <code>/Projects/</code> itself. Absolute file checks are not supported.
+          </p>
+          {quickstartRules.map((rule, index) => {
+            const update = (patch) => setQuickstartRules((current) => current.map((item) => item.id === rule.id ? { ...item, ...patch } : item));
+            const move = (offset) => setQuickstartRules((current) => {
+              const next = [...current];
+              [next[index], next[index + offset]] = [next[index + offset], next[index]];
+              return next;
+            });
+            return (
+              <div key={rule.id} className="grid gap-3 rounded-md border p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={rule.enabled} onChange={(event) => update({ enabled: event.target.checked })} />Enabled</label>
+                  <Button type="button" size="sm" variant="outline" aria-label={`Move ${rule.name || "rule"} up`} disabled={index === 0} onClick={() => move(-1)}>↑</Button>
+                  <Button type="button" size="sm" variant="outline" aria-label={`Move ${rule.name || "rule"} down`} disabled={index === quickstartRules.length - 1} onClick={() => move(1)}>↓</Button>
+                  <Button type="button" size="sm" variant="outline" aria-label={`Delete ${rule.name || "rule"}`} onClick={() => setQuickstartRules((current) => current.filter((item) => item.id !== rule.id))}><Trash2 /></Button>
+                </div>
+                <Field><FieldLabel htmlFor={`quickstart-name-${rule.id}`}>Name</FieldLabel><Input id={`quickstart-name-${rule.id}`} value={rule.name} onChange={(event) => update({ name: event.target.value })} /></Field>
+                <Field><FieldLabel htmlFor={`quickstart-paths-${rule.id}`}>Path conditions (one per line)</FieldLabel><Textarea id={`quickstart-paths-${rule.id}`} rows={2} value={rule.paths.join("\n")} onChange={(event) => update({ paths: event.target.value.split("\n") })} /></Field>
+                <div className="flex flex-wrap gap-4">
+                  <label className="grid gap-1 text-sm">Match<select className="rounded-md border bg-background p-2" value={rule.matchMode} onChange={(event) => update({ matchMode: event.target.value })}><option value="any">Any condition matches</option><option value="all">All conditions match</option></select></label>
+                  <label className="grid gap-1 text-sm">Position<select className="rounded-md border bg-background p-2" value={rule.position} onChange={(event) => update({ position: event.target.value })}>{["left", "right", "top", "bottom"].map((position) => <option key={position} value={position}>{position}</option>)}</select></label>
+                </div>
+                <Field><FieldLabel htmlFor={`quickstart-command-${rule.id}`}>Command</FieldLabel><Textarea id={`quickstart-command-${rule.id}`} rows={2} value={rule.command} onChange={(event) => update({ command: event.target.value })} /></Field>
+              </div>
+            );
+          })}
+          {!quickstartRules.length && <p className="text-sm text-muted-foreground">No Quickstart rules configured.</p>}
+          <Button type="button" variant="outline" onClick={() => setQuickstartRules((current) => [...current, { id: crypto.randomUUID(), name: "", enabled: true, paths: [""], matchMode: "any", command: "", position: "right" }])}>Add rule</Button>
+        </div>
+      </details>
+
       <details
         className="group rounded-lg border"
         onToggle={(event) => {
@@ -2285,7 +2330,7 @@ function TerminalTab({
           {isSaving && <LoaderCircle className="animate-spin" />}
           Save terminal
         </Button>
-        <Button type="button" variant="outline" onClick={() => { stopShortcutRecording(); setShortcutError(""); setNewTabDirectory(""); setNewPaneDirectory(""); setInactivePaneOpacity(0.65); setCloseTerminalsOnAppExit(false); setCopyOnSelection(true); setFontFamily("ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"); setFontSize("13"); setLineHeight("100"); setHorizontalSpacing("100"); setScrollbackLines("10000"); setShortcuts({ ...DEFAULT_TERMINAL_SHORTCUTS }); }}>
+        <Button type="button" variant="outline" onClick={() => { stopShortcutRecording(); setShortcutError(""); setNewTabDirectory(""); setNewPaneDirectory(""); setInactivePaneOpacity(0.65); setCloseTerminalsOnAppExit(false); setCopyOnSelection(true); setFontFamily("ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"); setFontSize("13"); setLineHeight("100"); setHorizontalSpacing("100"); setScrollbackLines("10000"); setShortcuts({ ...DEFAULT_TERMINAL_SHORTCUTS }); setQuickstartRules(defaultQuickstartRules()); }}>
           <RotateCcw className="size-4" />
           Restore defaults
         </Button>

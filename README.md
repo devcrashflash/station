@@ -39,6 +39,24 @@ Terminal applications can copy UTF-8 text to your local clipboard using OSC 52, 
 
 To test from a shell inside Station: `printf '\033]52;c;%s\007' "$(printf 'Hello from Station' | base64 | tr -d '\n')"`, then paste into another application.
 
+### Project Quickstart
+
+Start your project services with one shortcut. In a terminal tab with a single pane, Quickstart detects matching files in the current directory and shows the commands beneath the input line. Click **Quickstart** or press **Cmd+S** (**Ctrl+S** outside macOS) to start all matching commands in their own panes while keeping focus on your shell.
+
+Configure conditions, commands, rule order, and pane positions under **Settings → Terminal → Quickstart**. Docker Compose and Symfony rules are included by default. Dismiss the bar with **×** or **Esc**; it reappears when you change directories and rules match again. Commands only run when you activate Quickstart and are never replayed when restoring tabs.
+
+Path conditions are relative by default: `public/index.php` checks for a file beneath the current directory. Absolute directory conditions must end in `/` and match the current directory itself:
+
+| Condition | Matches |
+| --- | --- |
+| `/Users/alex/Projects/storefront/` | Exactly the `storefront` directory |
+| `/Users/alex/Projects/*/` | Immediate child directories only |
+| `/Users/alex/Projects/**/` | Descendant directories at any depth |
+
+Both wildcard examples exclude `/Users/alex/Projects/` itself. Use **All conditions match** to combine a directory condition with a relative file check, or **Any condition matches** for alternatives. Absolute file checks are rejected; relative checks keep their existing literal-path behavior.
+
+![Quickstart beneath the terminal prompt, offering Docker Compose and Symfony with a single Cmd+S button and X/Esc dismissal](docs/assets/station-quickstart.png)
+
 ### AI Commands on every task
 
 Turn reusable Codex and Claude prompts into task-level commands. The task retains its description, provider context, related work, and local repositories while the agent runs in the configured desktop or CLI environment.

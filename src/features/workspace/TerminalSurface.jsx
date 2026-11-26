@@ -1,4 +1,6 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { canHandleQuickstartShortcut, clearQuickstartDismissalOnDirectoryChange } from "@/lib/terminalQuickstart";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { X } from "lucide-react";
 import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -10,6 +12,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 
 import { Kbd } from "@/components/ui/kbd";
+import { Button } from "@/components/ui/button";
 import {
   TERMINAL_WORD_SEPARATORS,
   adjacentTerminalPaneId,
@@ -872,6 +875,7 @@ function normalizeTerminalSettings(settings = {}) {
   return {
     inactivePaneOpacity: settings.inactivePaneOpacity ?? 0.65,
     copyOnSelection: settings.copyOnSelection ?? true,
+    quickstartRules: settings.quickstartRules,
     shortcuts: normalizeTerminalShortcuts(settings.shortcuts),
     typography: {
       fontFamily: settings.fontFamily || DEFAULT_TERMINAL_SETTINGS.typography.fontFamily,
@@ -1086,6 +1090,69 @@ function TerminalTabSurface({
   );
 }
 
+function TerminalQuickstartBar({ paneId, children }) {
+  const registry = useContext(TerminalDropRegistry);
+  const barRef = useRef(null);
+  const [position, setPosition] = useState(null);
+
+  useLayoutEffect(() => {
+    let disposed = false;
+    let frame = 0;
+    let watchedTerminal = null;
+    let subscriptions = [];
+    const bar = barRef.current;
+    function schedule() {
+      if (disposed) return;
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(place);
+    }
+    function place() {
+      if (disposed) return;
+      const target = registry.current.get(paneId)?.();
+      const terminal = target?.terminal;
+      const screen = terminal?.element?.querySelector(".xterm-screen")?.getBoundingClientRect();
+      const pane = target?.host?.closest("[data-pane-id]")?.getBoundingClientRect();
+      if (!screen?.width || !screen?.height || !pane || !terminal.cols || !terminal.rows) {
+        schedule();
+        return;
+      }
+      if (terminal !== watchedTerminal) {
+        subscriptions.forEach((subscription) => subscription.dispose());
+        watchedTerminal = terminal;
+        subscriptions = [terminal.onCursorMove(schedule), terminal.onScroll(schedule), terminal.onResize(schedule)];
+      }
+      const buffer = terminal.buffer.active;
+      const row = buffer.baseY + buffer.cursorY - buffer.viewportY;
+      if (row < 0 || row >= terminal.rows) { setPosition(null); return; }
+      const cellHeight = screen.height / terminal.rows;
+      const lineTop = screen.top + row * cellHeight;
+      const height = bar.getBoundingClientRect().height;
+      const below = lineTop + cellHeight + 2;
+      // At the last viewport line, keep the bar above the input instead of covering it.
+      const top = below + height <= pane.bottom ? below : Math.max(pane.top, lineTop - height - 2);
+      const next = { left: pane.left + 8, top, maxWidth: Math.max(0, pane.width - 16) };
+      setPosition((current) => current?.left === next.left && current?.top === next.top && current?.maxWidth === next.maxWidth ? current : next);
+    }
+    schedule();
+    const observer = new ResizeObserver(schedule);
+    observer.observe(bar);
+    window.addEventListener("resize", schedule);
+    return () => {
+      disposed = true;
+      cancelAnimationFrame(frame);
+      subscriptions.forEach((subscription) => subscription.dispose());
+      observer.disconnect();
+      window.removeEventListener("resize", schedule);
+    };
+  }, [paneId, registry]);
+
+  return (
+    <div ref={barRef} className="terminal-quickstart-bar" style={{ ...position, visibility: position ? "visible" : "hidden" }}>
+      {children}
+    </div>
+  );
+}
+
 export function TerminalWorkspace() {
   const effectiveTheme = useSynchronizedTheme();
   const [snapshot, setSnapshot] = useState({ tabs: [], activeTabId: "main" });
@@ -1098,6 +1165,148 @@ export function TerminalWorkspace() {
   activeTabRef.current = snapshot.activeTabId;
   const dropControllerRef = useRef(null);
   const [dropError, setDropError] = useState(null);
+  const [quickstartPreview, setQuickstartPreview] = useState(null);
+  const [dismissedQuickstarts, setDismissedQuickstarts] = useState({});
+  const [quickstartBusy, setQuickstartBusy] = useState(false);
+  const [quickstartError, setQuickstartError] = useState(null);
+  const quickstartBusyRef = useRef(false);
+  const activeLayout = layouts[snapshot.activeTabId];
+  const quickstartEligible = activeLayout?.root?.type === "pane" && activeLayout.root.running !== false;
+  const quickstartVisible = quickstartEligible
+    && quickstartPreview?.tabId === snapshot.activeTabId
+    && quickstartPreview.rules.length > 0
+    && dismissedQuickstarts[snapshot.activeTabId]?.cwd !== quickstartPreview.cwd;
+
+  const dismissQuickstart = useCallback(() => {
+    if (!quickstartVisible || quickstartBusyRef.current) return;
+    setDismissedQuickstarts((current) => ({
+      ...current,
+      [quickstartPreview.tabId]: {
+        cwd: quickstartPreview.cwd,
+        paneId: activeLayout.root.paneId,
+        paneCwd: activeLayout.root.cwd,
+      },
+    }));
+    document.querySelector(`[data-pane-id="${CSS.escape(quickstartPreview.paneId)}"] .xterm-helper-textarea`)?.focus();
+  }, [quickstartVisible, quickstartPreview, activeLayout]);
+
+  useEffect(() => {
+    setDismissedQuickstarts((current) => {
+      const remaining = Object.fromEntries(Object.entries(current).filter(([tabId, dismissed]) => {
+        const root = layouts[tabId]?.root;
+        return snapshot.tabs.some((tab) => tab.id === tabId)
+          && (!root || (root.type === "pane" && root.paneId === dismissed.paneId && root.cwd === dismissed.paneCwd));
+      }));
+      return Object.keys(remaining).length === Object.keys(current).length ? current : remaining;
+    });
+  }, [layouts, snapshot.tabs]);
+
+  useEffect(() => {
+    let disposed = false;
+    let pending = false;
+    let refreshRequested = false;
+    let frame = 0;
+    let outputTimer = 0;
+    let outputSubscription = null;
+    setQuickstartPreview(null);
+    if (!quickstartEligible) return undefined;
+    async function refresh() {
+      if (disposed || quickstartBusyRef.current) return;
+      if (pending) { refreshRequested = true; return; }
+      pending = true;
+      try {
+        const next = await invoke("preview_terminal_quickstart", { tabId: snapshot.activeTabId });
+        if (!disposed && !quickstartBusyRef.current) {
+          setQuickstartPreview(next);
+          setDismissedQuickstarts((current) => clearQuickstartDismissalOnDirectoryChange(current, next));
+        }
+      } catch (error) {
+        if (!disposed) { setQuickstartPreview(null); setQuickstartError(error?.message || String(error)); }
+      } finally {
+        pending = false;
+        if (refreshRequested && !disposed) {
+          refreshRequested = false;
+          refresh();
+        }
+      }
+    }
+    function watchTerminalOutput() {
+      const terminal = dropRegistry.current.get(activeLayout.root.paneId)?.().terminal;
+      if (!terminal) { frame = requestAnimationFrame(watchTerminalOutput); return; }
+      outputSubscription = terminal.onWriteParsed(() => {
+        // Shells without OSC 7 still print a new prompt after changing directory.
+        // Coalesce output bursts instead of spawning a cwd lookup for every write.
+        clearTimeout(outputTimer);
+        outputTimer = setTimeout(refresh, 75);
+      });
+      refresh();
+    }
+    refresh();
+    frame = requestAnimationFrame(watchTerminalOutput);
+    const interval = setInterval(refresh, 2000);
+    window.addEventListener("focus", refresh);
+    return () => {
+      disposed = true;
+      clearInterval(interval);
+      clearTimeout(outputTimer);
+      cancelAnimationFrame(frame);
+      outputSubscription?.dispose();
+      window.removeEventListener("focus", refresh);
+    };
+  }, [snapshot.activeTabId, activeLayout?.root?.cwd, activeLayout?.root?.paneId, settings.quickstartRules, quickstartEligible]);
+
+  const activateQuickstart = useCallback(async () => {
+    if (!quickstartVisible || quickstartBusyRef.current) return;
+    const expected = quickstartPreview;
+    quickstartBusyRef.current = true;
+    setQuickstartBusy(true);
+    setQuickstartError(null);
+    try {
+      const result = await invoke("activate_terminal_quickstart", { expected });
+      if (activeTabRef.current === expected.tabId) {
+        setQuickstartPreview(result.preview);
+        if (!result.launched) setQuickstartError(result.preview?.rules.length
+          ? "Quickstart changed. Review the updated commands and try again."
+          : "Quickstart is no longer available. The terminal or matching rules changed.");
+      }
+    } catch (error) {
+      setQuickstartError(error?.message || String(error));
+    } finally {
+      quickstartBusyRef.current = false;
+      setQuickstartBusy(false);
+      if (activeTabRef.current === expected.tabId) {
+        document.querySelector(`[data-pane-id="${CSS.escape(expected.paneId)}"] .xterm-helper-textarea`)?.focus();
+      }
+    }
+  }, [quickstartVisible, quickstartPreview]);
+
+  useEffect(() => {
+    function handleQuickstart(event) {
+      if (!quickstartVisible) return;
+      if (event.key === "Escape" && !event.defaultPrevented && !event.isComposing
+        && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
+        && (event.target?.classList?.contains("xterm-helper-textarea")
+          || event.target?.closest?.(".terminal-quickstart-bar"))) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        dismissQuickstart();
+        return;
+      }
+      const matches = matchesTerminalShortcut(event, settings.shortcuts.quickstart, undefined, { allowRepeat: true });
+      if (event.repeat && matches && event.target?.classList?.contains("xterm-helper-textarea")) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
+      if (!canHandleQuickstartShortcut(event, matches)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      activateQuickstart();
+    }
+    window.addEventListener("keydown", handleQuickstart, true);
+    return () => window.removeEventListener("keydown", handleQuickstart, true);
+  }, [activateQuickstart, dismissQuickstart, quickstartVisible, settings.shortcuts.quickstart]);
+
 
   useEffect(() => {
     if (!window.__TAURI_INTERNALS__) return undefined;
@@ -1267,6 +1476,22 @@ export function TerminalWorkspace() {
   return (
     <TerminalDropRegistry.Provider value={dropRegistry}>
       <div className="terminal-workspace">
+        {quickstartVisible && (
+          <TerminalQuickstartBar key={`${quickstartPreview.tabId}:${quickstartPreview.paneId}:${quickstartPreview.cwd}`} paneId={quickstartPreview.paneId}>
+            <Button type="button" size="sm" className="h-6 px-2 text-xs" disabled={quickstartBusy} onClick={activateQuickstart}>
+              {quickstartBusy ? "Starting…" : "Quickstart"} <Kbd>{formatShortcut(settings.shortcuts.quickstart)}</Kbd>
+            </Button>
+            <span className="terminal-quickstart-commands" title={quickstartPreview.rules.map((rule) => rule.command).join(" · ")}>
+              {quickstartPreview.rules.map((rule) => rule.command).join(" · ")}
+            </span>
+            <button type="button" className="terminal-quickstart-dismiss" aria-label="Dismiss Quickstart" title="Dismiss Quickstart (Esc)" disabled={quickstartBusy} onClick={dismissQuickstart}>
+              <X className="size-3.5" aria-hidden="true" /><Kbd>Esc</Kbd>
+            </button>
+          </TerminalQuickstartBar>
+        )}
+        {quickstartError && (
+          <div className="terminal-file-drop-error" role="alert"><span>{quickstartError}</span><button type="button" aria-label="Dismiss Quickstart error" onClick={() => setQuickstartError(null)}>×</button></div>
+        )}
         {terminalTabs.map((tab) => (
           <TerminalTabSurface
             key={tab.id}

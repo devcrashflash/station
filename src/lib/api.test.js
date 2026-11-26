@@ -1,3 +1,4 @@
+import { defaultQuickstartRules } from "./terminalQuickstart.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 
@@ -281,6 +282,7 @@ test("local fallback stores terminal settings and restores defaults", async () =
     horizontalSpacing: 100,
     scrollbackLines: 10000,
     shortcuts: DEFAULT_TERMINAL_SHORTCUTS,
+    quickstartRules: defaultQuickstartRules(),
     profileDirectory: "~",
   });
   assert.deepEqual(await api.saveTerminalSettings({
@@ -312,6 +314,7 @@ test("local fallback stores terminal settings and restores defaults", async () =
     horizontalSpacing: 120,
     scrollbackLines: 25000,
     shortcuts: DEFAULT_TERMINAL_SHORTCUTS,
+    quickstartRules: defaultQuickstartRules(),
     profileDirectory: "~",
   });
   assert.deepEqual(await api.saveTerminalSettings({ newTabDirectory: "", newPaneDirectory: "", inactivePaneOpacity: 0.65, closeTerminalsOnAppExit: false, fontFamily: "", fontWeight: 1200, fontStyle: "invalid", fontSize: 13, lineHeight: 1, horizontalSpacing: 3, scrollbackLines: 200000 }), {
@@ -329,6 +332,7 @@ test("local fallback stores terminal settings and restores defaults", async () =
     horizontalSpacing: 100,
     scrollbackLines: 100000,
     shortcuts: DEFAULT_TERMINAL_SHORTCUTS,
+    quickstartRules: defaultQuickstartRules(),
     profileDirectory: "~",
   });
   assert.equal((await api.saveTerminalSettings({ copyOnSelection: true })).copyOnSelection, true);

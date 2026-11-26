@@ -1,6 +1,7 @@
 export function defaultTerminalShortcuts(platform) {
   const paneFocusModifier = platformIsMac(platform) ? "Super+Alt" : "Alt";
   return {
+    quickstart: "CommandOrControl+KeyS",
     splitColumns: "CommandOrControl+KeyD",
     splitRows: "CommandOrControl+Shift+KeyD",
     search: "CommandOrControl+KeyF",
@@ -17,6 +18,7 @@ export function defaultTerminalShortcuts(platform) {
 export const DEFAULT_TERMINAL_SHORTCUTS = Object.freeze(defaultTerminalShortcuts());
 
 export const TERMINAL_SHORTCUT_ACTIONS = Object.freeze([
+  { id: "quickstart", label: "Quickstart" },
   { id: "splitColumns", label: "Split pane right" },
   { id: "splitRows", label: "Split pane down" },
   { id: "search", label: "Search terminal output" },
@@ -114,10 +116,20 @@ export function shortcutsMatch(left, right, platform) {
 
 export function normalizeTerminalShortcuts(shortcuts = {}, platform) {
   const defaults = defaultTerminalShortcuts(platform);
-  return Object.fromEntries(Object.entries(defaults).map(([id, fallback]) => [
+  const normalized = Object.fromEntries(Object.entries(defaults).map(([id, fallback]) => [
     id,
     shortcutParts(shortcuts?.[id]) ? shortcuts[id] : fallback,
   ]));
+  // A legacy action may already use Cmd/Ctrl+S. Preserve it when adding Quickstart.
+  if (!Object.prototype.hasOwnProperty.call(shortcuts || {}, "quickstart")) {
+    const used = new Set(Object.entries(normalized).filter(([id]) => id !== "quickstart")
+      .map(([, shortcut]) => shortcutSignature(shortcut, platform)));
+    if (used.has(shortcutSignature(normalized.quickstart, platform))) {
+      normalized.quickstart = ["CommandOrControl+Shift+KeyS", ...Array.from({ length: 12 }, (_, index) => `CommandOrControl+Alt+Shift+F${index + 1}`)]
+        .find((shortcut) => !used.has(shortcutSignature(shortcut, platform)));
+    }
+  }
+  return normalized;
 }
 
 export function matchesTerminalShortcut(event, shortcut, platform, { allowRepeat = false } = {}) {
