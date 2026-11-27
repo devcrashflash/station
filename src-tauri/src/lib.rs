@@ -1731,6 +1731,8 @@ pub fn run() {
             terminal_tabs::terminal_resize,
             terminal_tabs::terminal_set_title,
             terminal_tabs::terminal_set_cwd,
+            terminal_tabs::refresh_terminal_cwd,
+            terminal_tabs::list_terminal_tab_projects,
             terminal_tabs::resolve_terminal_paths,
             terminal_tabs::open_terminal_path,
             list_projects,
@@ -10068,49 +10070,73 @@ fn list_projects(state: tauri::State<'_, AppState>) -> Result<Vec<Project>, Stri
 
 #[tauri::command]
 fn create_project(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     name: String,
     icon: Option<String>,
     color: Option<String>,
 ) -> Result<Project, String> {
-    let db = state.db.lock().map_err(db_error)?;
-    create_project_in_db(&db, name, icon, color).map_err(db_error)
+    let result = (|| {
+        let db = state.db.lock().map_err(db_error)?;
+        create_project_in_db(&db, name, icon, color).map_err(db_error)
+    })();
+    if result.is_ok() {
+        let _ = app.emit("terminal-projects-changed", ());
+    }
+    result
 }
 
 #[tauri::command]
 fn update_project(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     id: String,
     name: Option<String>,
     icon: Option<String>,
     color: Option<String>,
 ) -> Result<Project, String> {
-    let db = state.db.lock().map_err(db_error)?;
-    let existing = get_project(&db, &id)
-        .map_err(db_error)?
-        .ok_or_else(|| "Project not found".to_string())?;
-    let updated_name = name.unwrap_or(existing.name);
-    let updated_icon = icon.unwrap_or(existing.icon);
-    let updated_color = color
-        .map(|value| normalize_project_color(Some(value)))
-        .unwrap_or(existing.color);
-    let timestamp = now_millis();
-    db.execute(
-        "UPDATE projects SET name = ?1, icon = ?2, color = ?3, updated_at = ?4 WHERE id = ?5",
-        params![updated_name, updated_icon, updated_color, timestamp, id],
-    )
-    .map_err(db_error)?;
-    get_project(&db, &id)
-        .map_err(db_error)?
-        .ok_or_else(|| "Project not found".to_string())
+    let result = (|| {
+        let db = state.db.lock().map_err(db_error)?;
+        let existing = get_project(&db, &id)
+            .map_err(db_error)?
+            .ok_or_else(|| "Project not found".to_string())?;
+        let updated_name = name.unwrap_or(existing.name);
+        let updated_icon = icon.unwrap_or(existing.icon);
+        let updated_color = color
+            .map(|value| normalize_project_color(Some(value)))
+            .unwrap_or(existing.color);
+        let timestamp = now_millis();
+        db.execute(
+            "UPDATE projects SET name = ?1, icon = ?2, color = ?3, updated_at = ?4 WHERE id = ?5",
+            params![updated_name, updated_icon, updated_color, timestamp, id],
+        )
+        .map_err(db_error)?;
+        get_project(&db, &id)
+            .map_err(db_error)?
+            .ok_or_else(|| "Project not found".to_string())
+    })();
+    if result.is_ok() {
+        let _ = app.emit("terminal-projects-changed", ());
+    }
+    result
 }
 
 #[tauri::command]
-fn delete_project(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
-    let db = state.db.lock().map_err(db_error)?;
-    db.execute("DELETE FROM projects WHERE id = ?1", params![id])
-        .map_err(db_error)?;
-    Ok(())
+fn delete_project(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let result = (|| {
+        let db = state.db.lock().map_err(db_error)?;
+        db.execute("DELETE FROM projects WHERE id = ?1", params![id])
+            .map_err(db_error)?;
+        Ok(())
+    })();
+    if result.is_ok() {
+        let _ = app.emit("terminal-projects-changed", ());
+    }
+    result
 }
 
 #[tauri::command]
@@ -10200,19 +10226,36 @@ fn list_local_resources(
 
 #[tauri::command]
 fn save_local_resource(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     input: LocalResourceInput,
 ) -> Result<LocalResource, String> {
-    let db = state.db.lock().map_err(db_error)?;
-    save_local_resource_in_db(&db, input)
+    let result = (|| {
+        let db = state.db.lock().map_err(db_error)?;
+        save_local_resource_in_db(&db, input)
+    })();
+    if result.is_ok() {
+        let _ = app.emit("terminal-projects-changed", ());
+    }
+    result
 }
 
 #[tauri::command]
-fn delete_local_resource(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
-    let db = state.db.lock().map_err(db_error)?;
-    db.execute("DELETE FROM local_resources WHERE id = ?1", params![id])
-        .map_err(db_error)?;
-    Ok(())
+fn delete_local_resource(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let result = (|| {
+        let db = state.db.lock().map_err(db_error)?;
+        db.execute("DELETE FROM local_resources WHERE id = ?1", params![id])
+            .map_err(db_error)?;
+        Ok(())
+    })();
+    if result.is_ok() {
+        let _ = app.emit("terminal-projects-changed", ());
+    }
+    result
 }
 
 #[tauri::command]

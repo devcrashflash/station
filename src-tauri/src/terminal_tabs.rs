@@ -1,7 +1,6 @@
 #[path = "terminal_quickstart.rs"]
 pub mod quickstart;
 
-#[cfg(windows)]
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use rusqlite::{params, Connection as SqliteConnection};
@@ -35,6 +34,7 @@ const NEW_TAB_DIRECTORY_SETTING_KEY: &str = "terminal_new_tab_directory";
 const NEW_PANE_DIRECTORY_SETTING_KEY: &str = "terminal_new_pane_directory";
 const INACTIVE_PANE_OPACITY_SETTING_KEY: &str = "terminal_inactive_pane_opacity";
 const CLOSE_TERMINALS_ON_APP_EXIT_SETTING_KEY: &str = "terminal_close_on_app_exit";
+const SHOW_PROJECT_ICONS_SETTING_KEY: &str = "terminal_show_project_icons";
 const COPY_ON_SELECTION_SETTING_KEY: &str = "terminal_copy_on_selection";
 const FONT_FAMILY_SETTING_KEY: &str = "terminal_font_family";
 const FONT_WEIGHT_SETTING_KEY: &str = "terminal_font_weight";
@@ -112,6 +112,7 @@ pub struct TerminalSettings {
     inactive_pane_opacity: f64,
     close_terminals_on_app_exit: bool,
     copy_on_selection: bool,
+    show_project_icons: bool,
     font_family: String,
     font_face: Option<String>,
     font_weight: u16,
@@ -175,6 +176,7 @@ pub struct TerminalSettingsInput {
     inactive_pane_opacity: Option<f64>,
     close_terminals_on_app_exit: Option<bool>,
     copy_on_selection: Option<bool>,
+    show_project_icons: Option<bool>,
     font_family: Option<String>,
     font_weight: Option<u16>,
     font_style: Option<String>,
@@ -246,6 +248,7 @@ pub struct WorkspaceTab {
     id: String,
     kind: &'static str,
     title: String,
+    icon_directories: Vec<String>,
     closable: bool,
     running: bool,
     exit_code: Option<u32>,
@@ -740,6 +743,16 @@ impl TerminalTab {
             id: self.id.clone(),
             kind: "terminal",
             title: self.title(),
+            icon_directories: {
+                let mut ids = Vec::new();
+                self.root.pane_ids(&mut ids);
+                ids.iter()
+                    .filter_map(|id| match self.root.find_pane(id) {
+                        Some(PaneNode::Pane { cwd, .. }) => cwd.clone(),
+                        _ => None,
+                    })
+                    .collect()
+            },
             closable: true,
             running: self.root.any_running(),
             exit_code: self.exit_code(),
@@ -760,6 +773,7 @@ fn snapshot_from_runtime(runtime: &TerminalTabsRuntime) -> WorkspaceTabsSnapshot
         id: MAIN_TAB_ID.to_string(),
         kind: "main",
         title: "Inbox".to_string(),
+        icon_directories: Vec::new(),
         closable: false,
         running: true,
         exit_code: None,
@@ -2285,6 +2299,14 @@ fn close_terminals_on_app_exit(db: &SqliteConnection) -> bool {
         .is_some_and(|value| value == "true")
 }
 
+fn show_project_icons(db: &SqliteConnection) -> bool {
+    get_app_setting(db, SHOW_PROJECT_ICONS_SETTING_KEY)
+        .ok()
+        .flatten()
+        .as_deref()
+        != Some("false")
+}
+
 fn copy_on_selection(db: &SqliteConnection) -> bool {
     match get_app_setting(db, COPY_ON_SELECTION_SETTING_KEY)
         .ok()
@@ -3000,6 +3022,7 @@ pub fn list_terminal_settings(
         inactive_pane_opacity: inactive_pane_opacity(&db),
         close_terminals_on_app_exit: close_terminals_on_app_exit(&db),
         copy_on_selection: copy_on_selection(&db),
+        show_project_icons: show_project_icons(&db),
         font_family,
         font_face,
         font_weight,
@@ -3115,6 +3138,9 @@ pub fn save_terminal_settings(
         let copy_on_selection = input
             .copy_on_selection
             .unwrap_or_else(|| copy_on_selection(&db));
+        let show_project_icons = input
+            .show_project_icons
+            .unwrap_or_else(|| show_project_icons(&db));
         let shortcuts = requested_shortcuts.unwrap_or_else(|| terminal_shortcuts(&db));
         validate_terminal_shortcuts(&shortcuts)?;
         let quickstart_rules = match input.quickstart_rules {
@@ -3122,6 +3148,13 @@ pub fn save_terminal_settings(
             None => quickstart::load(&db)?,
         };
         quickstart::validate_for_save(&quickstart_rules)?;
+        set_app_setting(
+            &db,
+            SHOW_PROJECT_ICONS_SETTING_KEY,
+            Some(if show_project_icons { "true" } else { "false" }),
+        )
+        .map_err(db_error)?;
+
         set_app_setting(
             &db,
             NEW_TAB_DIRECTORY_SETTING_KEY,
@@ -3935,8 +3968,250 @@ pub fn terminal_set_cwd(
         layout
     };
     emit_layout(&app, &layout);
+    emit_snapshot(&app, &state.snapshot()?);
     persist_terminal_tabs_in_background(&app);
     Ok(layout)
+}
+
+fn update_terminal_cwd(
+    runtime: &mut TerminalTabsRuntime,
+    tab_id: &str,
+    pane_id: &str,
+    path: String,
+) -> Option<(TerminalLayout, WorkspaceTabsSnapshot)> {
+    let tab = runtime.tabs.iter_mut().find(|tab| tab.id == tab_id)?;
+    let PaneNode::Pane { cwd, .. } = tab.root.find_pane_mut(pane_id)? else {
+        return None;
+    };
+    if cwd.as_deref() == Some(path.as_str()) {
+        return None;
+    }
+    *cwd = Some(path);
+    let layout = tab.layout();
+    mark_terminal_tabs_dirty(runtime);
+    Some((layout, snapshot_from_runtime(runtime)))
+}
+
+#[tauri::command]
+pub async fn refresh_terminal_cwd(
+    app: tauri::AppHandle,
+    webview: Webview,
+    tab_id: String,
+    pane_id: String,
+) -> Result<(), String> {
+    validate_terminal_caller(&webview, &tab_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<TerminalTabsState>();
+        let process_id = {
+            let runtime = state.runtime.lock().map_err(db_error)?;
+            validate_pane(&runtime, &tab_id, &pane_id)?;
+            runtime
+                .sessions
+                .get(&pane_id)
+                .and_then(|session| session.process_id)
+        };
+        // Process lookup can spawn lsof on macOS; keep it off the UI thread and outside locks.
+        let Some(path) = process_id.and_then(process_cwd) else {
+            return Ok(());
+        };
+        let Some(path) = path.to_str().filter(|_| path.is_dir()) else {
+            return Ok(());
+        };
+        let changed = {
+            let mut runtime = state.runtime.lock().map_err(db_error)?;
+            if runtime
+                .sessions
+                .get(&pane_id)
+                .and_then(|session| session.process_id)
+                != process_id
+            {
+                return Ok(());
+            }
+            update_terminal_cwd(&mut runtime, &tab_id, &pane_id, path.to_string())
+        };
+        if let Some((layout, snapshot)) = changed {
+            emit_layout(&app, &layout);
+            emit_snapshot(&app, &snapshot);
+            persist_terminal_tabs_in_background(&app);
+        }
+        Ok(())
+    })
+    .await
+    .map_err(db_error)?
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalTabIcon {
+    id: String,
+    name: String,
+    project_name: Option<String>,
+    color: Option<String>,
+    favicon: Option<String>,
+}
+
+struct TerminalProjectDirectory {
+    id: String,
+    name: String,
+    color: String,
+    path: PathBuf,
+}
+
+fn terminal_favicon(
+    directory: &Path,
+    project_directory: Option<&Path>,
+) -> Option<(String, String)> {
+    let mut directories = vec![directory];
+    if let Some(project_directory) = project_directory.filter(|path| *path != directory) {
+        directories.push(project_directory);
+    }
+    for directory in directories {
+        for relative in [
+            "favicon.ico",
+            "public/favicon.ico",
+            "assets/icon-prod-ios.png",
+            "assets/icon.png",
+        ] {
+            let path = directory.join(relative);
+            // Read only these common filenames, bounded to 1 MiB.
+            if let Ok(file) = fs::File::open(&path) {
+                let mut bytes = Vec::new();
+                if file.take(1024 * 1024 + 1).read_to_end(&mut bytes).is_ok()
+                    && bytes.len() <= 1024 * 1024
+                {
+                    let mime = if bytes.starts_with(&[0, 0, 1, 0]) {
+                        "image/x-icon"
+                    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                        "image/png"
+                    } else {
+                        continue;
+                    };
+                    return Some((
+                        path.to_string_lossy().into_owned(),
+                        format!("data:{mime};base64,{}", BASE64_STANDARD.encode(bytes)),
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn terminal_tab_icons(
+    root: &PaneNode,
+    projects: &[TerminalProjectDirectory],
+) -> Vec<TerminalTabIcon> {
+    let mut pane_ids = Vec::new();
+    root.pane_ids(&mut pane_ids);
+    let mut icons: Vec<TerminalTabIcon> = Vec::new();
+    for pane_id in pane_ids {
+        let Some(PaneNode::Pane { cwd: Some(cwd), .. }) = root.find_pane(&pane_id) else {
+            continue;
+        };
+        let Ok(directory) = fs::canonicalize(cwd) else {
+            continue;
+        };
+        let matching: Vec<_> = projects
+            .iter()
+            .filter(|project| directory.starts_with(&project.path))
+            .collect();
+        if matching.is_empty() {
+            if let Some((path, favicon)) = terminal_favicon(&directory, None) {
+                if !icons.iter().any(|icon| icon.id == path) {
+                    icons.push(TerminalTabIcon {
+                        id: path,
+                        name: directory
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned(),
+                        project_name: None,
+                        color: None,
+                        favicon: Some(favicon),
+                    });
+                }
+            }
+        } else {
+            for project in matching {
+                let favicon =
+                    terminal_favicon(&directory, Some(&project.path)).map(|(_, data)| data);
+                if let Some(icon) = icons.iter_mut().find(|icon| icon.id == project.id) {
+                    if icon.favicon.is_none() {
+                        icon.favicon = favicon;
+                    }
+                } else {
+                    icons.push(TerminalTabIcon {
+                        id: project.id.clone(),
+                        name: project.name.clone(),
+                        project_name: Some(project.name.clone()),
+                        color: Some(project.color.clone()),
+                        favicon,
+                    });
+                }
+            }
+        }
+    }
+    // Project order is stable regardless of which split pane currently has focus.
+    icons.sort_by_key(|icon| {
+        projects
+            .iter()
+            .position(|project| project.id == icon.id)
+            .unwrap_or(usize::MAX)
+    });
+    icons
+}
+
+#[tauri::command]
+pub fn list_terminal_tab_projects(
+    state: tauri::State<'_, AppState>,
+    terminal_state: tauri::State<'_, TerminalTabsState>,
+) -> Result<HashMap<String, Vec<TerminalTabIcon>>, String> {
+    // Never hold the database and terminal runtime locks together.
+    let projects = {
+        let db = state.db.lock().map_err(db_error)?;
+        let mut statement = db
+            .prepare(
+                "SELECT p.id, p.name, p.color, l.path FROM projects p
+             JOIN local_resources l ON l.project_id = p.id
+             ORDER BY p.created_at ASC, p.id ASC, length(l.path) DESC",
+            )
+            .map_err(db_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(db_error)?;
+        let mut projects = Vec::new();
+        for row in rows {
+            let (id, name, color, path) = row.map_err(db_error)?;
+            if let Ok(path) = fs::canonicalize(path) {
+                projects.push(TerminalProjectDirectory {
+                    id,
+                    name,
+                    color,
+                    path,
+                });
+            }
+        }
+        projects
+    };
+    let tabs: Vec<_> = {
+        let runtime = terminal_state.runtime.lock().map_err(db_error)?;
+        runtime
+            .tabs
+            .iter()
+            .map(|tab| (tab.id.clone(), tab.root.clone()))
+            .collect()
+    };
+    Ok(tabs
+        .into_iter()
+        .map(|(id, root)| (id, terminal_tab_icons(&root, &projects)))
+        .collect())
 }
 
 #[cfg(test)]
@@ -4012,6 +4287,159 @@ mod tests {
         let root = std::env::temp_dir().join(format!("devcrashflash-{name}-{suffix}"));
         std::fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn live_directory_updates_refresh_icon_paths_only_when_the_directory_changes() {
+        let mut runtime = runtime(&["one"], "one");
+        let revision = runtime.persistence_revision;
+        let (layout, snapshot) =
+            update_terminal_cwd(&mut runtime, "one", "one", "/tmp/project".into()).unwrap();
+        assert!(
+            matches!(layout.root, PaneNode::Pane { cwd: Some(ref cwd), .. } if cwd == "/tmp/project")
+        );
+        assert_eq!(snapshot.tabs[1].icon_directories, vec!["/tmp/project"]);
+        assert_eq!(runtime.persistence_revision, revision + 1);
+        assert!(update_terminal_cwd(&mut runtime, "one", "one", "/tmp/project".into()).is_none());
+        assert_eq!(runtime.persistence_revision, revision + 1);
+        assert!(update_terminal_cwd(&mut runtime, "closed", "one", "/tmp".into()).is_none());
+    }
+
+    #[test]
+    fn favicon_lookup_is_bounded_to_common_files_and_prefers_current_directory() {
+        let root = temp_shell_home("tab-favicon");
+        let nested = root.join("src/components");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(root.join("public")).unwrap();
+        let ico = [0, 0, 1, 0, 1, 0];
+        fs::write(root.join("public/favicon.ico"), ico).unwrap();
+        // Unconnected directories do not walk arbitrary ancestors.
+        assert!(terminal_favicon(&nested, None).is_none());
+        let (path, _) = terminal_favicon(&nested, Some(&root)).unwrap();
+        assert_eq!(Path::new(&path), root.join("public/favicon.ico"));
+        fs::write(root.join("favicon.ico"), ico).unwrap();
+        let (path, _) = terminal_favicon(&nested, Some(&root)).unwrap();
+        assert_eq!(Path::new(&path), root.join("favicon.ico"));
+        fs::create_dir_all(nested.join("public")).unwrap();
+        fs::write(nested.join("public/favicon.ico"), ico).unwrap();
+        let (path, _) = terminal_favicon(&nested, Some(&root)).unwrap();
+        assert_eq!(Path::new(&path), nested.join("public/favicon.ico"));
+        fs::write(nested.join("favicon.ico"), b"invalid").unwrap();
+        assert!(terminal_favicon(&nested, None).is_some());
+        fs::write(nested.join("favicon.ico"), ico).unwrap();
+        let (path, data) = terminal_favicon(&nested, None).unwrap();
+        assert_eq!(Path::new(&path), nested.join("favicon.ico"));
+        assert!(data.starts_with("data:image/x-icon;base64,"));
+        fs::write(nested.join("favicon.ico"), vec![0; 1024 * 1024 + 1]).unwrap();
+        fs::remove_file(nested.join("public/favicon.ico")).unwrap();
+        assert!(terminal_favicon(&nested, None).is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn app_icon_lookup_supports_png_assets_after_favicons() {
+        let root = temp_shell_home("tab-png-icon");
+        let png = b"\x89PNG\r\n\x1a\n";
+        fs::create_dir_all(root.join("assets")).unwrap();
+        fs::write(root.join("assets/icon.png"), png).unwrap();
+        let (path, data) = terminal_favicon(&root, None).unwrap();
+        assert_eq!(Path::new(&path), root.join("assets/icon.png"));
+        assert!(data.starts_with("data:image/png;base64,"));
+        fs::write(root.join("assets/icon-prod-ios.png"), png).unwrap();
+        assert_eq!(
+            Path::new(&terminal_favicon(&root, None).unwrap().0),
+            root.join("assets/icon-prod-ios.png")
+        );
+        fs::write(root.join("favicon.ico"), [0, 0, 1, 0, 1, 0]).unwrap();
+        assert_eq!(
+            Path::new(&terminal_favicon(&root, None).unwrap().0),
+            root.join("favicon.ico")
+        );
+        fs::remove_file(root.join("favicon.ico")).unwrap();
+        fs::write(root.join("assets/icon-prod-ios.png"), b"invalid png").unwrap();
+        assert_eq!(
+            Path::new(&terminal_favicon(&root, None).unwrap().0),
+            root.join("assets/icon.png")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn terminal_icons_match_projects_deduplicate_panes_and_fall_back() {
+        let root = temp_shell_home("tab-projects");
+        let app = root.join("app");
+        let nested = app.join("src");
+        let sibling = root.join("app-other");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(&sibling).unwrap();
+        let projects = vec![
+            TerminalProjectDirectory {
+                id: "a".into(),
+                name: "App".into(),
+                color: "#2563eb".into(),
+                path: fs::canonicalize(&app).unwrap(),
+            },
+            TerminalProjectDirectory {
+                id: "b".into(),
+                name: "Other".into(),
+                color: "#16a34a".into(),
+                path: fs::canonicalize(&sibling).unwrap(),
+            },
+        ];
+        let mut pane = PaneNode::pane("one", "~", Some(nested.to_string_lossy().into_owned()));
+        let icons = terminal_tab_icons(&pane, &projects);
+        assert_eq!(icons.len(), 1);
+        assert_eq!(icons[0].project_name.as_deref(), Some("App"));
+        assert!(icons[0].favicon.is_none());
+        pane.replace_pane_with_split(
+            "one",
+            "split".into(),
+            SplitAxis::Columns,
+            PaneNode::pane("two", "~", Some(app.to_string_lossy().into_owned())),
+        );
+        assert_eq!(terminal_tab_icons(&pane, &projects).len(), 1);
+        pane.replace_pane_with_split(
+            "two",
+            "split-two".into(),
+            SplitAxis::Rows,
+            PaneNode::pane("three", "~", Some(sibling.to_string_lossy().into_owned())),
+        );
+        assert_eq!(
+            terminal_tab_icons(&pane, &projects)
+                .iter()
+                .map(|icon| icon.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        fs::create_dir_all(app.join("public")).unwrap();
+        fs::write(app.join("public/favicon.ico"), [0, 0, 1, 0, 1, 0]).unwrap();
+        assert!(terminal_tab_icons(&pane, &projects)[0].favicon.is_some());
+        let unconnected = PaneNode::pane("free", "~", Some(app.to_string_lossy().into_owned()));
+        let icons = terminal_tab_icons(&unconnected, &[]);
+        assert_eq!(icons.len(), 1);
+        assert!(icons[0].project_name.is_none());
+        assert!(icons[0].favicon.is_some());
+        assert!(terminal_tab_icons(&PaneNode::pane("missing", "~", None), &projects).is_empty());
+        #[cfg(unix)]
+        {
+            let alias = root.join("alias");
+            std::os::unix::fs::symlink(&nested, &alias).unwrap();
+            let linked = PaneNode::pane("linked", "~", Some(alias.to_string_lossy().into_owned()));
+            assert_eq!(terminal_tab_icons(&linked, &projects)[0].id, "a");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn project_icons_setting_defaults_to_enabled_and_respects_disabled() {
+        let db = SqliteConnection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);")
+            .unwrap();
+        assert!(show_project_icons(&db));
+        set_app_setting(&db, SHOW_PROJECT_ICONS_SETTING_KEY, Some("false")).unwrap();
+        assert!(!show_project_icons(&db));
+        set_app_setting(&db, SHOW_PROJECT_ICONS_SETTING_KEY, Some("true")).unwrap();
+        assert!(show_project_icons(&db));
     }
 
     #[test]

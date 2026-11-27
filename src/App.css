@@ -369,6 +369,27 @@ body.terminal-window #root {
   white-space: nowrap;
 }
 
+.workspace-tab-app-icon,
+.workspace-tab-project-icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+.workspace-tab-app-icon {
+  object-fit: contain;
+}
+
+.workspace-tab-project-icon {
+  display: inline-grid;
+  place-items: center;
+  border-radius: 50%;
+  color: white;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+}
+
 .workspace-tab-waiting-dot {
   width: 6px;
   height: 6px;

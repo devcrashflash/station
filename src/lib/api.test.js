@@ -273,6 +273,7 @@ test("local fallback stores terminal settings and restores defaults", async () =
     inactivePaneOpacity: 0.65,
     closeTerminalsOnAppExit: false,
     copyOnSelection: true,
+    showProjectIcons: true,
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
     fontFace: null,
     fontWeight: 400,
@@ -291,6 +292,7 @@ test("local fallback stores terminal settings and restores defaults", async () =
     inactivePaneOpacity: 0.5,
     closeTerminalsOnAppExit: true,
     copyOnSelection: false,
+    showProjectIcons: false,
     fontFamily: "JetBrains Mono, monospace",
     fontFace: null,
     fontWeight: 100,
@@ -305,6 +307,7 @@ test("local fallback stores terminal settings and restores defaults", async () =
     inactivePaneOpacity: 0.5,
     closeTerminalsOnAppExit: true,
     copyOnSelection: false,
+    showProjectIcons: false,
     fontFamily: "JetBrains Mono, monospace",
     fontFace: null,
     fontWeight: 100,
@@ -323,6 +326,7 @@ test("local fallback stores terminal settings and restores defaults", async () =
     inactivePaneOpacity: 0.65,
     closeTerminalsOnAppExit: false,
     copyOnSelection: false,
+    showProjectIcons: false,
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
     fontFace: null,
     fontWeight: 900,
@@ -336,6 +340,8 @@ test("local fallback stores terminal settings and restores defaults", async () =
     profileDirectory: "~",
   });
   assert.equal((await api.saveTerminalSettings({ copyOnSelection: true })).copyOnSelection, true);
+  assert.equal((await api.listTerminalSettings()).showProjectIcons, false);
+  assert.equal((await api.saveTerminalSettings({ showProjectIcons: true })).showProjectIcons, true);
   const customShortcuts = {
     ...DEFAULT_TERMINAL_SHORTCUTS,
     search: "Alt+KeyS",

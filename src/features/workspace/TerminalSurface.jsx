@@ -42,6 +42,7 @@ import {
   createTerminalLinkModifierController,
   isPrimaryTerminalLinkEvent,
 } from "@/lib/terminalLinks";
+import { createTerminalDirectorySync } from "@/lib/terminalDirectorySync";
 import { terminalCellLetterSpacing } from "@/lib/terminalFonts";
 import { createTerminalFileDropController } from "@/lib/terminalFileDrop";
 import { registerTerminalClipboard } from "@/lib/terminalClipboard";
@@ -466,7 +467,12 @@ function TerminalPane({
       );
       if (selection !== null) void copyTextToClipboard(selection);
     });
+    const directorySync = createTerminalDirectorySync(() => (
+      invoke("refresh_terminal_cwd", { tabId, paneId: pane.paneId })
+    ));
+    window.addEventListener("focus", directorySync.request);
     const writeParsedDisposable = terminal.onWriteParsed(() => {
+      directorySync.request();
       syncTerminalScrollbackState(terminal);
     });
     const cwdDisposable = terminal.parser.registerOscHandler(7, (data) => {
@@ -499,6 +505,8 @@ function TerminalPane({
       titleDisposable.dispose();
       selectionDisposable.dispose();
       writeParsedDisposable.dispose();
+      directorySync.dispose();
+      window.removeEventListener("focus", directorySync.request);
       cwdDisposable.dispose();
       clipboardDisposable.dispose();
       fileLinksDisposable.dispose();
@@ -522,6 +530,7 @@ function TerminalPane({
     }
     try {
       await attach(terminal, fit);
+      directorySync.request();
     } catch (error) {
       if (terminalRef.current === terminal) {
         setLifecycle({ running: false, exitCode: null, error: error?.message || String(error) });

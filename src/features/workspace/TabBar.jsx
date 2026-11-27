@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+import { getProjectInitial, normalizeProjectColor } from "@/lib/projectAvatar";
 import { api } from "@/lib/api";
 import {
   AI_SESSION_MONITOR_UPDATED_EVENT,
@@ -26,10 +28,40 @@ function sameIds(left, right) {
   return left.length === right.length && left.every((id, index) => id === right[index]);
 }
 
+function TerminalTabIcon({ icon }) {
+  const [failedSource, setFailedSource] = useState(null);
+  if (icon.favicon && icon.favicon !== failedSource) {
+    return (
+      <img
+        className="workspace-tab-app-icon"
+        src={icon.favicon}
+        alt={icon.name}
+        title={icon.name}
+        draggable={false}
+        onError={() => setFailedSource(icon.favicon)}
+      />
+    );
+  }
+  if (!icon.projectName) return null;
+  return (
+    <span
+      className="workspace-tab-project-icon"
+      style={{ backgroundColor: normalizeProjectColor(icon.color) }}
+      title={icon.projectName}
+      role="img"
+      aria-label={icon.projectName}
+    >
+      {getProjectInitial(icon.projectName)}
+    </span>
+  );
+}
+
 export function TabBar() {
   useSynchronizedTheme();
   const newTerminalShortcut = formatShortcut("CommandOrControl+KeyT");
   const [snapshot, setSnapshot] = useState(EMPTY_SNAPSHOT);
+  const [tabIcons, setTabIcons] = useState({});
+  const [showProjectIcons, setShowProjectIcons] = useState(true);
   const [tabDrag, setTabDrag] = useState(null);
   const [hasWaitingAiSession, setHasWaitingAiSession] = useState(false);
   const [waitingTerminalTabIds, setWaitingTerminalTabIds] = useState([]);
@@ -77,6 +109,64 @@ export function TabBar() {
     return () => {
       disposed = true;
       unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let enabled = true;
+    let request = 0;
+    let directorySignature = null;
+    const cleanups = [];
+
+    async function refresh() {
+      const currentRequest = ++request;
+      if (!enabled) return;
+      try {
+        const icons = await invoke("list_terminal_tab_projects");
+        if (!disposed && enabled && request === currentRequest) setTabIcons(icons);
+      } catch (error) {
+        if (!disposed) console.error(error);
+      }
+    }
+
+    function workspaceChanged({ payload }) {
+      const signature = JSON.stringify(payload.tabs
+        .filter((tab) => tab.kind === "terminal")
+        .map((tab) => [tab.id, tab.iconDirectories]));
+      if (signature === directorySignature) return;
+      directorySignature = signature;
+      refresh();
+    }
+
+    function applySettings(settings) {
+      enabled = settings.showProjectIcons ?? true;
+      setShowProjectIcons(enabled);
+      if (enabled) refresh();
+      else {
+        ++request;
+        setTabIcons({});
+      }
+    }
+
+    async function initialize() {
+      for (const [event, handler] of [
+        ["workspace-tabs-changed", workspaceChanged],
+        ["terminal-projects-changed", refresh],
+        ["terminal-settings-changed", ({ payload }) => applySettings(payload)],
+      ]) {
+        const cleanup = await listen(event, handler);
+        if (disposed) { cleanup(); return; }
+        cleanups.push(cleanup);
+      }
+      const settings = await api.listTerminalSettings();
+      if (!disposed) applySettings(settings);
+    }
+    initialize().catch(console.error);
+    return () => {
+      disposed = true;
+      ++request;
+      cleanups.forEach((cleanup) => cleanup());
     };
   }, []);
 
@@ -262,6 +352,9 @@ export function TabBar() {
                     role="img"
                   />
                 )}
+                {showProjectIcons && tab.kind === "terminal" && (tabIcons[tab.id] || []).map((icon) => (
+                  <TerminalTabIcon key={icon.id} icon={icon} />
+                ))}
                 <span className="workspace-tab-title">{tab.title}</span>
                 {shortcutNumber !== null && (
                   <span className="workspace-tab-shortcut" aria-hidden="true">⌘{shortcutNumber}</span>

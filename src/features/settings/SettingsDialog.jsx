@@ -1760,6 +1760,7 @@ function TerminalTab({
   const [newPaneDirectory, setNewPaneDirectory] = useState(settings?.newPaneDirectory || "");
   const [inactivePaneOpacity, setInactivePaneOpacity] = useState(settings?.inactivePaneOpacity ?? 0.65);
   const [closeTerminalsOnAppExit, setCloseTerminalsOnAppExit] = useState(settings?.closeTerminalsOnAppExit ?? false);
+  const [showProjectIcons, setShowProjectIcons] = useState(settings?.showProjectIcons ?? true);
   const [copyOnSelection, setCopyOnSelection] = useState(settings?.copyOnSelection ?? true);
   const [fontFamily, setFontFamily] = useState(settings?.fontFamily || "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace");
   const [fontWeight, setFontWeight] = useState(settings?.fontWeight ?? 400);
@@ -1785,6 +1786,7 @@ function TerminalTab({
     setInactivePaneOpacity(settings?.inactivePaneOpacity ?? 0.65);
     setCloseTerminalsOnAppExit(settings?.closeTerminalsOnAppExit ?? false);
     setCopyOnSelection(settings?.copyOnSelection ?? true);
+    setShowProjectIcons(settings?.showProjectIcons ?? true);
     setFontFamily(settings?.fontFamily || "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace");
     setFontWeight(settings?.fontWeight ?? 400);
     setFontStyle(settings?.fontStyle || "normal");
@@ -1794,7 +1796,7 @@ function TerminalTab({
     setScrollbackLines(String(settings?.scrollbackLines ?? 10_000));
     setQuickstartRules(settings?.quickstartRules ?? defaultQuickstartRules());
     setShortcuts(normalizeTerminalShortcuts(settings?.shortcuts));
-  }, [settings?.quickstartRules, settings?.newTabDirectory, settings?.newPaneDirectory, settings?.inactivePaneOpacity, settings?.closeTerminalsOnAppExit, settings?.copyOnSelection, settings?.fontFamily, settings?.fontWeight, settings?.fontStyle, settings?.fontSize, settings?.lineHeight, settings?.horizontalSpacing, settings?.scrollbackLines, settings?.shortcuts]);
+  }, [settings?.quickstartRules, settings?.newTabDirectory, settings?.newPaneDirectory, settings?.inactivePaneOpacity, settings?.closeTerminalsOnAppExit, settings?.copyOnSelection, settings?.showProjectIcons, settings?.fontFamily, settings?.fontWeight, settings?.fontStyle, settings?.fontSize, settings?.lineHeight, settings?.horizontalSpacing, settings?.scrollbackLines, settings?.shortcuts]);
 
   useEffect(() => () => setTerminalShortcutRecording(false), []);
 
@@ -1958,6 +1960,7 @@ function TerminalTab({
         inactivePaneOpacity,
         closeTerminalsOnAppExit,
         copyOnSelection,
+        showProjectIcons,
         fontFamily,
         fontWeight,
         fontStyle,
@@ -2143,6 +2146,19 @@ function TerminalTab({
           />
           <p className="text-xs text-muted-foreground">Controls how strongly terminal panes without focus are dimmed.</p>
         </Field>
+
+        <label className="flex items-start gap-3 rounded-md border bg-muted/20 p-3">
+          <Checkbox
+            checked={showProjectIcons}
+            onCheckedChange={(checked) => setShowProjectIcons(checked === true)}
+          />
+          <div>
+            <p className="text-sm font-medium">Show project icons in terminal tabs</p>
+            <p className="text-xs text-muted-foreground">
+              Prefer a favicon or app icon from assets, then the project’s colored initial.
+            </p>
+          </div>
+        </label>
 
         <label className="flex items-start gap-3 rounded-md border bg-muted/20 p-3">
           <Checkbox

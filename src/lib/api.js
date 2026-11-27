@@ -65,6 +65,7 @@ const defaultState = {
     inactivePaneOpacity: 0.65,
     closeTerminalsOnAppExit: false,
     copyOnSelection: true,
+    showProjectIcons: true,
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
     fontFace: null,
     fontWeight: 400,
@@ -985,6 +986,9 @@ const local = {
       closeTerminalsOnAppExit: input.closeTerminalsOnAppExit
         ?? state.terminalSettings?.closeTerminalsOnAppExit
         ?? false,
+      showProjectIcons: input.showProjectIcons
+        ?? state.terminalSettings?.showProjectIcons
+        ?? true,
       copyOnSelection: input.copyOnSelection
         ?? state.terminalSettings?.copyOnSelection
         ?? true,
